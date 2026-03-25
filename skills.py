@@ -94,3 +94,24 @@ def shoot_goal(env, robot, robot_color):
     else:
         return np.array([0, 0, turn_to_point(robot, best_target), 0, 1.0])
 
+
+def shoot_at_goal_center(env, robot, team_color):
+    goal_x = -env.field.length / 2.0 if team_color == "yellow" else env.field.length / 2.0
+    goal_y = 0.0
+    target_point = np.array([goal_x, goal_y])
+    
+    
+    v_theta = turn_to_point(robot, target_point)
+    if abs(v_theta) < 0.1:
+
+        return np.array([0.0, 0.0, 0.0, 4.0, 0.0])
+    else:
+        return np.array([0.0, 0.0, v_theta, 0.0, 1.0])
+
+def dribble_to_point(robot, point, speed=0.7):
+
+    v_x, v_y = move_to_point(robot, point, speed=speed)
+    v_theta = turn_to_point(robot, point)
+    
+    
+    return np.array([v_x, v_y, v_theta, 0.0, 1.0])

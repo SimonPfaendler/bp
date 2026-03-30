@@ -1,8 +1,8 @@
-import gym
+import gymnasium as gym
 import numpy as np
 import random
 import math
-from gym.spaces import Box
+from gymnasium.spaces import Box
 from rsoccer_gym.Entities import Ball, Frame, Robot
 from rsoccer_gym.ssl.ssl_gym_base import SSLBaseEnv
 from skills import move_to_ball, shoot_at_goal_center, move_to_point, turn_to_point, dribble_to_point
@@ -18,14 +18,20 @@ def blue_attacker_heuristic(env, robot):
 
 
 class SSL1v1ContinuousEnv(SSLBaseEnv):
-    def __init__(self):
-        super().__init__(field_type=1, n_robots_blue=1, n_robots_yellow=1, time_step=0.025)
+    def __init__(self, render_mode=None, action_type="skills", reward_type="dense"):
+        super().__init__(field_type=1, n_robots_blue=1, n_robots_yellow=1, time_step=0.025, render_mode=render_mode)
         
-        
-        # [0] = Skill-Selektor (-1 to 1)
+        self.action_type = action_type
+        self.reward_type = reward_type
+        # [0] = Skill-Selector (-1 to 1)
         # [1] = Target X (-1 to 1)
         # [2] = Target Y (-1 to 1)
-        self.action_space = Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
+        if self.action_type == "skills":
+            self.action_space = Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
+        
+        # Low-Level Action Space: [v_x, v_y, v_theta, kick, dribble]
+        else:
+            self.action_space = Box(low=-1.0, high=1.0, shape=(5,), dtype=np.float32)
         
         self.observation_space = Box(low=-self.NORM_BOUNDS, high=self.NORM_BOUNDS, shape=(27, ), dtype=np.float32)
 
@@ -46,9 +52,12 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.last_possession = None
         self.blue_shot_in_progress = False
 
+        self.match_result = 0
+        self.yellow_possession_steps = 0
+
         
     
-    def reset(self, **kwargs):
+    def reset(self, seed=None, **kwargs):
         self.last_dist_ball = None
         self.last_ball_goal_dist = None
         self.current_step = 0
@@ -57,15 +66,25 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.dribble_start_pos = None
         self.last_possession = None
         self.blue_shot_in_progress = False
-        return super().reset(**kwargs)
+        self.match_result = 0
+        self.yellow_possession_steps = 0
+        return super().reset(seed=seed, **kwargs)
     
     
     def step(self, action):
         self.current_step += 1
         self.total_steps += 1
-        #self.difficulty_factor = min(0.8, 0.2 + (self.total_steps / 2000000)) 
+        #self.difficulty_factor = min(0.8, 0.2 + (self.total_steps / 2000000))
+        obs, reward, terminated, truncated, info = super().step(action)
 
-        return super().step(action)
+        
+        done = terminated or truncated
+        if done:
+            info["is_success"] = 1.0 if self.match_result == 1 else 0.0
+            info["match_result"] = self.match_result
+            info["possession_ratio"] = self.yellow_possession_steps / max(1, self.current_step)
+
+        return obs, reward, terminated, truncated, info
 
     
     def convert_actions(self, action_array, angle):
@@ -155,96 +174,91 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         ball = self.frame.ball
         yellow = self.frame.robots_yellow[0]
         blue_robot_data = self.frame.robots_blue[0]
-        ball_pos = np.array([ball.x, ball.y])
-        current_dist_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
-        has_ball = (current_dist_ball < 0.15) or (yellow.infrared is True)
-
         
-        max_target_dist = 2.0 
-        
-        target_x = yellow.x + (actions[1] * max_target_dist)
-        target_y = yellow.y + (actions[2] * max_target_dist)
-        target_x = np.clip(target_x, -self.field.length / 2.0, self.field.length / 2.0)
-        target_y = np.clip(target_y, -self.field.width / 2.0, self.field.width / 2.0)
-        
-        target_point = np.array([target_x, target_y])
-
-        
-        val = actions[0]
-        if val < -0.6:
-            new_skill = 3 # Turn to Point
-        elif val < -0.2:
-            new_skill = 2 # Move to Point
-        elif val < 0.2:
-            new_skill = 0 # Move to Ball
-        elif val < 0.6:
-            new_skill = 4 # Dribble to Point
-        else:
-            new_skill = 1 # Shoot at Goal Center
-
-        if self.skill_counter <= 0:
-            self.current_skill = new_skill
-            
-            if self.current_skill == 4:
-                self.skill_counter = 40 
-            else:
-                self.skill_counter = self.switch_threshold
-        else:
-            self.skill_counter -= 1
-
-        
+        #[v_x, v_y, v_theta, kick, dribble]
         raw_action = np.zeros(5)
 
-        # SKILL-EXECUTION
-        if self.current_skill == 4:
-            if has_ball:
+        # LOW LEVEL ACTIONS 
+        if self.action_type == "low_level":
+            # Hier nehmen wir die 5 Werte direkt vom Netz
+            # actions: [v_x, v_y, v_theta, kick, dribble]
+            v_x_global = actions[0]
+            v_y_global = actions[1]
+            v_theta    = actions[2]
+            
+            
+            kick    = 4.0 if actions[3] > 0.0 else 0.0
+            dribble = True if actions[4] > 0.0 else False
+            
+            angle_rad = np.deg2rad(yellow.theta)
+            v_x_local, v_y_local, v_theta_clipped = self.convert_actions(
+                [v_x_global, v_y_global, v_theta], angle_rad
+            )
+            print(f"LL Action: v_x={v_x_global:.2f}, v_y={v_y_global:.2f}, v_theta={v_theta:.2f}, kick={kick}, dribble={dribble}   ", end='\r')
+
+
+        # SKILLS 
+        else:
+            current_dist_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
+            has_ball = (current_dist_ball < 0.15) or (yellow.infrared is True)
+
+            # Target
+            max_target_dist = 2.0 
+            target_x = np.clip(yellow.x + (actions[1] * max_target_dist), -self.field.length / 2.0, self.field.length / 2.0)
+            target_y = np.clip(yellow.y + (actions[2] * max_target_dist), -self.field.width / 2.0, self.field.width / 2.0)
+            target_point = np.array([target_x, target_y])
+
+            # Skill Selection
+            val = actions[0]
+            if val < -0.6:   new_skill = 3 # Turn
+            elif val < -0.2: new_skill = 2 # Move to Point
+            elif val < 0.2:  new_skill = 0 # Move to Ball
+            elif val < 0.6:  new_skill = 4 # Dribble
+            else:            new_skill = 1 # Shoot
+
+            if self.skill_counter <= 0:
+                self.current_skill = new_skill
+                self.skill_counter = 40 if self.current_skill == 4 else self.switch_threshold
+            else:
+                self.skill_counter -= 1
+
+            # Skill Execution
+            if self.current_skill == 4: # Dribble
                 raw_action = dribble_to_point(yellow, target_point, speed=0.8)
                 print(f"Skill: Dribble to Point ({target_x:.2f}, {target_y:.2f})", end='\r')
-            else:
-                # Fallback:
+            elif self.current_skill == 0:
                 raw_action = move_to_ball(yellow, ball, speed=1.0)
-                print(f"Skill: Dribble no Ball", end='\r')
-        
-        elif self.current_skill == 0:
-            raw_action = move_to_ball(yellow, ball, speed=1.0)
-            print(f"Skill: Move to Ball", end='\r')
-            
-        elif self.current_skill == 1:
-            raw_action = shoot_at_goal_center(self, yellow, "yellow")
-            print(f"Skill: Shoot at Goal Center", end='\r')
-            
-        elif self.current_skill == 2:
-            v_x, v_y = move_to_point(yellow, target_point, speed=1.0)
-            raw_action[0] = v_x
-            raw_action[1] = v_y
-            print(f"Skill: Move to Point ({target_x:.2f}, {target_y:.2f},)", end='\r')
-            
-        else:
-            v_theta = turn_to_point(yellow, target_point)
-            raw_action[2] = v_theta
-            print(f"Skill: Turn to Point ({target_x:.2f}, {target_y:.2f})", end='\r')
+                print(f"Skill: Move to Ball (Dist: {current_dist_ball:.2f})", end='\r')
+            elif self.current_skill == 1:
+                raw_action = shoot_at_goal_center(self, yellow, "yellow")
+                print(f"Skill: Shoot at Goal Center", end='\r')
+            elif self.current_skill == 2:
+                v_x, v_y = move_to_point(yellow, target_point, speed=1.0)
+                raw_action[0], raw_action[1] = v_x, v_y
+                print(f"Skill: Move to Point ({target_x:.2f}, {target_y:.2f})", end='\r')
+            else:
+                raw_action[2] = turn_to_point(yellow, target_point)
+                print(f"Skill: Turn to Point ({target_x:.2f}, {target_y:.2f})", end='\r')
 
-        
-        v_x_global = raw_action[0]
-        v_y_global = raw_action[1]
-        v_theta = raw_action[2]
-        
-        kick = 4.0 if raw_action[3] > 0.5 else 0.0
-        dribble = True if raw_action[4] > 0.5 else False
+            # Final Parameter
+            v_x_global, v_y_global, v_theta = raw_action[0], raw_action[1], raw_action[2]
+            kick    = 4.0 if raw_action[3] > 0.5 else 0.0
+            dribble = True if raw_action[4] > 0.5 else False
 
-        # Local 
-        angle_rad = np.deg2rad(yellow.theta)
-        v_x_local, v_y_local, v_theta_clipped = self.convert_actions(
-            [v_x_global, v_y_global, v_theta], angle_rad
-        )
-        
+            # Local Conversion
+            angle_rad = np.deg2rad(yellow.theta)
+            v_x_local, v_y_local, v_theta_clipped = self.convert_actions(
+                [v_x_global, v_y_global, v_theta], angle_rad
+            )
+
+
+
         robot_yellow = Robot(yellow=True, id=0, 
                              v_x=v_x_local, v_y=v_y_local, v_theta=v_theta_clipped, 
                              kick_v_x=kick, dribbler=dribble)
 
-
+        # Blue Heuristic
         b_cmd = blue_attacker_heuristic(self, blue_robot_data)
-        #b_cmd = np.zeros(5) 
         b_angle_rad = np.deg2rad(blue_robot_data.theta)
         bv_x, bv_y, bv_theta = self.convert_actions([b_cmd[0], b_cmd[1], b_cmd[2]], b_angle_rad)
         
@@ -262,98 +276,103 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         blue = self.frame.robots_blue[0]
         
         done = False
+        truncated = False
         reward = 0.0
         max_x = self.field.length / 2.0
         max_y = self.field.width / 2.0
-        goal_half_width = 0.5 
+        goal_half_width = 0.5
 
-        
-        reward -= 0.05
-        if self.current_skill == 4: # Dribble
-            reward -= 0.05
-            
         # Ball Possesion
         current_dist_yellow = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
         yellow_has_ball = (current_dist_yellow < 0.12) or yellow.infrared
         
         current_dist_blue = math.hypot(blue.x - ball.x, blue.y - ball.y)
         blue_has_ball = (current_dist_blue < 0.12) or blue.infrared
-        
-        ball_speed = math.hypot(ball.v_x, ball.v_y)
-        if blue_has_ball:
-            self.last_possession = 'blue'
-            self.blue_shot_in_progress = False 
-        elif yellow_has_ball:
-            if self.blue_shot_in_progress:
-                reward += 700.0  
-                print(f"*** SCHUSS ABGEFANGEN! *** \033[K", end='\r')
-            self.last_possession = 'yellow'
-            self.blue_shot_in_progress = False 
-        else:
-            if self.last_possession == 'blue' and ball_speed > 1.5:
-                self.blue_shot_in_progress = True
 
-        # CRASH AVOIDANCE
-        dist_yellow_blue = math.hypot(yellow.x - blue.x, yellow.y - blue.y)
-        if dist_yellow_blue < 0.22:
-            reward -= 0.5
-        if dist_yellow_blue < 0.18:
-            reward -= 80.0
-            print("CRASH", end='\r')
+        if yellow_has_ball:
+            self.yellow_possession_steps += 1
 
-        # Robot -> Ball
-        if hasattr(self, 'last_dist_ball') and self.last_dist_ball is not None:
-            progress = self.last_dist_ball - current_dist_yellow
-            
-            
-            is_shot_flying = (ball.v_x < -0.1 and progress < 0)
-            
-            if not is_shot_flying:
-                reward += progress * 20.0
-            
-        if current_dist_yellow < 0.12:
-            reward += 0.5
-            if abs(ball.v_x) > 1.0:
-                reward += 1.0
-            
-        self.last_dist_ball = current_dist_yellow
+        if self.reward_type == "dense":
+            reward -= 0.05
+            if self.current_skill == 4: # Dribble
+                reward -= 0.05
+            ball_speed = math.hypot(ball.v_x, ball.v_y)
+            if blue_has_ball:
+                self.last_possession = 'blue'
+                self.blue_shot_in_progress = False 
+            elif yellow_has_ball:
+                if self.blue_shot_in_progress:
+                    reward += 700.0  
+                    print(f"*** SCHUSS ABGEFANGEN! *** \033[K", end='\r')
+                self.last_possession = 'yellow'
+                self.blue_shot_in_progress = False 
+            else:
+                if self.last_possession == 'blue' and ball_speed > 1.5:
+                    self.blue_shot_in_progress = True
 
-        # Ball -> Goal 
-        ball_pos = np.array([ball.x, ball.y])
-        goal_a = np.array([-max_x, goal_half_width])
-        goal_b = np.array([-max_x, -goal_half_width])
-        goal_vec = goal_b - goal_a
-        ball_to_goal_a = ball_pos - goal_a
-        
-        # Projection like Tilmans method to find closest point on goal line
-        t = np.dot(ball_to_goal_a, goal_vec) / np.dot(goal_vec, goal_vec)
-        t = np.clip(t, 0.0, 1.0)
-        closest_goal_point = goal_a + t * goal_vec
-        current_ball_goal_dist = np.linalg.norm(ball_pos - closest_goal_point)
-        
-        # Reward for Ball closer to goal
-        if hasattr(self, 'last_ball_goal_dist') and self.last_ball_goal_dist is not None:
-            progress_ball = self.last_ball_goal_dist - current_ball_goal_dist
-            is_good_shot = (ball.v_x < -0.1 and progress_ball > 0)
-            
-            if yellow_has_ball or is_good_shot:
-                distance_factor = 1.0 + (1.0 / (current_ball_goal_dist + 0.5))
-                reward += progress_ball * 100.0 * distance_factor 
-            
-        self.last_ball_goal_dist = current_ball_goal_dist
+            # CRASH AVOIDANCE
+            dist_yellow_blue = math.hypot(yellow.x - blue.x, yellow.y - blue.y)
+            if dist_yellow_blue < 0.22:
+                reward -= 0.5
+            if dist_yellow_blue < 0.18:
+                reward -= 80.0
+                print("CRASH", end='\r')
 
-        # Dribbler Bonus
-        if ball.v_x < -0.3 and current_dist_yellow < 0.3: 
-            reward += abs(ball.v_x) * 2.0
+            # Robot -> Ball
+            if hasattr(self, 'last_dist_ball') and self.last_dist_ball is not None:
+                progress = self.last_dist_ball - current_dist_yellow
+                
+                
+                is_shot_flying = (ball.v_x < -0.1 and progress < 0)
+                
+                if not is_shot_flying:
+                    reward += progress * 20.0
+                
+            if current_dist_yellow < 0.12:
+                reward += 0.5
+                if abs(ball.v_x) > 1.0:
+                    reward += 1.0
+                
+            self.last_dist_ball = current_dist_yellow
+
+            # Ball -> Goal 
+            ball_pos = np.array([ball.x, ball.y])
+            goal_a = np.array([-max_x, goal_half_width])
+            goal_b = np.array([-max_x, -goal_half_width])
+            goal_vec = goal_b - goal_a
+            ball_to_goal_a = ball_pos - goal_a
+            
+            # Projection like Tilmans method to find closest point on goal line
+            t = np.dot(ball_to_goal_a, goal_vec) / np.dot(goal_vec, goal_vec)
+            t = np.clip(t, 0.0, 1.0)
+            closest_goal_point = goal_a + t * goal_vec
+            current_ball_goal_dist = np.linalg.norm(ball_pos - closest_goal_point)
+            
+            # Reward for Ball closer to goal
+            if hasattr(self, 'last_ball_goal_dist') and self.last_ball_goal_dist is not None:
+                progress_ball = self.last_ball_goal_dist - current_ball_goal_dist
+                is_good_shot = (ball.v_x < -0.1 and progress_ball > 0)
+                
+                if yellow_has_ball or is_good_shot:
+                    distance_factor = 1.0 + (1.0 / (current_ball_goal_dist + 0.5))
+                    reward += progress_ball * 100.0 * distance_factor 
+                
+            self.last_ball_goal_dist = current_ball_goal_dist
+
+            # Dribbler Bonus
+            if ball.v_x < -0.3 and current_dist_yellow < 0.3: 
+                reward += abs(ball.v_x) * 2.0
 
         # END CONDITIONS
         if abs(ball.x) > max_x:
             done = True
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0: 
-                    reward += 10000.0 
+                    reward += 10000.0
+                    self.match_result = 1 
                 else:          
-                    reward -= 2000.0 
+                    reward -= 2000.0
+                    self.match_result = -1 
             else:
                 reward -= 200.0 
             return reward, done
@@ -368,7 +387,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             done = True
         
         if self.current_step >= self.max_steps:
-            done = True
+            truncated = True
             reward -= 50.0 
 
         return reward, done
@@ -378,10 +397,10 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         pos_frame = Frame()
         half_len = self.field.length / 2.0
 
-        is_attack_scenario = random.random() < 0.25
+        is_attack_scenario = self.np_random.random() < 0.25
 
         if is_attack_scenario:
-            pos_frame.ball = Ball(x=random.uniform(-0.5, 0.5), y=random.uniform(-0.5, 0.5))
+            pos_frame.ball = Ball(x=self.np_random.uniform(-0.5, 0.5), y=self.np_random.uniform(-0.5, 0.5))
 
             pos_frame.robots_yellow[0] = Robot(x=1.0, y=0.0, theta=180.0)
 
@@ -389,12 +408,12 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
         else:
 
-            blue_y = random.uniform(-1.0, 1.0)
+            blue_y = self.np_random.uniform(-1.0, 1.0)
             pos_frame.robots_blue[0] = Robot(x=0.0, y=blue_y, theta=0.0)
             pos_frame.ball = Ball(x=0.15, y=blue_y)
             
-            yellow_x = random.uniform(3.7, 3.9)
-            yellow_y = random.uniform(-0.5, 0.5)
+            yellow_x = self.np_random.uniform(3.7, 3.9)
+            yellow_y = self.np_random.uniform(-0.5, 0.5)
             pos_frame.robots_yellow[0] = Robot(x=yellow_x, y=yellow_y, theta=180.0)
 
         

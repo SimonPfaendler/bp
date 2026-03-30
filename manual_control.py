@@ -1,7 +1,7 @@
 import numpy as np
 import math
 import time
-from gym.spaces import Box
+from gymnasium.spaces import Box
 from pynput import keyboard
 from rsoccer_gym.Entities import Robot
 from ssl_rl_1v1_continuous import SSL1v1ContinuousEnv
@@ -84,8 +84,9 @@ def interactive_debug_live():
 
     while running:
         step_result = env.step(current_action)
-        obs, reward, done, info = step_result
+        obs, reward, terminated, truncated, info = step_result
         total_reward += reward
+        done = terminated or truncated
 
         env.render()
 
@@ -97,7 +98,7 @@ def interactive_debug_live():
 
         if done:
             print("\n EPISODE DONE\n")
-            env.reset()
+            obs, info = env.reset()
             total_reward = 0.0
         time.sleep(0.025)
 

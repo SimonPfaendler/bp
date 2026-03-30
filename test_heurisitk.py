@@ -1,8 +1,8 @@
-import gym
+import gymnasium as gym
 import numpy as np
 import random
 import time
-from gym.spaces import Box
+from gymnasium.spaces import Box
 from rsoccer_gym.Entities import Ball, Frame, Robot
 from rsoccer_gym.ssl.ssl_gym_base import SSLBaseEnv
 from skills import move_to_ball, turn_to_point
@@ -27,13 +27,20 @@ def simple_attacker_heuristic(env, robot):
 
 
 class SSLSingleRobotEnv(SSLBaseEnv):
-    def __init__(self):
-        super().__init__(field_type=1, n_robots_blue=1, n_robots_yellow=0, time_step=0.025)
+    def __init__(self, render_mode=None):
+        super().__init__(
+            field_type=1, 
+            n_robots_blue=1, 
+            n_robots_yellow=0, 
+            time_step=0.025,
+            render_mode=render_mode
+        )
         self.action_space = Box(low=-1.0, high=1.0, shape=(1, ), dtype=np.float32)
         self.observation_space = Box(low=-1.0, high=1.0, shape=(1, ), dtype=np.float32)
 
-    def reset(self):
-        return super().reset()
+    
+    def reset(self, seed=None, options=None, **kwargs):
+        return super().reset(seed=seed, options=options, **kwargs)
 
     def _frame_to_observations(self):
         return np.zeros(1, dtype=np.float32)
@@ -41,10 +48,8 @@ class SSLSingleRobotEnv(SSLBaseEnv):
     def _get_commands(self, action):
         blue = self.frame.robots_blue[0]
         
-
         b_cmd = simple_attacker_heuristic(self, blue)
         
-  
         robot_blue = Robot(
             yellow=False, id=0, 
             v_x=b_cmd[0], v_y=b_cmd[1], v_theta=b_cmd[2], 
@@ -57,7 +62,6 @@ class SSLSingleRobotEnv(SSLBaseEnv):
         ball = self.frame.ball
         done = False
         
-
         half_length = self.field.length / 2.0
         if abs(ball.x) > half_length: 
             done = True
@@ -67,21 +71,32 @@ class SSLSingleRobotEnv(SSLBaseEnv):
     def _get_initial_positions_frame(self):
         pos_frame = Frame()
         
-
         pos_frame.ball = Ball(x=random.uniform(-1.0, 1.0), y=random.uniform(-1.0, 1.0))
         pos_frame.robots_blue[0] = Robot(x=-2.0, y=0.0, theta=0.0)
         
         return pos_frame
 
 if __name__ == "__main__":
-    env = SSLSingleRobotEnv()
-    obs = env.reset()    
+    
+    env = SSLSingleRobotEnv(render_mode="human")
+    
+    
+    obs, info = env.reset()    
+    
+    print("Starte Solo-Test: BLAUER Roboter holt Ball und schießt aufs rechte Tor.")
+    
+    
+    dummy_action = np.zeros(1, dtype=np.float32)
+    
     while True:
-        obs, reward, done, info = env.step(action=0) 
+        obs, reward, terminated, truncated, info = env.step(action=dummy_action) 
+        done = terminated or truncated
+        
         env.render()
         
         time.sleep(0.025) 
         
         if done:
-            obs = env.reset()
+            print("Ball im Tor oder Aus! Resette das Feld...")
+            obs, info = env.reset()
             time.sleep(1)

@@ -19,6 +19,7 @@ os.makedirs(log_dir, exist_ok=True)
 
 def train(sb3_algo, action_type, reward_type, seed, load_path=None):
 
+    log_freq = 1000
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_name = f"{sb3_algo}_{action_type}_{reward_type}_seed{seed}_{timestamp}"
     current_log_dir = os.path.join(log_dir, run_name)
@@ -57,13 +58,13 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TIMESTEPS = 25000
+    TIMESTEPS = 100000
     iters = 0
     
     
     while True:
         iters += 1
-        model.learn(total_timesteps=TIMESTEPS, reset_num_timesteps=False)
+        model.learn(total_timesteps=TIMESTEPS, reset_num_timesteps=False, log_interval=log_freq)
         save_path = f"{model_dir}/{run_name}_{TIMESTEPS*iters}"
         model.save(save_path)
         print(f"Modell gespeichert unter: {save_path}")

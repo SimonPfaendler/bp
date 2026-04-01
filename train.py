@@ -5,6 +5,8 @@ import os
 import argparse
 import time
 from stable_baselines3.common.noise import NormalActionNoise
+from stable_baselines3.common.monitor import Monitor
+import datetime
 import numpy as np
 import math
 import wandb
@@ -17,7 +19,8 @@ os.makedirs(log_dir, exist_ok=True)
 
 def train(sb3_algo, action_type, reward_type, seed, load_path=None):
 
-    run_name = f"{sb3_algo}_{action_type}_{reward_type}_seed{seed}"
+    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_name = f"{sb3_algo}_{action_type}_{reward_type}_seed{seed}_{timestamp}"
     current_log_dir = os.path.join(log_dir, run_name)
 
     run = wandb.init(
@@ -34,20 +37,21 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
 
 
     env = SSL1v1ContinuousEnv(action_type=action_type, reward_type=reward_type)
+    env = Monitor(env, info_keywords=("is_success", "match_result", "possession_ratio"))
     print(f"Starte Training: {sb3_algo} | Modus: {action_type} | Reward: {reward_type} | Seed: {seed}")
 
     if load_path and os.path.exists(load_path):
         print(f"Lade existierendes Modell von {load_path} zum Weitertrainieren...")
         algo_class = CrossQ if sb3_algo == 'CrossQ' else globals()[sb3_algo]
-        model = algo_class.load(load_path, env=env, device='cuda', tensorboard_log=current_log_dir)
+        model = algo_class.load(load_path, env=env, device='auto', tensorboard_log=current_log_dir)
     else:
         print("Start new Training")
         if sb3_algo == 'CrossQ':
-            model = CrossQ('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed)
+            model = CrossQ('MlpPolicy', env, verbose=1, device='auto', tensorboard_log=current_log_dir, seed=seed)
         elif sb3_algo == 'SAC':
-            model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed)
+            model = SAC('MlpPolicy', env, verbose=1, device='auto', tensorboard_log=current_log_dir, seed=seed)
         elif sb3_algo == 'PPO':
-            model = PPO('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed)
+            model = PPO('MlpPolicy', env, verbose=1, device='auto', tensorboard_log=current_log_dir, seed=seed)
 
         else:
             print(f"Algo {sb3_algo} nicht gefunden")

@@ -293,16 +293,16 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             self.yellow_possession_steps += 1
 
         if self.reward_type == "dense":
-            reward -= 0.05
+            reward -= 0.005
             if self.current_skill == 4: # Dribble
-                reward -= 0.05
+                reward -= 0.005
             ball_speed = math.hypot(ball.v_x, ball.v_y)
             if blue_has_ball:
                 self.last_possession = 'blue'
                 self.blue_shot_in_progress = False 
             elif yellow_has_ball:
                 if self.blue_shot_in_progress:
-                    reward += 700.0  
+                    reward += 3.0  
                     print(f"*** SCHUSS ABGEFANGEN! *** \033[K", end='\r')
                 self.last_possession = 'yellow'
                 self.blue_shot_in_progress = False 
@@ -313,9 +313,9 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             # CRASH AVOIDANCE
             dist_yellow_blue = math.hypot(yellow.x - blue.x, yellow.y - blue.y)
             if dist_yellow_blue < 0.22:
-                reward -= 0.5
+                reward -= 0.05
             if dist_yellow_blue < 0.18:
-                reward -= 80.0
+                reward -= 2.0
                 print("CRASH", end='\r')
 
             # Robot -> Ball
@@ -326,12 +326,12 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 is_shot_flying = (ball.v_x < -0.1 and progress < 0)
                 
                 if not is_shot_flying:
-                    reward += progress * 20.0
+                    reward += progress * 2.0
                 
             if current_dist_yellow < 0.12:
-                reward += 0.5
+                reward += 0.05
                 if abs(ball.v_x) > 1.0:
-                    reward += 1.0
+                    reward += 0.1
                 
             self.last_dist_ball = current_dist_yellow
 
@@ -355,40 +355,40 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 
                 if yellow_has_ball or is_good_shot:
                     distance_factor = 1.0 + (1.0 / (current_ball_goal_dist + 0.5))
-                    reward += progress_ball * 100.0 * distance_factor 
+                    reward += progress_ball * 5.0 * distance_factor 
                 
             self.last_ball_goal_dist = current_ball_goal_dist
 
             # Dribbler Bonus
             if ball.v_x < -0.3 and current_dist_yellow < 0.3: 
-                reward += abs(ball.v_x) * 2.0
+                reward += abs(ball.v_x) * 0.1
 
         # END CONDITIONS
         if abs(ball.x) > max_x:
             done = True
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0: 
-                    reward += 10000.0
+                    reward += 10.0
                     self.match_result = 1 
                 else:          
-                    reward -= 2000.0
+                    reward -= 10.0
                     self.match_result = -1 
             else:
-                reward -= 200.0 
+                reward -= 1.0
             return reward, done
         
         if abs(ball.y) > max_y:
             done = True
-            reward -= 1000.0 
+            reward -= 1.0 
             return reward, done
 
         if abs(yellow.x) > max_x or abs(yellow.y) > max_y:
-            reward -= 1000.0
+            reward -= 1.0
             done = True
         
         if self.current_step >= self.max_steps:
             truncated = True
-            reward -= 50.0 
+            reward -= 0.5 
 
         return reward, done
 

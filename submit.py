@@ -2,10 +2,6 @@ import submitit
 import os
 
 def run_experiment(algo, action_type, reward_type, seed):
-    """
-    Diese Funktion wird auf dem zugewiesenen Compute-Node (der GPU) ausgeführt.
-    Wir bauen hier einfach den Terminal-Befehl zusammen und feuern ihn ab.
-    """
     cmd = f"python train.py {algo} -t --action_type {action_type} --reward_type {reward_type} --seed {seed}"
     print(f"Führe aus: {cmd}")
     os.system(cmd)
@@ -34,7 +30,7 @@ def main():
 
     jobs = []
 
-    print("Generiere Jobs und sende sie an den Slurm-Scheduler...")
+
 
 
     with executor.batch():
@@ -44,9 +40,7 @@ def main():
                     for seed in seeds:
                         job = executor.submit(run_experiment, algo, action_type, reward_type, seed)
                         jobs.append(job)
-
-    print(f"Erfolg! {len(jobs)} Jobs wurden in die Warteschlange eingereiht.")
-    print("Nutze 'squeue -u <dein_kürzel>' im Terminal, um den Status zu überprüfen.")
+    print(len(jobs))
 
 if __name__ == "__main__":
     main()

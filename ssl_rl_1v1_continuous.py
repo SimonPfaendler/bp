@@ -5,7 +5,7 @@ import math
 from gymnasium.spaces import Box
 from rsoccer_gym.Entities import Ball, Frame, Robot
 from rsoccer_gym.ssl.ssl_gym_base import SSLBaseEnv
-from skills import move_to_ball, shoot_at_goal_center, move_to_point, turn_to_point, dribble_to_point
+from skills import move_to_ball, shoot_at_point, move_to_point, turn_to_point, dribble_to_point, shoot_at_goal_center
 
 
 
@@ -26,12 +26,13 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         # [0] = Skill-Selector (-1 to 1)
         # [1] = Target X (-1 to 1)
         # [2] = Target Y (-1 to 1)
+        # [3] = Kick Power (-1 to 1)
         if self.action_type == "skills":
-            self.action_space = Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
+            self.action_space = Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
         
-        # Low-Level Action Space: [v_x, v_y, v_theta, kick, dribble]
+        # Low-Level Action Space: [v_x, v_y, v_theta, kick_power, kick_trigger, dribble]
         else:
-            self.action_space = Box(low=-1.0, high=1.0, shape=(5,), dtype=np.float32)
+            self.action_space = Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
         
         self.observation_space = Box(low=-self.NORM_BOUNDS, high=self.NORM_BOUNDS, shape=(27, ), dtype=np.float32)
 
@@ -54,6 +55,10 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
         self.match_result = 0
         self.yellow_possession_steps = 0
+        self.is_dribbling = False
+        self.dribble_start_pos = None
+        self.max_dribble_dist = 1.0
+        self.robot_ball_contact = 0.12
 
         
     
@@ -68,6 +73,8 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.blue_shot_in_progress = False
         self.match_result = 0
         self.yellow_possession_steps = 0
+        self.is_dribbling = False
+        self.dribble_start_pos = None
         return super().reset(seed=seed, **kwargs)
     
     
@@ -76,6 +83,27 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.total_steps += 1
         #self.difficulty_factor = min(0.8, 0.2 + (self.total_steps / 2000000))
         obs, reward, terminated, truncated, info = super().step(action)
+
+        ball_pos = np.array([self.frame.ball.x, self.frame.ball.y])
+        yellow_robot = self.frame.robots_yellow[0]
+        robot_pos = np.array([yellow_robot.x, yellow_robot.y])
+        dist_robot_ball = np.linalg.norm(robot_pos - ball_pos)
+        has_contact = (dist_robot_ball < self.robot_ball_contact) or yellow_robot.infrared
+
+        if has_contact:
+            if not self.is_dribbling:
+                self.is_dribbling = True
+                self.dribble_start_pos = robot_pos.copy()
+            else:
+                dribble_dist = np.linalg.norm(robot_pos - self.dribble_start_pos)
+                if dribble_dist > self.max_dribble_dist:
+                    reward -= 10.0
+                    truncated = True
+                    self.match_result = -1
+        else:
+            self.is_dribbling = False
+            self.dribble_start_pos = None
+
 
         
         done = terminated or truncated
@@ -175,20 +203,26 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         yellow = self.frame.robots_yellow[0]
         blue_robot_data = self.frame.robots_blue[0]
         
-        #[v_x, v_y, v_theta, kick, dribble]
+        # [v_x, v_y, v_theta, kick, dribble]
         raw_action = np.zeros(5)
 
         # LOW LEVEL ACTIONS 
         if self.action_type == "low_level":
-            # Hier nehmen wir die 5 Werte direkt vom Netz
             # actions: [v_x, v_y, v_theta, kick, dribble]
             v_x_global = actions[0]
             v_y_global = actions[1]
             v_theta    = actions[2]
+
+            raw_kick_power = actions[3]
+            kick_trigger = actions[4]
+            dribbler_trigger = actions[5]
             
             
-            kick    = 4.0 if actions[3] > 0.0 else 0.0
-            dribble = True if actions[4] > 0.0 else False
+            if kick_trigger > 0.0:
+                kick = 3.0 + ((raw_kick_power + 1.0) / 2.0) * 3.0
+            else:
+                kick = 0.0
+            dribble = True if dribbler_trigger > 0.0 else False
             
             angle_rad = np.deg2rad(yellow.theta)
             v_x_local, v_y_local, v_theta_clipped = self.convert_actions(
@@ -230,8 +264,8 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 raw_action = move_to_ball(yellow, ball, speed=1.0)
                 print(f"Skill: Move to Ball (Dist: {current_dist_ball:.2f})", end='\r')
             elif self.current_skill == 1:
-                raw_action = shoot_at_goal_center(self, yellow, "yellow")
-                print(f"Skill: Shoot at Goal Center", end='\r')
+                raw_action = shoot_at_point(yellow, target_point)
+                print(f"Skill: Shoot at Point ({target_x:.2f}, {target_y:.2f})", end='\r')
             elif self.current_skill == 2:
                 v_x, v_y = move_to_point(yellow, target_point, speed=1.0)
                 raw_action[0], raw_action[1] = v_x, v_y
@@ -242,7 +276,11 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
             # Final Parameter
             v_x_global, v_y_global, v_theta = raw_action[0], raw_action[1], raw_action[2]
-            kick    = 4.0 if raw_action[3] > 0.5 else 0.0
+            if raw_action[3] > 0.5:
+                kick = 3.0 + ((actions[3] + 1.0) / 2.0) * (6.0 - 3.0)
+            else:
+                kick = 0.0
+                
             dribble = True if raw_action[4] > 0.5 else False
 
             # Local Conversion
@@ -395,26 +433,67 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
     
     def _get_initial_positions_frame(self):
         pos_frame = Frame()
-        half_len = self.field.length / 2.0
+        
 
-        is_attack_scenario = self.np_random.random() < 0.25
+        scenario_roll = self.np_random.random()
 
-        if is_attack_scenario:
-            pos_frame.ball = Ball(x=self.np_random.uniform(-0.5, 0.5), y=self.np_random.uniform(-0.5, 0.5))
+        if scenario_roll < 0.33:
+            # SZENARIO 1: ATTACK
+            bx = self.np_random.uniform(-1.0, 2.0)
+            by = self.np_random.uniform(-1.5, 1.5)
+            pos_frame.ball = Ball(x=bx, y=by)
 
-            pos_frame.robots_yellow[0] = Robot(x=1.0, y=0.0, theta=180.0)
+            y_theta = self.np_random.uniform(135.0, 225.0)
+            pos_frame.robots_yellow[0] = Robot(
+                x=bx + self.np_random.uniform(0.3, 1.0), 
+                y=by + self.np_random.uniform(-0.5, 0.5), 
+                theta=y_theta
+            )
 
-            pos_frame.robots_blue[0] = Robot(x=-1.0, y=0.0, theta=0.0)
+            pos_frame.robots_blue[0] = Robot(
+                x=self.np_random.uniform(-3.5, bx - 0.5),
+                y=self.np_random.uniform(-1.5, 1.5),
+                theta=self.np_random.uniform(-180, 180)
+            )
+
+        elif scenario_roll < 0.66:
+            # SZENARIO 2: DEFEND
+            blue_x = self.np_random.uniform(-1.0, 2.0)
+            blue_y = self.np_random.uniform(-2.0, 2.0)
+            blue_theta = self.np_random.uniform(-45.0, 45.0) 
+            pos_frame.robots_blue[0] = Robot(x=blue_x, y=blue_y, theta=blue_theta)
+            
+
+            pos_frame.ball = Ball(
+                x=blue_x + self.np_random.uniform(0.12, 0.18), 
+                y=blue_y + self.np_random.uniform(-0.05, 0.05)
+            )
+
+
+            pos_frame.robots_yellow[0] = Robot(
+                x=self.np_random.uniform(2.5, 4.0), 
+                y=self.np_random.uniform(-1.5, 1.5), 
+                theta=self.np_random.uniform(150.0, 210.0)
+            )
 
         else:
+            # SZENARIO 3: CHAOS
 
-            blue_y = self.np_random.uniform(-1.0, 1.0)
-            pos_frame.robots_blue[0] = Robot(x=0.0, y=blue_y, theta=0.0)
-            pos_frame.ball = Ball(x=0.15, y=blue_y)
+            pos_frame.ball = Ball(
+                x=self.np_random.uniform(-3.0, 3.0),
+                y=self.np_random.uniform(-2.0, 2.0)
+            )
             
-            yellow_x = self.np_random.uniform(3.7, 3.9)
-            yellow_y = self.np_random.uniform(-0.5, 0.5)
-            pos_frame.robots_yellow[0] = Robot(x=yellow_x, y=yellow_y, theta=180.0)
+            pos_frame.robots_yellow[0] = Robot(
+                x=self.np_random.uniform(-3.5, 3.5),
+                y=self.np_random.uniform(-2.5, 2.5),
+                theta=self.np_random.uniform(-180, 180)
+            )
+                                               
+            pos_frame.robots_blue[0] = Robot(
+                x=self.np_random.uniform(-3.5, 3.5),
+                y=self.np_random.uniform(-2.5, 2.5),
+                theta=self.np_random.uniform(-180, 180)
+            )
 
-        
         return pos_frame

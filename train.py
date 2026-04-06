@@ -19,7 +19,7 @@ os.makedirs(log_dir, exist_ok=True)
 
 def train(sb3_algo, action_type, reward_type, seed, load_path=None):
 
-    log_freq = 1000
+    log_freq = 50
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_name = f"{sb3_algo}_{action_type}_{reward_type}_seed{seed}_{timestamp}"
     current_log_dir = os.path.join(log_dir, run_name)

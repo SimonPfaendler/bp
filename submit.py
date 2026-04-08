@@ -10,7 +10,7 @@ def main():
     log_folder = "slurm_logs"
     os.makedirs(log_folder, exist_ok=True)
 
-    
+
     executor = submitit.AutoExecutor(folder=log_folder)
 
 
@@ -22,16 +22,12 @@ def main():
         slurm_mem="8GB",               
     )
 
-    
+
     algos = ["SAC", "CrossQ"]
     action_types = ["skills", "low_level"]
     reward_types = ["dense", "sparse"]
     seeds = [0, 1, 2]
-
     jobs = []
-
-
-
 
     with executor.batch():
         for algo in algos:

@@ -20,7 +20,22 @@ def blue_attacker_heuristic(env, robot):
 class SSL1v1ContinuousEnv(SSLBaseEnv):
     def __init__(self, render_mode=None, action_type="skills", reward_type="dense"):
         super().__init__(field_type=1, n_robots_blue=1, n_robots_yellow=1, time_step=0.025, render_mode=render_mode)
+        """
+        1v1 Continuous Robot Soccer Environment.
         
+        Observation Space (27 dim):
+            [0:2]   Ball position (x, y)
+            [2:4]   Ball velocity (v_x, v_y)
+            [4]     Normalized distance ball to goal
+            [5:14]  Yellow robot (x, y, sin(theta), cos(theta), v_x, v_y, v_theta, infrared, dist_to_ball)
+            [14:23] Blue robot (x, y, sin(theta), cos(theta), v_x, v_y, v_theta, infrared, dist_to_ball)
+            [23:25] Current skill and skill counter
+            [25:27] Predicted ball position (x, y) in 0.5s
+            
+        Action Space:
+            - "skills": Box(4,) -> [Skill-Selector, Target X, Target Y, Kick Power]
+            - "low_level": Box(6,) -> [v_x, v_y, v_theta, kick_power, kick_trigger, dribble]
+        """
         self.action_type = action_type
         self.reward_type = reward_type
         # [0] = Skill-Selector (-1 to 1)
@@ -48,7 +63,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
         self.current_skill = 0
         self.skill_counter = 0
-        self.switch_threshold = 10 # Alle 10 Steps darf gewechselt werden
+        self.switch_threshold = 10 # Cooldown: allow skill switch only every 10 steps
         self.dribble_start_pos = None
         self.last_possession = None
         self.blue_shot_in_progress = False
@@ -208,7 +223,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
         # LOW LEVEL ACTIONS 
         if self.action_type == "low_level":
-            # actions: [v_x, v_y, v_theta, kick, dribble]
+            # actions: [v_x, v_y, v_theta, raw_kick_power, kick_trigger dribble]
             v_x_global = actions[0]
             v_y_global = actions[1]
             v_theta    = actions[2]
@@ -244,7 +259,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
             # Skill Selection
             val = actions[0]
-            if val < -0.6:   new_skill = 3 # Turn
+            if val < -0.6:   new_skill = 3 # Turn to Point
             elif val < -0.2: new_skill = 2 # Move to Point
             elif val < 0.2:  new_skill = 0 # Move to Ball
             elif val < 0.6:  new_skill = 4 # Dribble
@@ -341,7 +356,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             elif yellow_has_ball:
                 if self.blue_shot_in_progress:
                     reward += 3.0  
-                    print(f"*** SCHUSS ABGEFANGEN! *** \033[K", end='\r')
+                    print(f" SHOT INTERCEPTED \033[K", end='\r')
                 self.last_possession = 'yellow'
                 self.blue_shot_in_progress = False 
             else:
@@ -406,27 +421,30 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             done = True
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0: 
-                    reward += 10.0
+                    reward += 100.0
                     self.match_result = 1 
                 else:          
-                    reward -= 10.0
+                    reward -= 100.0
                     self.match_result = -1 
             else:
-                reward -= 1.0
+                reward -= 10.0
             return reward, done
         
+        # Ball Out of Bounds
         if abs(ball.y) > max_y:
             done = True
-            reward -= 1.0 
+            reward -= 10.0 
             return reward, done
 
+        # Yellow Robot Out of Bounds
         if abs(yellow.x) > max_x or abs(yellow.y) > max_y:
-            reward -= 1.0
+            reward -= 10.0
             done = True
         
+        # Timeout
         if self.current_step >= self.max_steps:
             truncated = True
-            reward -= 0.5 
+            reward -= 5.0 
 
         return reward, done
 

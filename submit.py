@@ -16,17 +16,17 @@ def main():
 
     executor.update_parameters(
         slurm_job_name="ssl_phase1",
-        slurm_time="2:00:00",          
+        slurm_time="24:00:00",          
         slurm_partition="cpu",                     
         slurm_cpus_per_task=4,          
         slurm_mem="8GB",               
     )
 
     
-    algos = ["SAC", "CrossQ"]
-    action_types = ["skills", "low_level"]
-    reward_types = ["dense", "sparse"]
-    seeds = [0, 1, 2]
+    algo = "SAC"
+    action_type = "low_level"
+    reward_type = "dense"
+    seeds = range(8)
 
     jobs = []
 
@@ -34,12 +34,9 @@ def main():
 
 
     with executor.batch():
-        for algo in algos:
-            for action_type in action_types:
-                for reward_type in reward_types:
-                    for seed in seeds:
-                        job = executor.submit(run_experiment, algo, action_type, reward_type, seed)
-                        jobs.append(job)
+        for seed in seeds:
+            job = executor.submit(run_experiment, algo, action_type, reward_type, seed)
+            jobs.append(job)
     print(len(jobs))
 
 if __name__ == "__main__":

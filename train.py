@@ -1,4 +1,5 @@
 import gymnasium as gym
+import torch
 from stable_baselines3 import PPO, SAC, TD3, A2C, DDPG
 from sb3_contrib import CrossQ
 import os
@@ -11,6 +12,9 @@ import numpy as np
 import math
 import wandb
 from ssl_rl_1v1_continuous import SSL1v1ContinuousEnv
+
+slurm_cpus = int(os.environ.get('SLURM_CPUS_PER_TASK', 1))
+torch.set_num_threads(slurm_cpus)
 
 model_dir = "models"
 log_dir = "logs"
@@ -47,10 +51,15 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
         model = algo_class.load(load_path, env=env, device='auto', tensorboard_log=current_log_dir)
     else:
         print("Start new Training")
+
+        #custom_policy_kwargs = dict(net_arch=[512, 512])
         if sb3_algo == 'CrossQ':
             model = CrossQ('MlpPolicy', env, verbose=1, device='auto', tensorboard_log=current_log_dir, seed=seed)
         elif sb3_algo == 'SAC':
-            model = SAC('MlpPolicy', env, verbose=1, device='auto', tensorboard_log=current_log_dir, seed=seed)
+            model = SAC('MlpPolicy', env, verbose=1, device='auto', tensorboard_log=current_log_dir, seed=seed,
+                        train_freq=4,         # Sammle erst 4 Steps im Spiel...
+                        gradient_steps=1,     # ...und mache dann genau 1 Update!
+                        batch_size=1024)
         elif sb3_algo == 'PPO':
             model = PPO('MlpPolicy', env, verbose=1, device='auto', tensorboard_log=current_log_dir, seed=seed)
 

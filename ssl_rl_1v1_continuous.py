@@ -34,8 +34,18 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         else:
             self.action_space = Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
         
-        self.observation_space = Box(low=-self.NORM_BOUNDS, high=self.NORM_BOUNDS, shape=(27, ), dtype=np.float32)
-
+        
+        obs_size = 25 
+        
+        if self.action_type == "skills":
+            obs_size += 2
+            
+        self.observation_space = Box(
+            low=-self.NORM_BOUNDS, 
+            high=self.NORM_BOUNDS, 
+            shape=(obs_size,), 
+            dtype=np.float32
+        )
         self.last_dist_ball = None
         self.last_ball_goal_dist = None
         self.current_step = 0
@@ -97,9 +107,9 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             else:
                 dribble_dist = np.linalg.norm(robot_pos - self.dribble_start_pos)
                 if dribble_dist > self.max_dribble_dist:
-                    reward -= 10.0
+                    reward -= 1.0
                     truncated = True
-                    self.match_result = -1
+                    self.match_result = 0
         else:
             self.is_dribbling = False
             self.dribble_start_pos = None
@@ -189,11 +199,14 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             dist_blue_ball / max_dist,           
             
             
-            self.current_skill / 4.0,
-            self.skill_counter / 40.0,
             self.norm_pos(pred_x),
-            self.norm_pos(pred_y)
-        ]
+            self.norm_pos(pred_y),
+            ]
+        if self.action_type == "skills":
+            obs.extend([
+                self.current_skill / 4.0,
+                self.skill_counter / 40.0,
+            ])
         
         return np.array(obs, dtype=np.float32)
 
@@ -398,8 +411,8 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             self.last_ball_goal_dist = current_ball_goal_dist
 
             # Dribbler Bonus
-            if ball.v_x < -0.3 and current_dist_yellow < 0.3: 
-                reward += abs(ball.v_x) * 0.1
+            if ball.v_x < -0.2 and yellow_has_ball:
+                reward += 0.5
 
         # END CONDITIONS
         if abs(ball.x) > max_x:
@@ -485,13 +498,13 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             )
             
             pos_frame.robots_yellow[0] = Robot(
-                x=self.np_random.uniform(-3.5, 3.5),
+                x=self.np_random.uniform(0.2, 3.5),
                 y=self.np_random.uniform(-2.5, 2.5),
                 theta=self.np_random.uniform(-180, 180)
             )
                                                
             pos_frame.robots_blue[0] = Robot(
-                x=self.np_random.uniform(-3.5, 3.5),
+                x=self.np_random.uniform(-3.5, 0.2),
                 y=self.np_random.uniform(-2.5, 2.5),
                 theta=self.np_random.uniform(-180, 180)
             )

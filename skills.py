@@ -72,29 +72,9 @@ def move_to_ball(robot, ball, speed=1.0):
 
         return np.array([v_x, v_y, angular_velocity, 0, 0.0])
 
-#Shoot Ball at Goal
-def shoot_goal(env, robot, robot_color):
-    robot_pos = np.array([robot.x, robot.y])
-
-    best_target, _ = goal_trajectory_target_and_dist(env, robot, robot_color)
-
-    theta_rad = np.deg2rad(robot.theta)
-    robot_forward = np.array([np.cos(theta_rad), np.sin(theta_rad)])
-
-    robot_to_goal = best_target - robot_pos
-
-    t = robot_to_goal @ robot_forward
-    t = np.clip(t, 0, None)
-
-    closest_point = robot_pos + t * robot_forward
-    dist = np.linalg.norm(best_target - closest_point)
-
-    if dist <= env.field.ball_radius:
-        return np.array([0, 0, 0, 1.0, 0])
-    else:
-        return np.array([0, 0, turn_to_point(robot, best_target), 0, 1.0])
 
 
+# Shoot Ball at Goal
 def shoot_at_goal_center(env, robot, team_color):
     goal_x = -env.field.length / 2.0 if team_color == "yellow" else env.field.length / 2.0
     goal_y = 0.0
@@ -108,6 +88,7 @@ def shoot_at_goal_center(env, robot, team_color):
     else:
         return np.array([0.0, 0.0, v_theta, 0.0, 1.0])
 
+
 def shoot_at_point(robot, target_point):
     v_theta = turn_to_point(robot, target_point)
     
@@ -117,10 +98,9 @@ def shoot_at_point(robot, target_point):
     else:
         return np.array([0.0, 0.0, v_theta, 0.0, 1.0])
 
+
 def dribble_to_point(robot, point, speed=0.8):
 
     v_x, v_y = move_to_point(robot, point, speed=speed)
     v_theta = turn_to_point(robot, point)
-    
-    
     return np.array([v_x, v_y, v_theta, 0.0, 1.0])

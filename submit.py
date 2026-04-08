@@ -10,7 +10,7 @@ def main():
     log_folder = "slurm_logs"
     os.makedirs(log_folder, exist_ok=True)
 
-    
+
     executor = submitit.AutoExecutor(folder=log_folder)
 
 
@@ -29,9 +29,6 @@ def main():
     seeds = range(8)
 
     jobs = []
-
-
-
 
     with executor.batch():
         for seed in seeds:

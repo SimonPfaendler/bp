@@ -14,6 +14,7 @@ import wandb
 from ssl_rl_1v1_continuous import SSL1v1ContinuousEnv
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.callbacks import BaseCallback
 
 slurm_cpus = int(os.environ.get('SLURM_CPUS_PER_TASK', 1))
 torch.set_num_threads(slurm_cpus)
@@ -22,6 +23,31 @@ model_dir = "models"
 log_dir = "logs"
 os.makedirs(model_dir, exist_ok=True)
 os.makedirs(log_dir, exist_ok=True)
+
+class CurriculumCallback(BaseCallback):
+    def __init__(self, total_timesteps, verbose=0):
+        super().__init__(verbose)
+        self.total_timesteps = total_timesteps
+
+    def _on_step(self) -> bool:
+        # Wir teilen die Gesamt-Trainingszeit in 4 Phasen auf
+        progress = self.num_timesteps / self.total_timesteps
+        
+        if progress < 0.15:
+            level = 1   # Erste 15%: Nur Schießen üben
+        elif progress < 0.40:
+            level = 2   # 15% bis 40%: Ball finden und Schießen
+        elif progress < 0.70:
+            level = 3   # 40% bis 70%: 1v1 Attack lernen
+        else:
+            level = 4   # Letzte 30%: Volles Chaos meistern
+            
+        # Aktualisiere alle parallelen Umgebungen
+        self.training_env.env_method("set_curriculum_level", level)
+        
+        # Logge das aktuelle Level in Weights & Biases!
+        self.logger.record("curriculum/level", level)
+        return True
 
 def train(sb3_algo, action_type, reward_type, seed, load_path=None):
 
@@ -70,7 +96,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
                         train_freq=1,
                         gradient_steps=-1,
-                        batch_size=256,
+                        batch_size=512,
                         policy_kwargs=custom_policy_kwargs)
         elif sb3_algo == 'PPO':
             model = PPO('MlpPolicy', env, verbose=1, device='auto', tensorboard_log=current_log_dir, seed=seed)
@@ -79,13 +105,15 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TIMESTEPS = 2000000
+    TIMESTEPS = 200000
     iters = 0
+
+    curriculum_callback = CurriculumCallback(total_timesteps=TIMESTEPS)
     
     
     while True:
         iters += 1
-        model.learn(total_timesteps=TIMESTEPS, reset_num_timesteps=False, log_interval=log_freq)
+        model.learn(total_timesteps=TIMESTEPS, reset_num_timesteps=False, log_interval=log_freq, callback=curriculum_callback)
         save_path = f"{model_dir}/{run_name}_{TIMESTEPS*iters}"
         model.save(save_path)
         print(f"Modell gespeichert unter: {save_path}")

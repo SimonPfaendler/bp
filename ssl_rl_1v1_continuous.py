@@ -139,6 +139,9 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
         return obs, reward, terminated, truncated, info
 
+
+    def set_curriculum_level(self, level):
+        self.curriculum_level = level
     
     def convert_actions(self, action_array, angle):
         """Denormalize, clip to absolute max and convert to local"""
@@ -368,8 +371,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 self.blue_shot_in_progress = False 
             elif yellow_has_ball:
                 if self.blue_shot_in_progress:
-                    reward += 3.0  
-                    print(f" SHOT INTERCEPTED \033[K", end='\r')
+                    reward += 3.0
                 self.last_possession = 'yellow'
                 self.blue_shot_in_progress = False 
             else:
@@ -382,7 +384,6 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 reward -= 0.05
             if dist_yellow_blue < 0.18:
                 reward -= 2.0
-                print("CRASH", end='\r')
 
             # Robot -> Ball
             if hasattr(self, 'last_dist_ball') and self.last_dist_ball is not None:
@@ -434,7 +435,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             done = True
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0: 
-                    reward += 100.0
+                    reward += 500.0
                     self.match_result = 1 
                 else:          
                     reward -= 100.0
@@ -465,66 +466,96 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
     def _get_initial_positions_frame(self):
         pos_frame = Frame()
         
+        # Standardmäßig Level 4, falls nichts gesetzt wurde
+        level = getattr(self, 'curriculum_level', 4)
 
-        scenario_roll = self.np_random.random()
+        if level == 1:
+            # ==========================================
+            # LEVEL 1: ELFMETER (Leeres Tor, Ball liegt bereit)
+            # Ziel: Lerne, wie man schießt (Geradeaus-Bewegung)
+            # ==========================================
+            bx = self.np_random.uniform(-2.0, -1.0)
+            by = self.np_random.uniform(-0.3, 0.3)
+            pos_frame.ball = Ball(x=bx, y=by)
 
-        if scenario_roll < 0.33:
-            # SZENARIO 1: ATTACK
+            # Gelb direkt hinter den Ball, Blick Richtung Tor (-X)
+            pos_frame.robots_yellow[0] = Robot(
+                x=bx + 0.3, 
+                y=by, 
+                theta=180.0 
+            )
+
+            # Blau ist komplett aus dem Weg (zuschauen)
+            pos_frame.robots_blue[0] = Robot(x=0.0, y=3.0, theta=0.0)
+
+        elif level == 2:
+            # ==========================================
+            # LEVEL 2: FREIES FELD (Leeres Tor, Ball weit weg)
+            # Ziel: Lerne, den Ball zu finden und zum Tor zu navigieren
+            # ==========================================
+            pos_frame.ball = Ball(
+                x=self.np_random.uniform(-1.0, 2.0),
+                y=self.np_random.uniform(-1.5, 1.5)
+            )
+
+            pos_frame.robots_yellow[0] = Robot(
+                x=self.np_random.uniform(2.0, 3.5),
+                y=self.np_random.uniform(-2.0, 2.0),
+                theta=self.np_random.uniform(-180, 180)
+            )
+
+            # Blau parkt weiterhin abseits
+            pos_frame.robots_blue[0] = Robot(x=0.0, y=3.0, theta=0.0)
+
+        elif level == 3:
+            # ==========================================
+            # LEVEL 3: 1v1 ATTACK (Gelb hat Vorteil, Blau verteidigt)
+            # Ziel: Lerne Zweikampf & Gegner ausweichen
+            # ==========================================
             bx = self.np_random.uniform(-1.0, 2.0)
             by = self.np_random.uniform(-1.5, 1.5)
             pos_frame.ball = Ball(x=bx, y=by)
 
-            y_theta = self.np_random.uniform(135.0, 225.0)
             pos_frame.robots_yellow[0] = Robot(
                 x=bx + self.np_random.uniform(0.3, 1.0), 
                 y=by + self.np_random.uniform(-0.5, 0.5), 
-                theta=y_theta
+                theta=self.np_random.uniform(135.0, 225.0)
             )
 
+            # Blau startet zwischen Ball und Tor
             pos_frame.robots_blue[0] = Robot(
                 x=self.np_random.uniform(-3.5, bx - 0.5),
                 y=self.np_random.uniform(-1.5, 1.5),
                 theta=self.np_random.uniform(-180, 180)
             )
 
-        elif scenario_roll < 0.66:
-            # SZENARIO 2: DEFEND
-            blue_x = self.np_random.uniform(-1.0, 2.0)
-            blue_y = self.np_random.uniform(-2.0, 2.0)
-            blue_theta = self.np_random.uniform(-45.0, 45.0) 
-            pos_frame.robots_blue[0] = Robot(x=blue_x, y=blue_y, theta=blue_theta)
-            
-
-            pos_frame.ball = Ball(
-                x=blue_x + self.np_random.uniform(0.12, 0.18), 
-                y=blue_y + self.np_random.uniform(-0.05, 0.05)
-            )
-
-
-            pos_frame.robots_yellow[0] = Robot(
-                x=self.np_random.uniform(2.5, 4.0), 
-                y=self.np_random.uniform(-1.5, 1.5), 
-                theta=self.np_random.uniform(150.0, 210.0)
-            )
-
         else:
-            # SZENARIO 3: CHAOS
+            # ==========================================
+            # LEVEL 4: MASTER / CHAOS (Vollständiges Spiel)
+            # Ziel: Robuste Strategien in allen Lagen (dein alter Code)
+            # ==========================================
+            scenario_roll = self.np_random.random()
 
-            pos_frame.ball = Ball(
-                x=self.np_random.uniform(-3.0, 3.0),
-                y=self.np_random.uniform(-2.0, 2.0)
-            )
-            
-            pos_frame.robots_yellow[0] = Robot(
-                x=self.np_random.uniform(0.2, 3.5),
-                y=self.np_random.uniform(-2.5, 2.5),
-                theta=self.np_random.uniform(-180, 180)
-            )
-                                               
-            pos_frame.robots_blue[0] = Robot(
-                x=self.np_random.uniform(-3.5, 0.2),
-                y=self.np_random.uniform(-2.5, 2.5),
-                theta=self.np_random.uniform(-180, 180)
-            )
+            if scenario_roll < 0.33:
+                # Attack
+                bx = self.np_random.uniform(-1.0, 2.0)
+                by = self.np_random.uniform(-1.5, 1.5)
+                pos_frame.ball = Ball(x=bx, y=by)
+                pos_frame.robots_yellow[0] = Robot(x=bx+0.5, y=by, theta=180)
+                pos_frame.robots_blue[0] = Robot(x=bx-1.0, y=by, theta=0)
+
+            elif scenario_roll < 0.66:
+                # Defend
+                blue_x = self.np_random.uniform(-1.0, 2.0)
+                blue_y = self.np_random.uniform(-2.0, 2.0)
+                pos_frame.robots_blue[0] = Robot(x=blue_x, y=blue_y, theta=0)
+                pos_frame.ball = Ball(x=blue_x+0.15, y=blue_y)
+                pos_frame.robots_yellow[0] = Robot(x=3.0, y=0.0, theta=180)
+
+            else:
+                # Chaos
+                pos_frame.ball = Ball(x=self.np_random.uniform(-3, 3), y=self.np_random.uniform(-2, 2))
+                pos_frame.robots_yellow[0] = Robot(x=self.np_random.uniform(0, 3.5), y=self.np_random.uniform(-2.5, 2.5), theta=self.np_random.uniform(-180, 180))
+                pos_frame.robots_blue[0] = Robot(x=self.np_random.uniform(-3.5, 0), y=self.np_random.uniform(-2.5, 2.5), theta=self.np_random.uniform(-180, 180))
 
         return pos_frame

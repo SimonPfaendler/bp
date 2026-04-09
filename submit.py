@@ -15,18 +15,19 @@ def main():
 
 
     executor.update_parameters(
-        slurm_job_name="ssl_phase1",
-        slurm_time="24:00:00",          
-        slurm_partition="cpu",                     
-        slurm_cpus_per_task=4,          
-        slurm_mem="8GB",               
-    )
+        slurm_job_name="sac_gpu_run",
+        slurm_time="01:00:00",
+        slurm_partition="dev_gpu_h100",       
+        slurm_gpus_per_task=1,  
+        slurm_cpus_per_task=8,      
+        slurm_mem="32GB",          
+        )
 
     
     algo = "SAC"
     action_type = "low_level"
     reward_type = "dense"
-    seeds = range(8)
+    seeds = [50]
 
     jobs = []
 

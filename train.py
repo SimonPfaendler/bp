@@ -12,6 +12,8 @@ import numpy as np
 import math
 import wandb
 from ssl_rl_1v1_continuous import SSL1v1ContinuousEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.env_util import make_vec_env
 
 slurm_cpus = int(os.environ.get('SLURM_CPUS_PER_TASK', 1))
 torch.set_num_threads(slurm_cpus)
@@ -37,12 +39,20 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             "action_type": action_type,
             "reward_type": reward_type,
             "seed": seed,
+            "cpus": slurm_cpus
         }
     )
+    env_kwargs = dict(action_type=action_type, reward_type=reward_type)
 
 
-    env = SSL1v1ContinuousEnv(action_type=action_type, reward_type=reward_type)
-    env = Monitor(env, info_keywords=("is_success", "match_result", "possession_ratio"))
+    env = make_vec_env(
+        SSL1v1ContinuousEnv,
+        n_envs=slurm_cpus,
+        seed=seed,
+        env_kwargs=env_kwargs,
+        vec_env_cls=SubprocVecEnv,
+        monitor_kwargs={"info_keywords": ("is_success", "match_result", "possession_ratio")}
+    )
     print(f"Starte Training: {sb3_algo} | Modus: {action_type} | Reward: {reward_type} | Seed: {seed}")
 
     if load_path and os.path.exists(load_path):
@@ -52,14 +62,16 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
     else:
         print("Start new Training")
 
-        #custom_policy_kwargs = dict(net_arch=[512, 512])
+        custom_policy_kwargs = dict(net_arch=[512, 512])
         if sb3_algo == 'CrossQ':
-            model = CrossQ('MlpPolicy', env, verbose=1, device='auto', tensorboard_log=current_log_dir, seed=seed)
+            model = CrossQ('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
+                            policy_kwargs=custom_policy_kwargs)
         elif sb3_algo == 'SAC':
-            model = SAC('MlpPolicy', env, verbose=1, device='auto', tensorboard_log=current_log_dir, seed=seed,
-                        train_freq=4,         # Sammle erst 4 Steps im Spiel...
-                        gradient_steps=1,     # ...und mache dann genau 1 Update!
-                        batch_size=1024)
+            model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
+                        train_freq=1,
+                        gradient_steps=-1,
+                        batch_size=256,
+                        policy_kwargs=custom_policy_kwargs)
         elif sb3_algo == 'PPO':
             model = PPO('MlpPolicy', env, verbose=1, device='auto', tensorboard_log=current_log_dir, seed=seed)
 
@@ -67,7 +79,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TIMESTEPS = 100000
+    TIMESTEPS = 2000000
     iters = 0
     
     
@@ -82,7 +94,7 @@ def test(sb3_algo, action_type, reward_type, path_to_model):
     env = SSL1v1ContinuousEnv(action_type=action_type, reward_type=reward_type, render_mode="human")
     
     algo_class = CrossQ if sb3_algo == 'CrossQ' else globals()[sb3_algo]
-    model = algo_class.load(path_to_model, env=env)
+    model = algo_class.load(path_to_model, env=env, device='cpu')
     obs, info = env.reset()
     
     print(f"Teste Modell: {path_to_model}")
@@ -117,6 +129,7 @@ if __name__ == '__main__':
     if args.train:
         path = ""  # Path to model for continued training
         train(args.sb3_algo, args.action_type, args.reward_type, args.seed, load_path=path if os.path.isfile(path) else None)
+
 
     if args.test:
         if os.path.isfile(args.test):

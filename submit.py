@@ -15,13 +15,16 @@ def main():
 
 
     executor.update_parameters(
-        slurm_job_name="sac_gpu_run",
+        slurm_job_name="sac_test_1seed",
         slurm_time="01:00:00",
-        slurm_partition="dev_gpu_h100",       
-        slurm_gpus_per_task=1,  
-        slurm_cpus_per_task=8,      
-        slurm_mem="32GB",          
-        )
+        slurm_partition="dev_gpu_h100",
+        slurm_cpus_per_task=8,
+        slurm_mem="32GB",
+
+        slurm_additional_parameters={
+            "gres": "gpu:1"
+        }
+    )
 
     
     algo = "SAC"

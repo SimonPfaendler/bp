@@ -417,13 +417,15 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             # Robot to Ball
             current_dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
             if self.last_dist_robot_ball is not None:
-                reward += (self.last_dist_robot_ball - current_dist_robot_ball) * 5.0
+                delta_robot_ball = self.last_dist_robot_ball - current_dist_robot_ball
+                reward += np.clip(delta_robot_ball * 5.0, -0.1, 0.5)
             self.last_dist_robot_ball = current_dist_robot_ball
 
             # Ball to Goal
             current_dist_ball_goal = np.linalg.norm(np.array([ball.x, ball.y]) - opponent_goal_pos)
             if self.last_dist_ball_goal is not None:
-                reward += (self.last_dist_ball_goal - current_dist_ball_goal) * 10.0
+                delta_ball_goal = self.last_dist_ball_goal - current_dist_ball_goal
+                reward += np.clip(delta_ball_goal * 10.0, -0.2, 1.0)
             self.last_dist_ball_goal = current_dist_ball_goal
 
             # Ballpossession
@@ -447,9 +449,9 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             pos_frame.ball = Ball(x=bx, y=by)
 
             pos_frame.robots_yellow[0] = Robot(
-                x=bx + 0.3, 
-                y=by, 
-                theta=180.0 
+                x=bx + self.np_random.uniform(0.3, 0.6), 
+                y=by + self.np_random.uniform(-0.2, 0.2), 
+                theta= 180.0 + self.np_random.uniform(-45.0, 45.0)
             )
 
             pos_frame.robots_blue[0] = Robot(x=0.0, y=3.0, theta=0.0)

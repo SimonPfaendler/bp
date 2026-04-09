@@ -32,11 +32,11 @@ class CurriculumCallback(BaseCallback):
     def _on_step(self) -> bool:
         progress = self.num_timesteps / self.total_timesteps
         
-        if progress < 0.25:
+        if progress < 0.15:
             level = 1 
-        elif progress < 0.55:
+        elif progress < 0.35:
             level = 2
-        elif progress < 0.85:
+        elif progress < 0.70:
             level = 3
         else:
             level = 4
@@ -109,7 +109,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TOTAL_STEPS = 2800000
+    TOTAL_STEPS = 13500000
 
     curriculum_callback = CurriculumCallback(total_timesteps=TOTAL_STEPS)
     

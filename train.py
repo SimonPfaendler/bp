@@ -14,7 +14,7 @@ import wandb
 from ssl_rl_1v1_continuous import SSL1v1ContinuousEnv
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, CallbackList
 
 slurm_cpus = int(os.environ.get('SLURM_CPUS_PER_TASK', 1))
 torch.set_num_threads(slurm_cpus)
@@ -30,22 +30,21 @@ class CurriculumCallback(BaseCallback):
         self.total_timesteps = total_timesteps
 
     def _on_step(self) -> bool:
-        # Wir teilen die Gesamt-Trainingszeit in 4 Phasen auf
         progress = self.num_timesteps / self.total_timesteps
         
         if progress < 0.15:
-            level = 1   # Erste 15%: Nur Schießen üben
+            level = 1 
         elif progress < 0.40:
-            level = 2   # 15% bis 40%: Ball finden und Schießen
+            level = 2
         elif progress < 0.70:
-            level = 3   # 40% bis 70%: 1v1 Attack lernen
+            level = 3
         else:
-            level = 4   # Letzte 30%: Volles Chaos meistern
+            level = 4
             
-        # Aktualisiere alle parallelen Umgebungen
+
         self.training_env.env_method("set_curriculum_level", level)
         
-        # Logge das aktuelle Level in Weights & Biases!
+
         self.logger.record("curriculum/level", level)
         return True
 
@@ -105,18 +104,30 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TIMESTEPS = 200000
-    iters = 0
+    TOTAL_STEPS = 200000 
 
-    curriculum_callback = CurriculumCallback(total_timesteps=TIMESTEPS)
+    curriculum_callback = CurriculumCallback(total_timesteps=TOTAL_STEPS)
+    
+    checkpoint_callback = CheckpointCallback(
+        save_freq=50000, 
+        save_path=model_dir,
+        name_prefix=run_name,
+        save_replay_buffer=True
+    )
+
+    
+    callback_list = CallbackList([curriculum_callback, checkpoint_callback])
     
     
-    while True:
-        iters += 1
-        model.learn(total_timesteps=TIMESTEPS, reset_num_timesteps=False, log_interval=log_freq, callback=curriculum_callback)
-        save_path = f"{model_dir}/{run_name}_{TIMESTEPS*iters}"
-        model.save(save_path)
-        print(f"Modell gespeichert unter: {save_path}")
+    model.learn(
+        total_timesteps=TOTAL_STEPS, 
+        reset_num_timesteps=False, 
+        log_interval=log_freq,
+        callback=callback_list
+    )
+    final_save_path = f"{model_dir}/{run_name}_final"
+    model.save(final_save_path)
+    print(f"Training done: {final_save_path}")
 
 def test(sb3_algo, action_type, reward_type, path_to_model):
     env = SSL1v1ContinuousEnv(action_type=action_type, reward_type=reward_type, render_mode="human")
@@ -125,7 +136,7 @@ def test(sb3_algo, action_type, reward_type, path_to_model):
     model = algo_class.load(path_to_model, env=env, device='cpu')
     obs, info = env.reset()
     
-    print(f"Teste Modell: {path_to_model}")
+    print(f"Test Model: {path_to_model}")
     summe = 0.0
     
     while True:

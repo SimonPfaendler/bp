@@ -259,7 +259,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             v_x_local, v_y_local, v_theta_clipped = self.convert_actions(
                 [v_x_global, v_y_global, v_theta], angle_rad
             )
-            print(f"LL Action: v_x={v_x_global:.2f}, v_y={v_y_global:.2f}, v_theta={v_theta:.2f}, kick={kick}, dribble={dribble}   ", end='\r')
+            #print(f"LL Action: v_x={v_x_global:.2f}, v_y={v_y_global:.2f}, v_theta={v_theta:.2f}, kick={kick}, dribble={dribble}   ", end='\r')
 
 
         # SKILLS 
@@ -290,20 +290,20 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             # Skill Execution
             if self.current_skill == 4: # Dribble
                 raw_action = dribble_to_point(yellow, target_point, speed=0.8)
-                print(f"Skill: Dribble to Point ({target_x:.2f}, {target_y:.2f})", end='\r')
+                # print(f"Skill: Dribble to Point ({target_x:.2f}, {target_y:.2f})", end='\r')
             elif self.current_skill == 0:
                 raw_action = move_to_ball(yellow, ball, speed=1.0)
-                print(f"Skill: Move to Ball (Dist: {current_dist_ball:.2f})", end='\r')
+                # print(f"Skill: Move to Ball (Dist: {current_dist_ball:.2f})", end='\r')
             elif self.current_skill == 1:
                 raw_action = shoot_at_point(yellow, target_point)
-                print(f"Skill: Shoot at Point ({target_x:.2f}, {target_y:.2f})", end='\r')
+                # print(f"Skill: Shoot at Point ({target_x:.2f}, {target_y:.2f})", end='\r')
             elif self.current_skill == 2:
                 v_x, v_y = move_to_point(yellow, target_point, speed=1.0)
                 raw_action[0], raw_action[1] = v_x, v_y
-                print(f"Skill: Move to Point ({target_x:.2f}, {target_y:.2f})", end='\r')
+                # print(f"Skill: Move to Point ({target_x:.2f}, {target_y:.2f})", end='\r')
             else:
                 raw_action[2] = turn_to_point(yellow, target_point)
-                print(f"Skill: Turn to Point ({target_x:.2f}, {target_y:.2f})", end='\r')
+                # print(f"Skill: Turn to Point ({target_x:.2f}, {target_y:.2f})", end='\r')
 
             # Final Parameter
             v_x_global, v_y_global, v_theta = raw_action[0], raw_action[1], raw_action[2]
@@ -327,14 +327,31 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                              kick_v_x=kick, dribbler=dribble)
 
         # Blue Heuristic
-        b_cmd = blue_attacker_heuristic(self, blue_robot_data)
-        b_angle_rad = np.deg2rad(blue_robot_data.theta)
-        bv_x, bv_y, bv_theta = self.convert_actions([b_cmd[0], b_cmd[1], b_cmd[2]], b_angle_rad)
-        
-        robot_blue = Robot(yellow=False, id=0, 
-                           v_x=bv_x, v_y=bv_y, v_theta=bv_theta, 
-                           kick_v_x=b_cmd[3], 
-                           dribbler=True if b_cmd[4] > 0 else False)
+        level = getattr(self, 'curriculum_level', 4)
+
+        if level < 3:
+            # LEVEL 1 & 2: Der blaue Roboter ist komplett eingefroren!
+            bv_x, bv_y, bv_theta = 0.0, 0.0, 0.0
+            blue_kick = 0.0
+            blue_dribble = False
+        else:
+            # LEVEL 3 & 4: Normale Heuristik feuert
+            b_cmd = blue_attacker_heuristic(self, blue_robot_data)
+            b_angle_rad = np.deg2rad(blue_robot_data.theta)
+            bv_x, bv_y, bv_theta = self.convert_actions([b_cmd[0], b_cmd[1], b_cmd[2]], b_angle_rad)
+            blue_kick = b_cmd[3]
+            blue_dribble = True if b_cmd[4] > 0 else False
+
+        # Blauen Roboter für den Simulator verpacken
+        robot_blue = Robot(
+            yellow=False, 
+            id=0, 
+            v_x=bv_x, 
+            v_y=bv_y, 
+            v_theta=bv_theta, 
+            kick_v_x=blue_kick, 
+            dribbler=blue_dribble
+        )
         
         return [robot_blue, robot_yellow]
 
@@ -466,33 +483,26 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
     def _get_initial_positions_frame(self):
         pos_frame = Frame()
         
-        # Standardmäßig Level 4, falls nichts gesetzt wurde
         level = getattr(self, 'curriculum_level', 4)
 
         if level == 1:
-            # ==========================================
-            # LEVEL 1: ELFMETER (Leeres Tor, Ball liegt bereit)
-            # Ziel: Lerne, wie man schießt (Geradeaus-Bewegung)
-            # ==========================================
+            # LEVEL 1: PEANUT CHALLENGE
+
             bx = self.np_random.uniform(-2.0, -1.0)
             by = self.np_random.uniform(-0.3, 0.3)
             pos_frame.ball = Ball(x=bx, y=by)
 
-            # Gelb direkt hinter den Ball, Blick Richtung Tor (-X)
             pos_frame.robots_yellow[0] = Robot(
                 x=bx + 0.3, 
                 y=by, 
                 theta=180.0 
             )
 
-            # Blau ist komplett aus dem Weg (zuschauen)
             pos_frame.robots_blue[0] = Robot(x=0.0, y=3.0, theta=0.0)
 
         elif level == 2:
-            # ==========================================
-            # LEVEL 2: FREIES FELD (Leeres Tor, Ball weit weg)
-            # Ziel: Lerne, den Ball zu finden und zum Tor zu navigieren
-            # ==========================================
+            # LEVEL 2: FREE BALL
+
             pos_frame.ball = Ball(
                 x=self.np_random.uniform(-1.0, 2.0),
                 y=self.np_random.uniform(-1.5, 1.5)
@@ -504,14 +514,11 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 theta=self.np_random.uniform(-180, 180)
             )
 
-            # Blau parkt weiterhin abseits
+            
             pos_frame.robots_blue[0] = Robot(x=0.0, y=3.0, theta=0.0)
 
         elif level == 3:
-            # ==========================================
-            # LEVEL 3: 1v1 ATTACK (Gelb hat Vorteil, Blau verteidigt)
-            # Ziel: Lerne Zweikampf & Gegner ausweichen
-            # ==========================================
+            # LEVEL 3: 1v1 ATTACK
             bx = self.np_random.uniform(-1.0, 2.0)
             by = self.np_random.uniform(-1.5, 1.5)
             pos_frame.ball = Ball(x=bx, y=by)
@@ -522,7 +529,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 theta=self.np_random.uniform(135.0, 225.0)
             )
 
-            # Blau startet zwischen Ball und Tor
+            
             pos_frame.robots_blue[0] = Robot(
                 x=self.np_random.uniform(-3.5, bx - 0.5),
                 y=self.np_random.uniform(-1.5, 1.5),
@@ -530,10 +537,8 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             )
 
         else:
-            # ==========================================
-            # LEVEL 4: MASTER / CHAOS (Vollständiges Spiel)
-            # Ziel: Robuste Strategien in allen Lagen (dein alter Code)
-            # ==========================================
+            # LEVEL 4:
+
             scenario_roll = self.np_random.random()
 
             if scenario_roll < 0.33:

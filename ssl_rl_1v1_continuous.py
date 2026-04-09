@@ -330,19 +330,19 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         level = getattr(self, 'curriculum_level', 4)
 
         if level < 3:
-            # LEVEL 1 & 2: Der blaue Roboter ist komplett eingefroren!
+            # LEVEL 1 & 2
             bv_x, bv_y, bv_theta = 0.0, 0.0, 0.0
             blue_kick = 0.0
             blue_dribble = False
         else:
-            # LEVEL 3 & 4: Normale Heuristik feuert
+            # LEVEL 3 & 4: Normal Heuristic
             b_cmd = blue_attacker_heuristic(self, blue_robot_data)
             b_angle_rad = np.deg2rad(blue_robot_data.theta)
             bv_x, bv_y, bv_theta = self.convert_actions([b_cmd[0], b_cmd[1], b_cmd[2]], b_angle_rad)
             blue_kick = b_cmd[3]
             blue_dribble = True if b_cmd[4] > 0 else False
 
-        # Blauen Roboter für den Simulator verpacken
+        
         robot_blue = Robot(
             yellow=False, 
             id=0, 
@@ -364,101 +364,31 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         done = False
         truncated = False
         reward = 0.0
+        
         max_x = self.field.length / 2.0
         max_y = self.field.width / 2.0
         goal_half_width = 0.5
-
-        # Ball Possesion
-        current_dist_yellow = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
-        yellow_has_ball = (current_dist_yellow < 0.12) or yellow.infrared
         
-        current_dist_blue = math.hypot(blue.x - ball.x, blue.y - ball.y)
-        blue_has_ball = (current_dist_blue < 0.12) or blue.infrared
+        
+        opponent_goal_pos = np.array([-max_x, 0.0])
 
-        if yellow_has_ball:
-            self.yellow_possession_steps += 1
 
         if self.reward_type == "dense":
-            reward -= 0.005
-            if self.current_skill == 4: # Dribble
-                reward -= 0.005
-            ball_speed = math.hypot(ball.v_x, ball.v_y)
-            if blue_has_ball:
-                self.last_possession = 'blue'
-                self.blue_shot_in_progress = False 
-            elif yellow_has_ball:
-                if self.blue_shot_in_progress:
-                    reward += 3.0
-                self.last_possession = 'yellow'
-                self.blue_shot_in_progress = False 
-            else:
-                if self.last_possession == 'blue' and ball_speed > 1.5:
-                    self.blue_shot_in_progress = True
+            reward -= 0.005 
 
-            # CRASH AVOIDANCE
-            dist_yellow_blue = math.hypot(yellow.x - blue.x, yellow.y - blue.y)
-            if dist_yellow_blue < 0.22:
-                reward -= 0.05
-            if dist_yellow_blue < 0.18:
-                reward -= 2.0
 
-            # Robot -> Ball
-            if hasattr(self, 'last_dist_ball') and self.last_dist_ball is not None:
-                progress = self.last_dist_ball - current_dist_yellow
-                
-                
-                is_shot_flying = (ball.v_x < -0.1 and progress < 0)
-                
-                if not is_shot_flying:
-                    reward += progress * 2.0
-                
-            if current_dist_yellow < 0.12:
-                reward += 0.05
-                if abs(ball.v_x) > 1.0:
-                    reward += 0.1
-                
-            self.last_dist_ball = current_dist_yellow
-
-            # Ball -> Goal 
-            ball_pos = np.array([ball.x, ball.y])
-            goal_a = np.array([-max_x, goal_half_width])
-            goal_b = np.array([-max_x, -goal_half_width])
-            goal_vec = goal_b - goal_a
-            ball_to_goal_a = ball_pos - goal_a
-            
-            # Projection like Tilmans method to find closest point on goal line
-            t = np.dot(ball_to_goal_a, goal_vec) / np.dot(goal_vec, goal_vec)
-            t = np.clip(t, 0.0, 1.0)
-            closest_goal_point = goal_a + t * goal_vec
-            current_ball_goal_dist = np.linalg.norm(ball_pos - closest_goal_point)
-            
-            # Reward for Ball closer to goal
-            if hasattr(self, 'last_ball_goal_dist') and self.last_ball_goal_dist is not None:
-                progress_ball = self.last_ball_goal_dist - current_ball_goal_dist
-                is_good_shot = (ball.v_x < -0.1 and progress_ball > 0)
-                
-                if yellow_has_ball or is_good_shot:
-                    distance_factor = 1.0 + (1.0 / (current_ball_goal_dist + 0.5))
-                    reward += progress_ball * 5.0 * distance_factor 
-                
-            self.last_ball_goal_dist = current_ball_goal_dist
-
-            # Dribbler Bonus
-            if ball.v_x < -0.2 and yellow_has_ball:
-                reward += 0.5
-
-        # END CONDITIONS
+        # SPARSE REWARDS
         if abs(ball.x) > max_x:
             done = True
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0: 
-                    reward += 500.0
+                    reward += 100.0
                     self.match_result = 1 
                 else:          
                     reward -= 100.0
                     self.match_result = -1 
             else:
-                reward -= 10.0
+                reward -= 10.0        
             return reward, done
         
         # Ball Out of Bounds
@@ -467,16 +397,39 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             reward -= 10.0 
             return reward, done
 
-        # Yellow Robot Out of Bounds
+        # Robot Out of Bounds
         if abs(yellow.x) > max_x or abs(yellow.y) > max_y:
-            reward -= 10.0
             done = True
+            reward -= 10.0
+            return reward, done
         
         # Timeout
         if self.current_step >= self.max_steps:
             truncated = True
-            reward -= 5.0 
+            reward -= 5.0
+            return reward, done
 
+        # DENSE REWARDS (Potential-Based Shaping)
+  
+        if self.reward_type == "dense":
+            
+            # Robot to Ball
+            current_dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
+            if hasattr(self, 'last_dist_robot_ball'):
+                reward += (self.last_dist_robot_ball - current_dist_robot_ball) * 5.0
+            self.last_dist_robot_ball = current_dist_robot_ball
+
+            # Ball to Goal
+            current_dist_ball_goal = np.linalg.norm(np.array([ball.x, ball.y]) - opponent_goal_pos)
+            if hasattr(self, 'last_dist_ball_goal'):
+                reward += (self.last_dist_ball_goal - current_dist_ball_goal) * 10.0
+            self.last_dist_ball_goal = current_dist_ball_goal
+
+            # Ballpossession
+            if current_dist_robot_ball < 0.12 or yellow.infrared:
+                reward += 0.05
+                self.yellow_possession_steps += 1
+                
         return reward, done
 
     
@@ -486,7 +439,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         level = getattr(self, 'curriculum_level', 4)
 
         if level == 1:
-            # LEVEL 1: PEANUT CHALLENGE
+            # LEVEL 1: PENALTY CHALLENGE
 
             bx = self.np_random.uniform(-2.0, -1.0)
             by = self.np_random.uniform(-0.3, 0.3)

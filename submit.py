@@ -3,7 +3,6 @@ import os
 
 def run_experiment(algo, action_type, reward_type, seed):
     cmd = f"python train.py {algo} -t --action_type {action_type} --reward_type {reward_type} --seed {seed}"
-    print(f"Führe aus: {cmd}")
     os.system(cmd)
 
 def main():
@@ -15,11 +14,11 @@ def main():
 
 
     executor.update_parameters(
-        slurm_job_name="sac_test_1seed",
-        slurm_time="01:00:00",
+        slurm_job_name="sac_20min_test",
+        slurm_time="00:30:00",
         slurm_partition="dev_gpu_h100",
-        slurm_cpus_per_task=8,
-        slurm_mem="32GB",
+        slurm_cpus_per_task=16,
+        slurm_mem="64GB",
 
         slurm_additional_parameters={
             "gres": "gpu:1"

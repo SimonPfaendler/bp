@@ -32,11 +32,11 @@ class CurriculumCallback(BaseCallback):
     def _on_step(self) -> bool:
         progress = self.num_timesteps / self.total_timesteps
         
-        if progress < 0.15:
+        if progress < 0.25:
             level = 1 
-        elif progress < 0.40:
+        elif progress < 0.55:
             level = 2
-        elif progress < 0.70:
+        elif progress < 0.85:
             level = 3
         else:
             level = 4
@@ -93,10 +93,15 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
                             policy_kwargs=custom_policy_kwargs)
         elif sb3_algo == 'SAC':
             model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
-                        train_freq=1,
-                        gradient_steps=-1,
-                        batch_size=512,
-                        policy_kwargs=custom_policy_kwargs)
+                        train_freq=16,
+                        gradient_steps=16,
+                        batch_size=1024,
+                        policy_kwargs=custom_policy_kwargs,
+                        buffer_size=1000000,
+                        ent_coef='auto'
+                    )
+
+
         elif sb3_algo == 'PPO':
             model = PPO('MlpPolicy', env, verbose=1, device='auto', tensorboard_log=current_log_dir, seed=seed)
 
@@ -104,7 +109,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TOTAL_STEPS = 200000 
+    TOTAL_STEPS = 400000 
 
     curriculum_callback = CurriculumCallback(total_timesteps=TOTAL_STEPS)
     

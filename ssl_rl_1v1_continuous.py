@@ -415,13 +415,13 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             
             # Robot to Ball
             current_dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
-            if hasattr(self, 'last_dist_robot_ball'):
+            if self.last_dist_robot_ball is not None:
                 reward += (self.last_dist_robot_ball - current_dist_robot_ball) * 5.0
             self.last_dist_robot_ball = current_dist_robot_ball
 
             # Ball to Goal
             current_dist_ball_goal = np.linalg.norm(np.array([ball.x, ball.y]) - opponent_goal_pos)
-            if hasattr(self, 'last_dist_ball_goal'):
+            if self.last_dist_ball_goal is not None:
                 reward += (self.last_dist_ball_goal - current_dist_ball_goal) * 10.0
             self.last_dist_ball_goal = current_dist_ball_goal
 

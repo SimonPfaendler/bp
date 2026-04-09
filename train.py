@@ -109,12 +109,12 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TOTAL_STEPS = 400000 
+    TOTAL_STEPS = 2800000
 
     curriculum_callback = CurriculumCallback(total_timesteps=TOTAL_STEPS)
     
     checkpoint_callback = CheckpointCallback(
-        save_freq=50000, 
+        save_freq=10000, 
         save_path=model_dir,
         name_prefix=run_name,
         save_replay_buffer=True

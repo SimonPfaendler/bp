@@ -61,8 +61,8 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             shape=(obs_size,), 
             dtype=np.float32
         )
-        self.last_dist_ball = None
-        self.last_ball_goal_dist = None
+        self.last_dist_robot_ball = None 
+        self.last_dist_ball_goal = None
         self.current_step = 0
         self.total_steps = 0
         self.max_steps = 1500
@@ -88,8 +88,8 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         
     
     def reset(self, seed=None, **kwargs):
-        self.last_dist_ball = None
-        self.last_ball_goal_dist = None
+        self.last_dist_robot_ball = None
+        self.last_dist_ball_goal = None
         self.current_step = 0
         self.skill_counter = 0
         self.current_skill = 0

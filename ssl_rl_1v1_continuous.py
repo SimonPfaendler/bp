@@ -406,6 +406,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         # Timeout
         if self.current_step >= self.max_steps:
             truncated = True
+            done = True
             reward -= 5.0
             return reward, done
 

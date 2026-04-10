@@ -113,7 +113,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TOTAL_STEPS = 13500000
+    TOTAL_STEPS = 23500000
 
     curriculum_callback = CurriculumCallback(total_timesteps=TOTAL_STEPS)
     

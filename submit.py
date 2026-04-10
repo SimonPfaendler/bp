@@ -14,11 +14,11 @@ def main():
 
 
     executor.update_parameters(
-        slurm_job_name="sac_2h_test",
-        slurm_time="00:20:00",
-        slurm_partition="dev_gpu_h100",
-        slurm_cpus_per_task=16,
-        slurm_mem="64GB",
+        slurm_job_name="sac_vs_crossq",
+        slurm_time="02:00:00",
+        slurm_partition="gpu_h100_short",
+        slurm_cpus_per_task=24,
+        slurm_mem="193GB",
 
         slurm_additional_parameters={
             "gres": "gpu:1"
@@ -26,7 +26,7 @@ def main():
     )
 
     
-    algo = "CrossQ"
+    algos = ["CrossQ", "SAC"]
     action_type = "low_level"
     reward_type = "dense"
     seeds = [51]
@@ -34,9 +34,10 @@ def main():
     jobs = []
 
     with executor.batch():
-        for seed in seeds:
-            job = executor.submit(run_experiment, algo, action_type, reward_type, seed)
-            jobs.append(job)
+        for algo in algos:
+            for seed in seeds:
+                job = executor.submit(run_experiment, algo, action_type, reward_type, seed)
+                jobs.append(job)
     print(len(jobs))
 
 if __name__ == "__main__":

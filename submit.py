@@ -15,7 +15,7 @@ def main():
 
     executor.update_parameters(
         slurm_job_name="sac_2h_test",
-        slurm_time="02:00:00",
+        slurm_time="00:20:00",
         slurm_partition="dev_gpu_h100",
         slurm_cpus_per_task=16,
         slurm_mem="64GB",
@@ -26,10 +26,10 @@ def main():
     )
 
     
-    algo = "SAC"
+    algo = "CrossQ"
     action_type = "low_level"
     reward_type = "dense"
-    seeds = [50]
+    seeds = [51]
 
     jobs = []
 

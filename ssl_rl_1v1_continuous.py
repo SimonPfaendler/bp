@@ -50,7 +50,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             self.action_space = Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
         
         
-        obs_size = 25 
+        obs_size = 29
         
         if self.action_type == "skills":
             obs_size += 2
@@ -169,57 +169,75 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         max_y = self.field.width / 2.0
         max_dist = math.hypot(self.field.length, self.field.width) 
         
-        
+        # Ball Predicion
         future_time = 0.5 
         pred_x = np.clip(ball.x + (ball.v_x * future_time), -max_x, max_x)
         pred_y = np.clip(ball.y + (ball.v_y * future_time), -max_y, max_y)
 
-        
-        goal_half_width = 0.5 
+        # Tilmans Goal Projection
+        goal_half_width = self.field.goal_width / 2.0
         ball_pos = np.array([ball.x, ball.y])
-        
-        # Define goal vector projection points for distance calculation
         goal_a = np.array([-max_x, goal_half_width])
         goal_b = np.array([-max_x, -goal_half_width])
         goal_vec = goal_b - goal_a
         ball_to_goal_a = ball_pos - goal_a
         
-        # Projection Like in Tilmans Thesis
         t = np.dot(ball_to_goal_a, goal_vec) / np.dot(goal_vec, goal_vec)
         t = np.clip(t, 0.0, 1.0)
         closest_goal_point = goal_a + t * goal_vec
         dist_ball_to_goal = np.linalg.norm(ball_pos - closest_goal_point)
+
+         
+        yellow_theta_rad = math.radians(yellow.theta)
         
-        # Distance Robot to Ball
+        # Angle to Ball
+        angle_yellow_to_ball = math.atan2(ball.y - yellow.y, ball.x - yellow.x)
+        rel_angle_ball = (angle_yellow_to_ball - yellow_theta_rad + math.pi) % (2 * math.pi) - math.pi
+        
+        # Angle to Goal
+        angle_yellow_to_goal = math.atan2(closest_goal_point[1] - yellow.y, closest_goal_point[0] - yellow.x)
+        rel_angle_goal = (angle_yellow_to_goal - yellow_theta_rad + math.pi) % (2 * math.pi) - math.pi
+
+        # Dribbel Progess
+        dribble_meter = 0.0
+        if self.is_dribbling and self.dribble_start_pos is not None:
+            robot_pos = np.array([yellow.x, yellow.y])
+            current_dribble_dist = np.linalg.norm(robot_pos - self.dribble_start_pos)
+            dribble_meter = np.clip(current_dribble_dist / self.max_dribble_dist, 0.0, 1.0)
+
+        # 5. Distances
         dist_yellow_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
         dist_blue_ball = math.hypot(blue.x - ball.x, blue.y - ball.y)
 
+
         obs = [
-            # --- BALL ---
+            # BALL
             self.norm_pos(ball.x), self.norm_pos(ball.y),
             self.norm_v(ball.v_x), self.norm_v(ball.v_y),
             dist_ball_to_goal / max_dist,        
             
-            # --- YELLOW ---
+            # YELLOW ROBOT
             self.norm_pos(yellow.x), self.norm_pos(yellow.y),
-            np.clip(np.sin(np.deg2rad(yellow.theta)), -self.NORM_BOUNDS, self.NORM_BOUNDS),
-            np.clip(np.cos(np.deg2rad(yellow.theta)), -self.NORM_BOUNDS, self.NORM_BOUNDS),
+            np.sin(yellow_theta_rad), np.cos(yellow_theta_rad),
             self.norm_v(yellow.v_x), self.norm_v(yellow.v_y), self.norm_w(yellow.v_theta),
             1.0 if yellow.infrared else 0.0,     
-            dist_yellow_ball / max_dist,         
+            dist_yellow_ball / max_dist,
+            rel_angle_ball / math.pi,
+            rel_angle_goal / math.pi,
+            dribble_meter,
             
-            # --- BLUE ---
+            # BLUE ROBOT
             self.norm_pos(blue.x), self.norm_pos(blue.y),
-            np.clip(np.sin(np.deg2rad(blue.theta)), -self.NORM_BOUNDS, self.NORM_BOUNDS),
-            np.clip(np.cos(np.deg2rad(blue.theta)), -self.NORM_BOUNDS, self.NORM_BOUNDS),
+            np.sin(np.deg2rad(blue.theta)), np.cos(np.deg2rad(blue.theta)),
             self.norm_v(blue.v_x), self.norm_v(blue.v_y), self.norm_w(blue.v_theta),
-            1.0 if blue.infrared else 0.0,       
             dist_blue_ball / max_dist,           
             
-            
-            self.norm_pos(pred_x),
-            self.norm_pos(pred_y),
-            ]
+            # PREDICTION
+            self.norm_pos(pred_x), self.norm_pos(pred_y),
+            self.norm_pos(pred_x - yellow.x), self.norm_pos(pred_y - yellow.y) # Relativer Vektor zur Landestelle
+        ]
+        
+        # Skill Info
         if self.action_type == "skills":
             obs.extend([
                 self.current_skill / 4.0,
@@ -367,37 +385,36 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         
         max_x = self.field.length / 2.0
         max_y = self.field.width / 2.0
-        goal_half_width = 0.5
-        
-        
-        opponent_goal_pos = np.array([-max_x, 0.0])
+        goal_half_width = self.field.goal_width / 2.0
 
-
+        #  Time Penalty
         if self.reward_type == "dense":
             reward -= 0.005 
 
-
-        # SPARSE REWARDS
+        
+        
+        # End Conditions
         if abs(ball.x) > max_x:
             done = True
             if abs(ball.y) <= goal_half_width:
-                if ball.x < 0: 
+                if ball.x < 0: # Goal for Yellow
                     reward += 100.0
+                    reward += (self.max_steps - self.current_step) * 0.01 
                     self.match_result = 1 
-                else:          
+                else: # Goal for Blue (Defeat)
                     reward -= 100.0
                     self.match_result = -1 
             else:
-                reward -= 10.0        
+                reward -= 10.0
             return reward, done
-        
-        # Ball Out of Bounds
+
+        # Ball out of bounds
         if abs(ball.y) > max_y:
             done = True
             reward -= 10.0 
             return reward, done
 
-        # Robot Out of Bounds
+        # Robot out of bounds
         if abs(yellow.x) > max_x or abs(yellow.y) > max_y:
             done = True
             reward -= 10.0
@@ -410,26 +427,35 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             reward -= 5.0
             return reward, done
 
-        # DENSE REWARDS (Potential-Based Shaping)
-  
+        # DENSE REWARDS
         if self.reward_type == "dense":
             
             # Robot to Ball
-            current_dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
+            dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
             if self.last_dist_robot_ball is not None:
-                delta_robot_ball = self.last_dist_robot_ball - current_dist_robot_ball
+                delta_robot_ball = self.last_dist_robot_ball - dist_robot_ball
                 reward += np.clip(delta_robot_ball * 5.0, -0.1, 0.5)
-            self.last_dist_robot_ball = current_dist_robot_ball
+            self.last_dist_robot_ball = dist_robot_ball
 
             # Ball to Goal
-            current_dist_ball_goal = np.linalg.norm(np.array([ball.x, ball.y]) - opponent_goal_pos)
+            goal_a = np.array([-max_x, goal_half_width])
+            goal_b = np.array([-max_x, -goal_half_width])
+            goal_vec = goal_b - goal_a
+            ball_pos = np.array([ball.x, ball.y])
+            ball_to_goal_a = ball_pos - goal_a
+            
+            t = np.dot(ball_to_goal_a, goal_vec) / np.dot(goal_vec, goal_vec)
+            t = np.clip(t, 0.0, 1.0)
+            closest_goal_point = goal_a + t * goal_vec
+            dist_ball_to_goal = np.linalg.norm(ball_pos - closest_goal_point)
+
             if self.last_dist_ball_goal is not None:
-                delta_ball_goal = self.last_dist_ball_goal - current_dist_ball_goal
+                delta_ball_goal = self.last_dist_ball_goal - dist_ball_to_goal
                 reward += np.clip(delta_ball_goal * 10.0, -0.2, 1.0)
-            self.last_dist_ball_goal = current_dist_ball_goal
+            self.last_dist_ball_goal = dist_ball_to_goal
 
             # Ballpossession
-            if current_dist_robot_ball < 0.12 or yellow.infrared:
+            if dist_robot_ball < 0.12 or yellow.infrared:
                 reward += 0.05
                 self.yellow_possession_steps += 1
                 

@@ -29,7 +29,7 @@ def main():
     algos = ["CrossQ", "SAC"]
     action_type = "low_level"
     reward_type = "dense"
-    seeds = [51]
+    seeds = [200]
 
     jobs = []
 

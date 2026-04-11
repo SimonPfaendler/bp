@@ -14,7 +14,7 @@ def blue_attacker_heuristic(env, robot):
     if robot.infrared is True:
         return shoot_at_goal_center(env, robot, "blue")
     else:
-        return move_to_ball(robot, env.frame.ball, speed=0.8)
+        return move_to_ball(robot, env.frame.ball, speed=1.0)
 
 
 class SSL1v1ContinuousEnv(SSLBaseEnv):
@@ -411,13 +411,15 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         # Ball out of bounds
         if abs(ball.y) > max_y:
             done = True
-            reward -= 10.0 
+            reward -= 100.0
+            self.match_result = -1 
             return reward, done
 
         # Robot out of bounds
         if abs(yellow.x) > max_x or abs(yellow.y) > max_y:
             done = True
-            reward -= 10.0
+            reward -= 100.0
+            self.match_result = -1
             return reward, done
         
         # Timeout

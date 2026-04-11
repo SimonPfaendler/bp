@@ -30,8 +30,8 @@ class CurriculumCallback(BaseCallback):
         self.total_timesteps = total_timesteps
 
     def _on_step(self) -> bool:
-        progress = self.num_timesteps / self.total_timesteps
-        
+        # progress = self.num_timesteps / self.total_timesteps
+        """
         if progress < 0.04:
             level = 1 
         elif progress < 0.12:
@@ -39,7 +39,8 @@ class CurriculumCallback(BaseCallback):
         elif progress < 0.60:
             level = 3
         else:
-            level = 4
+        """
+        level = 4
             
 
         self.training_env.env_method("set_curriculum_level", level)
@@ -83,7 +84,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
     if load_path and os.path.exists(load_path):
         print(f"Lade existierendes Modell von {load_path} zum Weitertrainieren...")
         algo_class = CrossQ if sb3_algo == 'CrossQ' else globals()[sb3_algo]
-        model = algo_class.load(load_path, env=env, device='auto', tensorboard_log=current_log_dir)
+        model = algo_class.load(load_path, env=env, device='auto', tensorboard_log=current_log_dir, custom_objects={'learning_rate': 0.0001})
     else:
         print("Start new Training")
 
@@ -175,7 +176,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.train:
-        path = ""  # Path to model for continued training
+        path = "models/SAC_low_level_dense_seed200_20260410-221955_final.zip"  # Path to model for continued training
         train(args.sb3_algo, args.action_type, args.reward_type, args.seed, load_path=path if os.path.isfile(path) else None)
 
 

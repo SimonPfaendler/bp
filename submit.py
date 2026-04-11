@@ -14,7 +14,7 @@ def main():
 
 
     executor.update_parameters(
-        slurm_job_name="sac_vs_crossq",
+        slurm_job_name="sac_finetune",
         slurm_time="02:00:00",
         slurm_partition="gpu_h100_short",
         slurm_cpus_per_task=24,
@@ -26,7 +26,7 @@ def main():
     )
 
     
-    algos = ["CrossQ", "SAC"]
+    algos = ["SAC"]
     action_type = "low_level"
     reward_type = "dense"
     seeds = [200]

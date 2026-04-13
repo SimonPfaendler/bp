@@ -29,4 +29,9 @@ Eine Laufzeitanalyse mittels `cProfile` bestätigt die Effizienz der Architektur
    ```bash
    git clone [https://github.com/SimonPfaendler/bp.git](https://github.com/SimonPfaendler/bp.git)
  
+## TODO
+Dieses Projekt befindet sich in der aktiven Entwicklungs- und Evaluierungsphase. Die nächsten geplanten Schritte sind:
 
+* **Upgrade der Baseline-Heuristik:** Erweiterung des blauen gegnerischen Roboters von einer reinen Ballverfolgung hin zu einer dynamischen und reaktiven Verteidigung. Geplant sind die Implementierung eines Torwart-Modus (Winkelverkürzung, Abdecken der Torlinie) sowie ein Interceptor-Verhalten zum Abfangen freier Bälle.
+* **Erneute Evaluierung & Großes Benchmarking:** Durchführung umfangreicher Trainingsläufe auf dem Cluster gegen die verbesserte, schwere Heuristik. Ziel ist es, die Performance-Unterschiede zwischen SAC und CrossQ sowie den Einfluss der Action Spaces (Low-Level Control vs. vordefinierte Skills) unter maximalem taktischen Druck zu quantifizieren.
+* **Integration von Self-Play:** Sobald der Agent fähig ist, die dynamische Heuristik konsistent zu schlagen, soll das Training auf kompetitives Self-Play umgestellt werden. Dadurch wird das Netz gezwungen, tiefgreifende Mikrotaktiken ohne vorgegebene Muster zu erlernen.

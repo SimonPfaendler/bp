@@ -1,12 +1,14 @@
 # bachelorproject_simon_pfaendler
 **Benchmarking Deep Reinforcement Learning in RoboCup SSL: An Analysis of Action Spaces, Reward Shaping, and Algorithmic Performance in 1v1 Scenarios**
 
-<div align="center">
-  <video src="https://github.com/user-attachments/assets/0fafc39d-7999-4870-9514-b68343176fde" width="400" controls></video>
-</div>
+
+
+https://github.com/user-attachments/assets/3fa07e65-bb2d-4827-990b-79da1eaf4871
+
+
 
 ## Projektbeschreibung
-Dieses Repository enthält den Code für meine Bachelorporjekts am Neurorobotics Lab Freiburg. Ziel des Projekts ist es, kontinuierliche RL-Algorithmen (wie SAC und CrossQ) in einer 1-gegen-1-Situation in der `rSoccer`-Umgebung zu trainieren und gegen komplexe handgeschriebene Heuristiken zu evaluieren. 
+Dieses Repository enthält den Code für meine Bachelorprojekts am Neurorobotics Lab Freiburg. Ziel des Projekts ist es, kontinuierliche RL-Algorithmen (wie SAC und CrossQ) in einer 1-gegen-1-Situation in der `rSoccer`-Umgebung zu trainieren und gegen komplexe handgeschriebene Heuristiken zu evaluieren. 
 
 Dabei wird insbesondere der Einfluss von vordefinierten Skills im Vergleich zu rohen Low-Level-Motorbefehlen (Action Spaces) sowie die Auswirkung von Dense vs. Sparse Rewards untersucht.
 

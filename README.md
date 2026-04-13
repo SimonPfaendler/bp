@@ -2,7 +2,7 @@
 **Benchmarking Deep Reinforcement Learning in RoboCup SSL: An Analysis of Action Spaces, Reward Shaping, and Algorithmic Performance in 1v1 Scenarios**
 
 <div align="center">
-  <video src="https://github.com/user-attachments/assets/0fafc39d-7999-4870-9514-b68343176fde" width="800" controls></video>
+  <video src="https://github.com/user-attachments/assets/0fafc39d-7999-4870-9514-b68343176fde" width="400" controls></video>
 </div>
 
 ## Projektbeschreibung
@@ -10,7 +10,7 @@ Dieses Repository enthält den Code für meine Bachelorporjekts am Neurorobotics
 
 Dabei wird insbesondere der Einfluss von vordefinierten Skills im Vergleich zu rohen Low-Level-Motorbefehlen (Action Spaces) sowie die Auswirkung von Dense vs. Sparse Rewards untersucht.
 
-## 🚀 Hauptmerkmale & Architektur
+## Hauptmerkmale & Architektur
 
 * **High-Performance Vektorisierung:** Die Umgebung nutzt `SubprocVecEnv` für asynchrones Multiprocessing. 24 CPU-Kerne berechnen parallel die Physik-Engine (`rSim`), um die Experience Collection drastisch zu beschleunigen.
 * **Batched Inference:** Das Modell-Update und die Aktionsfindung finden asynchron über Batched Processing auf einer Nvidia H100 GPU statt, was Trainingsgeschwindigkeiten von bis zu **2.500 FPS** ermöglicht.
@@ -26,5 +26,5 @@ Eine Laufzeitanalyse mittels `cProfile` bestätigt die Effizienz der Architektur
 1. **Repository klonen:**
    ```bash
    git clone [https://github.com/SimonPfaendler/bp.git](https://github.com/SimonPfaendler/bp.git)
-   cd bp
+ 
 

@@ -9,111 +9,60 @@ from skills import move_to_ball, shoot_at_point, move_to_point, turn_to_point, d
 
 
 
-
-
 def blue_attacker_heuristic(env, robot):
     ball = env.frame.ball
     yellow = env.frame.robots_yellow[0]
-    
-    max_x = env.field.length / 2.0
-    goal_half_width = env.field.goal_width / 2.0
-    
-    # Das Tor, das Blau VERTEIDIGT (Gelb schießt auf -max_x)
-    defend_goal_x = -max_x 
+    defend_goal_x = -env.field.length / 2.0
 
-    # --- 1. ANGRIFF: Blau hat den Ball ---
-    if robot.infrared is True:
-        # Ziel-Tor für Blau ist auf der rechten Seite (+max_x)
-        goal_x = max_x
-        
-        # Wir zielen nicht exakt auf den Pfosten, sondern lassen ~15cm Platz, 
-        # damit der Ball sicher reingeht und nicht abprallt.
-        corner_offset = goal_half_width 
-        
-        # Wo steht Gelb? 
-        if yellow.y > 0:
-            # Gelb ist in der oberen Hälfte -> Schieße hart in die untere Ecke!
-            target_y = -corner_offset
-        else:
-            # Gelb ist in der unteren Hälfte -> Schieße hart in die obere Ecke!
-            target_y = corner_offset
-            
-        target_point = np.array([goal_x, target_y])
-        
-        # Drehen und Schießen
-        v_theta = turn_to_point(robot, target_point)
-        
-        # Wenn er genau genug in die Ecke zielt (Winkel-Toleranz < 0.1), wird geschossen!
-        if abs(v_theta) < 0.1:
-            # [v_x, v_y, v_theta, kick_speed, dribbler]
-            return np.array([0.0, 0.0, 0.0, 5.0, 0.0]) # 5.0 für einen extrem harten Schuss
-        else:
-            # Dribbler anlassen und weiterdrehen, bis der Winkel stimmt
-            return np.array([0.0, 0.0, v_theta, 0.0, 1.0])
-
-    # Distanzen berechnen, um Spielsituation zu bewerten
-    dist_yellow_ball = np.hypot(yellow.x - ball.x, yellow.y - ball.y)
-    dist_blue_yellow = np.hypot(yellow.x - robot.x, yellow.y - robot.y)
+    # Shoot
+    if robot.infrared:
+        return shoot_at_goal_center(env, robot, team_color="blue")
     
-    # UPDATE: Toleranz erhöht. Wenn Gelb näher als 100cm am Ball ist, 
-    # gilt er als "unter Kontrolle" -> Blau bleibt im Tor!
-    yellow_has_ball = dist_yellow_ball < 1.0 or yellow.infrared
-
-    # --- 2. VERTEIDIGUNG: Gelb hat den Ball ---
-    if yellow_has_ball:
-        
-        # A) Pressing-Modus: Nur noch bei extremem Nahkampf (< 25cm)
-        if dist_blue_yellow < 0.25:
-            # Fährt aggressiv in den Ball/Gegner rein
-            v_x, v_y = move_to_point(robot, np.array([ball.x, ball.y]), speed=1.0)
-            v_theta = turn_to_point(robot, np.array([ball.x, ball.y]))
-            return np.array([v_x, v_y, v_theta, 0.0, 0.0])
-            
-        # B) Torwart-Modus: Trajektorien-Prädiktion
+    # Yellow is closer to the ball fall back on the ball on the goal line.
+    dist_blue_ball = math.hypot(robot.x - ball.x, robot.y - ball.y)
+    dist_yellow_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
+    if dist_yellow_ball < dist_blue_ball:
+        goal = np.array([defend_goal_x, 0.0])
+        ball_pos = np.array([ball.x, ball.y])
+        bg = goal - ball_pos
+        bg_len = np.linalg.norm(bg)
+        if bg_len > 0.01:
+            stand = goal - (bg / bg_len) * min(1.0, bg_len * 0.4)
         else:
-            # Stell dich ca. 20cm vor die eigene Torlinie
-            target_x = defend_goal_x + 0.2
-            
-            # --- NEUE LOGIK: Schnittpunkt berechnen ---
-            # Fliegt der Ball schnell auf unser Tor zu? (Negative X-Geschwindigkeit)
-            if ball.v_x < -0.5: 
-                # Zeit bis zum Einschlag berechnen (t = s / v)
-                time_to_intersect = (target_x - ball.x) / ball.v_x
-                
-                # Y-Position beim Einschlag vorhersagen
-                predicted_y = ball.y + (ball.v_y * time_to_intersect)
-                
-                # Torwart fährt genau dorthin (aber bleibt zwischen den Pfosten)
-                target_y = np.clip(predicted_y, -goal_half_width + 0.05, goal_half_width - 0.05)
+            stand = np.array([defend_goal_x + 0.3, 0.0])
+        v_x, v_y = move_to_point(robot, stand, speed=2.0)
+        v_theta = turn_to_point(robot, np.array([ball.x, ball.y]))
+        return np.array([v_x, v_y, v_theta, 0.0, 0.0])
+
+    # Intercept
+    ball_speed = math.hypot(ball.v_x, ball.v_y)
+    if ball_speed > 0.3:
+        # Solve |ball + v·t − robot| = s·t for smallest t ≥ 0.
+        dx, dy = ball.x - robot.x, ball.y - robot.y
+        s = 1.2
+        a = ball_speed * ball_speed - s * s
+        b = 2.0 * (dx * ball.v_x + dy * ball.v_y)
+        c = dx * dx + dy * dy
+        disc = b * b - 4.0 * a * c
+        t = None
+        if disc >= 0.0:
+            sq = math.sqrt(disc)
+            roots = [r for r in ((-b - sq) / (2.0 * a), (-b + sq) / (2.0 * a)) if r > 0.0]
+            if roots:
+                t = min(roots)
+        if t is not None and t < 2.0:
+            target = np.array([ball.x + ball.v_x * t, ball.y + ball.v_y * t])
+            dx, dy = target[0] - robot.x, target[1] - robot.y
+            dist = math.hypot(dx, dy)
+            if dist > 1e-3:
+                v_x, v_y = (dx / dist) * s, (dy / dist) * s
             else:
-                # Kein Schuss: Spiegele normal die Y-Koordinate des Balls
-                target_y = np.clip(ball.y, -goal_half_width + 0.05, goal_half_width - 0.05)
-            # ------------------------------------------
+                v_x, v_y = 0.0, 0.0
+            v_theta = turn_to_point(robot, target)
+            #print(f"Intercepting ball at t={t:.2f}s  Target ({target[0]:.2f}, {target[1]:.2f})", end='\r')
+            return np.array([v_x, v_y, v_theta, 0.0, 1.0])
 
-            target_point = np.array([target_x, target_y])
-            
-            # WICHTIG: Wenn der Torwart weit weg ist, soll er extrem schnell ins Tor sprinten (speed=2.0)
-            v_x, v_y = move_to_point(robot, target_point, speed=2.0)
-            
-            # Er fährt zum Tor, schaut aber immer zum Ball!
-            v_theta = turn_to_point(robot, np.array([ball.x, ball.y]))
-
-            return np.array([v_x, v_y, v_theta, 0.0, 0.0])
-
-    # --- 3. INTERCEPTOR: Freier Ball ---
-    else:
-        # Prädiktion: Wo ist der Ball im nächsten Moment?
-        pred_x = np.clip(ball.x + (ball.v_x * 0.01), -max_x, max_x)
-        pred_y = np.clip(ball.y + (ball.v_y * 0.01), -env.field.width/2.0, env.field.width/2.0)
-        target_point = np.array([pred_x, pred_y])
-
-        # Wenn der Ball komplett frei ist, gibt Blau Vollgas (speed=2.0)
-        v_x, v_y = move_to_point(robot, target_point, speed=2.0)
-        v_theta = turn_to_point(robot, target_point)
-
-        # Dribbler einschalten (1.0 am Ende), um den freien Ball direkt aufzusaugen!
-        return np.array([v_x, v_y, v_theta, 0.0, 1.0])
-
+    return move_to_ball(robot, ball, speed=2.0)
 
 class SSL1v1ContinuousEnv(SSLBaseEnv):
     def __init__(self, render_mode=None, action_type="skills", reward_type="dense"):
@@ -198,6 +147,9 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.yellow_possession_steps = 0
         self.is_dribbling = False
         self.dribble_start_pos = None
+        # Reset blue heuristic state to avoid stale carry-over between episodes
+        #self.blue_dribble_target = None
+        #self.blue_must_shoot = False
         return super().reset(seed=seed, **kwargs)
     
     

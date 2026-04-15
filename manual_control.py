@@ -18,7 +18,7 @@ class SSL1v1ManualEnv(SSL1v1ContinuousEnv):
         v_x_global = actions[0] 
         v_y_global = actions[1] 
         v_theta = actions[2] 
-        kick = 4.0 if actions[3] > 0.5 else 0.0
+        kick = 6.0 if actions[3] > 0.5 else 0.0
         dribble = True if actions[4] > 0.5 else False
 
 

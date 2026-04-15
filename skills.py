@@ -27,51 +27,47 @@ def turn_away_from_object(robot, object):
 
 def move_to_point(robot, point, speed=1.0):
     robot_pos = np.array([robot.x, robot.y])
-
     direction = point - robot_pos
     distance = np.linalg.norm(direction)
 
-    if distance < 1.0:
-        speed_scale = min(speed, float(distance))
+    
+    if distance < 0.09:
+        return 0.0, 0.0
+
+    BRAKE_START = 0.4
+    if distance < BRAKE_START:
+        speed_scale = speed * (distance - 0.09) / (BRAKE_START - 0.09)
     else:
         speed_scale = speed
 
-    v_x, v_y = direction / distance * speed_scale
-
-    #return np.array([v_x, v_y, turn_to_point(robot, point), 0, 0])
-    return v_x, v_y
+    v_x, v_y = (direction / distance) * speed_scale
+    return float(v_x), float(v_y)
 
 
 def move_to_ball(robot, ball, speed=1.0):
-    robot_radius = 0.09
-    ball_radius = 0.0215
-
-    # Distance to the ball at which the robot starts to slow down, to avoid circling
-    angle_adjust_dist = 1.6
-
     if robot.infrared is True:
-        return np.array([0, 0, 0, 0, 1.0])
+        return np.array([0.0, 0.0, 0.0, 0.0, 1.0])
+        
+    robot_pos = np.array([robot.x, robot.y])
+    ball_pos = np.array([ball.x, ball.y])
+
+    
+    target_angle_deg = np.degrees(np.arctan2(ball_pos[1] - robot.y, ball.x - robot.x))
+    angle_diff = (target_angle_deg - robot.theta + 180) % 360 - 180
+    angular_velocity = np.clip(angle_diff / 15.0, -1.0, 1.0)
+
+    direction = ball_pos - robot_pos
+    distance = np.linalg.norm(direction)
+
+    
+    if distance < 0.13: # robot_radius + ball_radius
+        speed_scale = speed * 0.2
     else:
-        robot_pos = np.array([robot.x, robot.y])
-        ball_pos = np.array([ball.x, ball.y])
+        speed_scale = speed
 
-        target_angle_deg = np.degrees(np.arctan2(ball_pos[1] - robot.y, ball.x - robot.x))
-        robot_deg = robot.theta
-        angle_diff = (target_angle_deg - robot_deg + 180) % 360 - 180
-        angular_velocity = np.tanh(angle_diff / 32.0)
+    v_x, v_y = (direction / distance) * speed_scale
 
-        direction = ball_pos - robot_pos
-        distance = np.linalg.norm(direction)
-
-        if distance < robot_radius + ball_radius + angle_adjust_dist:
-            speed_scale = speed * max(0.1, 1.0 - abs(angle_diff) / 16)
-        else:
-            speed_scale = speed
-
-        v_x, v_y = direction / distance * speed_scale
-
-        return np.array([v_x, v_y, angular_velocity, 0, 0.0])
-
+    return np.array([v_x, v_y, angular_velocity, 0.0, 0.0])
 
 
 # Shoot Ball at Goal

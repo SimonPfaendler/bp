@@ -30,8 +30,8 @@ class CurriculumCallback(BaseCallback):
         self.total_timesteps = total_timesteps
 
     def _on_step(self) -> bool:
-        # progress = self.num_timesteps / self.total_timesteps
-        """
+        progress = self.num_timesteps / self.total_timesteps
+        
         if progress < 0.04:
             level = 1 
         elif progress < 0.12:
@@ -39,8 +39,7 @@ class CurriculumCallback(BaseCallback):
         elif progress < 0.60:
             level = 3
         else:
-        """
-        level = 4
+            level = 4
             
 
         self.training_env.env_method("set_curriculum_level", level)

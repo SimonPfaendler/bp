@@ -91,18 +91,19 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
         custom_policy_kwargs = dict(net_arch=[512, 512])
         if sb3_algo == 'CrossQ':
             model = CrossQ('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
-                            train_freq=16,
-                            gradient_steps=16,
-                            batch_size=1024,
+                            train_freq=24,
+                            gradient_steps=48,
+                            batch_size=2048,
                             buffer_size=1000000,
                             policy_kwargs=custom_policy_kwargs)
         elif sb3_algo == 'SAC':
             model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
-                        train_freq=16,
-                        gradient_steps=16,
-                        batch_size=1024,
+                        train_freq=24,
+                        gradient_steps=48,
+                        batch_size=2048,
                         policy_kwargs=custom_policy_kwargs,
                         buffer_size=1000000,
+                        learning_rate=0.0005,
                         ent_coef='auto'
                     )
 

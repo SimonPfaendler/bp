@@ -14,11 +14,11 @@ def main():
 
 
     executor.update_parameters(
-        slurm_job_name="sac_finetune_newheuristic",
-        slurm_time="00:30:00",
-        slurm_partition="dev_gpu_h100",
-        slurm_cpus_per_task=24,
-        slurm_mem="193GB",
+        slurm_job_name="Benchmarking_4h",
+        slurm_time="04:00:00",
+        slurm_partition="gpu_a100_short",
+        slurm_cpus_per_task=12,
+        slurm_mem="94000MB",
 
         slurm_additional_parameters={
             "gres": "gpu:1"
@@ -26,18 +26,20 @@ def main():
     )
 
     
-    algos = ["SAC"]
-    action_type = "low_level"
-    reward_type = "dense"
-    seeds = [200]
+    algos = ["SAC", "CrossQ"]
+    action_types = ["low_level", "skills"]
+    reward_types = ["dense", "sparse"]
+    seeds = [400]
 
     jobs = []
 
     with executor.batch():
         for algo in algos:
-            for seed in seeds:
-                job = executor.submit(run_experiment, algo, action_type, reward_type, seed)
-                jobs.append(job)
+            for action_type in action_types:
+                for reward_type in reward_types:
+                    for seed in seeds:
+                        job = executor.submit(run_experiment, algo, action_type, reward_type, seed)
+                        jobs.append(job)
     print(len(jobs))
 
 if __name__ == "__main__":

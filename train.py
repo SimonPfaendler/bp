@@ -92,19 +92,26 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
         if sb3_algo == 'CrossQ':
             model = CrossQ('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
                             train_freq=24,
-                            gradient_steps=48,
-                            batch_size=2048,
-                            buffer_size=1000000,
-                            policy_kwargs=custom_policy_kwargs)
+                            gradient_steps=24,
+                            batch_size=4096,
+                            buffer_size=500000,
+                            learning_rate=0.0001,
+                            ent_coef='auto',
+                            target_entropy= -4.0,
+                            policy_kwargs=custom_policy_kwargs,
+                            gamma=0.99)
         elif sb3_algo == 'SAC':
             model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
                         train_freq=24,
-                        gradient_steps=48,
-                        batch_size=2048,
+                        gradient_steps=12,
+                        batch_size=4096,
                         policy_kwargs=custom_policy_kwargs,
-                        buffer_size=1000000,
-                        learning_rate=0.0005,
-                        ent_coef='auto'
+                        buffer_size=500000,
+                        learning_rate=0.0001,
+                        ent_coef='auto',
+                        target_entropy= -4.0,
+                        tau=0.01,
+                        gamma=0.99
                     )
 
 
@@ -115,7 +122,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TOTAL_STEPS = 13500000
+    TOTAL_STEPS = 19500000
 
     curriculum_callback = CurriculumCallback(total_timesteps=TOTAL_STEPS)
     
@@ -177,7 +184,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.train:
-        path = "models/SAC_low_level_dense_seed200_20260415-140835_final.zip"  # Path to model for continued training
+        path = ""  # Path to model for continued training
         train(args.sb3_algo, args.action_type, args.reward_type, args.seed, load_path=path if os.path.isfile(path) else None)
 
 

@@ -439,7 +439,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
         #  Time Penalty
         if self.reward_type == "dense":
-            reward -= 0.005 
+            reward -= 0.001 
 
         
         
@@ -448,27 +448,27 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             done = True
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0: # Goal for Yellow
-                    reward += 100.0
+                    reward += 10.0
                     reward += (self.max_steps - self.current_step) * 0.01 
                     self.match_result = 1 
                 else: # Goal for Blue (Defeat)
-                    reward -= 100.0
+                    reward -= 10.0
                     self.match_result = -1 
             else:
-                reward -= 10.0
+                reward -= 1.0
             return reward, done
 
         # Ball out of bounds
         if abs(ball.y) > max_y:
             done = True
-            reward -= 100.0
+            reward -= 1.0
             self.match_result = -1 
             return reward, done
 
         # Robot out of bounds
         if abs(yellow.x) > max_x or abs(yellow.y) > max_y:
             done = True
-            reward -= 100.0
+            reward -= 1.0
             self.match_result = -1
             return reward, done
         
@@ -476,7 +476,8 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         if self.current_step >= self.max_steps:
             truncated = True
             done = True
-            reward -= 5.0
+            reward -= 0.5
+            self.match_result = -1
             return reward, done
 
         # DENSE REWARDS
@@ -486,7 +487,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
             if self.last_dist_robot_ball is not None:
                 delta_robot_ball = self.last_dist_robot_ball - dist_robot_ball
-                reward += np.clip(delta_robot_ball * 5.0, -0.1, 0.5)
+                reward += np.clip(delta_robot_ball * 5.0, -0.01, 0.05)
             self.last_dist_robot_ball = dist_robot_ball
 
             # Ball to Goal
@@ -503,12 +504,12 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
             if self.last_dist_ball_goal is not None:
                 delta_ball_goal = self.last_dist_ball_goal - dist_ball_to_goal
-                reward += np.clip(delta_ball_goal * 10.0, -0.2, 1.0)
+                reward += np.clip(delta_ball_goal * 10.0, -0.02, 0.1)
             self.last_dist_ball_goal = dist_ball_to_goal
 
             # Ballpossession
             if dist_robot_ball < 0.12 or yellow.infrared:
-                reward += 0.05
+                reward += 0.005
                 self.yellow_possession_steps += 1
                 
         return reward, done

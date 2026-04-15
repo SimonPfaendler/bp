@@ -176,7 +176,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.train:
-        path = "models/SAC_low_level_dense_seed200_20260410-221955_final.zip"  # Path to model for continued training
+        path = "models/SAC_low_level_dense_seed200_20260411-124823_final.zip"  # Path to model for continued training
         train(args.sb3_algo, args.action_type, args.reward_type, args.seed, load_path=path if os.path.isfile(path) else None)
 
 

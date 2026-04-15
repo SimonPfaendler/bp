@@ -14,9 +14,9 @@ def main():
 
 
     executor.update_parameters(
-        slurm_job_name="sac_finetune",
-        slurm_time="02:00:00",
-        slurm_partition="gpu_h100_short",
+        slurm_job_name="sac_finetune_newheuristic",
+        slurm_time="00:30:00",
+        slurm_partition="dev_gpu_h100",
         slurm_cpus_per_task=24,
         slurm_mem="193GB",
 

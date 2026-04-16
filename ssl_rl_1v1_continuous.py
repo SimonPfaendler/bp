@@ -131,9 +131,11 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.dribble_start_pos = None
         self.max_dribble_dist = 1.5
         self.robot_ball_contact = 0.12
+        self.has_touched_ball = False
+        self.blue_personality = "defensive"
 
-        
-    
+
+
     def reset(self, seed=None, **kwargs):
         self.last_dist_robot_ball = None
         self.last_dist_ball_goal = None
@@ -147,9 +149,14 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.yellow_possession_steps = 0
         self.is_dribbling = False
         self.dribble_start_pos = None
-        # Reset blue heuristic state to avoid stale carry-over between episodes
-        #self.blue_dribble_target = None
-        #self.blue_must_shoot = False
+        self.has_touched_ball = False
+
+        roll = self.np_random.random()
+        if roll < 0.7:
+            self.blue_personality = "defensive"
+        else:
+            self.blue_personality = "aggressive"
+
         return super().reset(seed=seed, **kwargs)
     
     
@@ -172,7 +179,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             else:
                 dribble_dist = np.linalg.norm(robot_pos - self.dribble_start_pos)
                 if dribble_dist > self.max_dribble_dist:
-                    reward -= 1.0
+                    reward -= 20.0
                     truncated = True
                     self.match_result = -1
         else:
@@ -397,16 +404,29 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                              kick_v_x=kick, dribbler=dribble)
 
         # Blue Heuristic
-        level = getattr(self, 'curriculum_level', 4)
+        level = getattr(self, 'curriculum_level', 5)
 
-        if level < 3:
-            # LEVEL 1 & 2
+        if level <= 2:
+            # LEVEL 1 & 2: Blue steht still
             bv_x, bv_y, bv_theta = 0.0, 0.0, 0.0
             blue_kick = 0.0
             blue_dribble = False
+        elif level == 3:
+            # LEVEL 3: Blue bewegt sich langsam zum Ball, kickt nicht
+            b_cmd = move_to_ball(blue_robot_data, ball, speed=0.5)
+            b_angle_rad = np.deg2rad(blue_robot_data.theta)
+            bv_x, bv_y, bv_theta = self.convert_actions([b_cmd[0], b_cmd[1], b_cmd[2]], b_angle_rad)
+            blue_kick = 0.0
+            blue_dribble = False
         else:
-            # LEVEL 3 & 4: Normal Heuristic
-            b_cmd = blue_attacker_heuristic(self, blue_robot_data)
+            # LEVEL 4 & 5: Full Heuristic mit Personality
+            if self.blue_personality == "aggressive":
+                if blue_robot_data.infrared is True:
+                    b_cmd = shoot_at_goal_center(self, blue_robot_data, team_color="blue")
+                else:
+                    b_cmd = move_to_ball(blue_robot_data, ball, speed=1.5)
+            else:
+                b_cmd = blue_attacker_heuristic(self, blue_robot_data)
             b_angle_rad = np.deg2rad(blue_robot_data.theta)
             bv_x, bv_y, bv_theta = self.convert_actions([b_cmd[0], b_cmd[1], b_cmd[2]], b_angle_rad)
             blue_kick = b_cmd[3]
@@ -458,20 +478,20 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                     reward -= 100.0
                     self.match_result = -1 
             else:
-                reward -= 1.0
+                reward -= 10.0
             return reward, done
 
         # Ball out of bounds
         if abs(ball.y) > max_y:
             done = True
-            reward -= 1.0
+            reward -= 10.0
             self.match_result = -1 
             return reward, done
 
         # Robot out of bounds
         if abs(yellow.x) > max_x or abs(yellow.y) > max_y:
             done = True
-            reward -= 1.0
+            reward -= 50.0
             self.match_result = -1
             return reward, done
         
@@ -485,6 +505,11 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
         # DENSE REWARDS
         if self.reward_type == "dense":
+            
+            dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
+            if not getattr(self, 'has_touched_ball', False) and (dist_robot_ball < 0.15 or yellow.infrared):
+                self.has_touched_ball = True
+                reward += 10.0
             
             # Robot to Ball
             dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
@@ -527,23 +552,22 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         level = getattr(self, 'curriculum_level', 4)
 
         if level == 1:
-            # LEVEL 1: PENALTY CHALLENGE
-
-            bx = self.np_random.uniform(-2.0, -1.0)
+            # LEVEL 1: PENALTY - Ball nah am Tor, Yellow direkt dahinter Richtung Tor
+            goal_x = -self.field.length / 2.0
+            bx = self.np_random.uniform(goal_x + 0.5, goal_x + 1.5)
             by = self.np_random.uniform(-0.3, 0.3)
             pos_frame.ball = Ball(x=bx, y=by)
 
             pos_frame.robots_yellow[0] = Robot(
-                x=bx + self.np_random.uniform(0.3, 0.6), 
-                y=by + self.np_random.uniform(-0.2, 0.2), 
-                theta= 180.0 + self.np_random.uniform(-45.0, 45.0)
+                x=bx + 0.15,
+                y=by,
+                theta=180.0 + self.np_random.uniform(-10.0, 10.0)
             )
 
             pos_frame.robots_blue[0] = Robot(x=0.0, y=3.0, theta=0.0)
 
         elif level == 2:
-            # LEVEL 2: FREE BALL
-
+            # LEVEL 2: FREE BALL + statischer Goalie
             pos_frame.ball = Ball(
                 x=self.np_random.uniform(-1.0, 2.0),
                 y=self.np_random.uniform(-1.5, 1.5)
@@ -555,22 +579,44 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 theta=self.np_random.uniform(-180, 180)
             )
 
-            
-            pos_frame.robots_blue[0] = Robot(x=0.0, y=3.0, theta=0.0)
+            goal_x = -self.field.length / 2.0
+            pos_frame.robots_blue[0] = Robot(
+                x=goal_x + 0.2,
+                y=self.np_random.uniform(-0.3, 0.3),
+                theta=0.0
+            )
 
         elif level == 3:
-            # LEVEL 3: 1v1 ATTACK
+            # LEVEL 3: FREE BALL + langsamer Blue bewegt sich zum Ball
+            pos_frame.ball = Ball(
+                x=self.np_random.uniform(-1.0, 2.0),
+                y=self.np_random.uniform(-1.5, 1.5)
+            )
+
+            pos_frame.robots_yellow[0] = Robot(
+                x=self.np_random.uniform(2.0, 3.5),
+                y=self.np_random.uniform(-2.0, 2.0),
+                theta=self.np_random.uniform(-180, 180)
+            )
+
+            pos_frame.robots_blue[0] = Robot(
+                x=self.np_random.uniform(-3.5, -1.0),
+                y=self.np_random.uniform(-1.5, 1.5),
+                theta=self.np_random.uniform(-180, 180)
+            )
+
+        elif level == 4:
+            # LEVEL 4: 1v1 ATTACK
             bx = self.np_random.uniform(-1.0, 2.0)
             by = self.np_random.uniform(-1.5, 1.5)
             pos_frame.ball = Ball(x=bx, y=by)
 
             pos_frame.robots_yellow[0] = Robot(
-                x=bx + self.np_random.uniform(0.3, 1.0), 
-                y=by + self.np_random.uniform(-0.5, 0.5), 
+                x=bx + self.np_random.uniform(0.3, 1.0),
+                y=by + self.np_random.uniform(-0.5, 0.5),
                 theta=self.np_random.uniform(135.0, 225.0)
             )
 
-            
             pos_frame.robots_blue[0] = Robot(
                 x=self.np_random.uniform(-3.5, bx - 0.5),
                 y=self.np_random.uniform(-1.5, 1.5),
@@ -578,7 +624,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             )
 
         else:
-            # LEVEL 4:
+            # LEVEL 5:
 
             scenario_roll = self.np_random.random()
 

@@ -31,15 +31,17 @@ class CurriculumCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         progress = self.num_timesteps / self.total_timesteps
-        
+
         if progress < 0.03:
             level = 1
         elif progress < 0.08:
             level = 2
-        elif progress < 0.30:
+        elif progress < 0.15:
             level = 3
-        else:
+        elif progress < 0.30:
             level = 4
+        else:
+            level = 5
             
 
         self.training_env.env_method("set_curriculum_level", level)
@@ -88,16 +90,13 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
         print("Start new Training")
 
         custom_policy_kwargs = dict(net_arch=[512, 512])
-        # SB3 progress_remaining goes 1.0 -> 0.0, so this decays from 5e-4 to 5e-5
-        lr_schedule = lambda progress_remaining: 5e-4 * (0.1 + 0.9 * progress_remaining)
-
         if sb3_algo == 'CrossQ':
             model = CrossQ('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
                             train_freq=24,
                             gradient_steps=24,
                             batch_size=4096,
                             buffer_size=1_000_000,
-                            learning_rate=lr_schedule,
+                            learning_rate=3e-4,
                             learning_starts=25000,
                             ent_coef='auto',
                             target_entropy='auto',
@@ -110,7 +109,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
                         batch_size=4096,
                         policy_kwargs=custom_policy_kwargs,
                         buffer_size=1_000_000,
-                        learning_rate=lr_schedule,
+                        learning_rate=3e-4,
                         learning_starts=25000,
                         ent_coef='auto',
                         target_entropy='auto',
@@ -125,7 +124,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TOTAL_STEPS = 19500000
+    TOTAL_STEPS = 18500000
 
     curriculum_callback = CurriculumCallback(total_timesteps=TOTAL_STEPS)
     
@@ -133,7 +132,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
         save_freq=10000, 
         save_path=model_dir,
         name_prefix=run_name,
-        save_replay_buffer=True
+        save_replay_buffer=False
     )
 
     

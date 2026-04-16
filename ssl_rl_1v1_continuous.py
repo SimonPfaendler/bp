@@ -439,9 +439,10 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         max_y = self.field.width / 2.0
         goal_half_width = self.field.goal_width / 2.0
 
-        #  Time Penalty
+        #  Time Penalty (-0.001 to -0.004)
         if self.reward_type == "dense":
-            reward -= 0.001 
+            progress = self.current_step / self.max_steps
+            reward -= 0.001 * (1.0 + 3.0 * progress)
 
         
         

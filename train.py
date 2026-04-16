@@ -89,7 +89,8 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
         print("Start new Training")
 
         custom_policy_kwargs = dict(net_arch=[512, 512])
-        lr_schedule = lambda progress: 5e-4 * (1.0 - 0.9 * progress)
+        # SB3 progress_remaining goes 1.0 -> 0.0, so this decays from 5e-4 to 5e-5
+        lr_schedule = lambda progress_remaining: 5e-4 * (0.1 + 0.9 * progress_remaining)
 
         if sb3_algo == 'CrossQ':
             model = CrossQ('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
@@ -99,7 +100,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
                             buffer_size=1_000_000,
                             learning_rate=lr_schedule,
                             ent_coef='auto',
-                            target_entropy=-4.0,
+                            target_entropy='auto',
                             policy_kwargs=custom_policy_kwargs,
                             gamma=0.995)
         elif sb3_algo == 'SAC':
@@ -111,7 +112,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
                         buffer_size=1_000_000,
                         learning_rate=lr_schedule,
                         ent_coef='auto',
-                        target_entropy=-4.0,
+                        target_entropy='auto',
                         tau=0.01,
                         gamma=0.995
                     )

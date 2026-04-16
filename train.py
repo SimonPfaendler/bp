@@ -12,7 +12,7 @@ import numpy as np
 import math
 import wandb
 from ssl_rl_1v1_continuous import SSL1v1ContinuousEnv
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, CallbackList
 
@@ -78,7 +78,6 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
         vec_env_cls=SubprocVecEnv,
         monitor_kwargs={"info_keywords": ("is_success", "match_result", "possession_ratio")}
     )
-    env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=0.995)
     print(f"Starte Training: {sb3_algo} | Modus: {action_type} | Reward: {reward_type} | Seed: {seed}")
 
     if load_path and os.path.exists(load_path):
@@ -113,7 +112,6 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
                         learning_rate=lr_schedule,
                         ent_coef='auto',
                         target_entropy='auto',
-                        tau=0.01,
                         gamma=0.995
                     )
 
@@ -148,41 +146,32 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
     )
     final_save_path = f"{model_dir}/{run_name}_final"
     model.save(final_save_path)
-    env.save(f"{final_save_path}_vecnormalize.pkl")
     print(f"Training done: {final_save_path}")
 
 def test(sb3_algo, action_type, reward_type, path_to_model):
-    from stable_baselines3.common.vec_env import DummyVecEnv
-
-    env = DummyVecEnv([lambda: SSL1v1ContinuousEnv(action_type=action_type, reward_type=reward_type, render_mode="human")])
-
-    vecnorm_path = f"{path_to_model}_vecnormalize.pkl"
-    if os.path.isfile(vecnorm_path):
-        env = VecNormalize.load(vecnorm_path, env)
-        env.training = False
-        env.norm_reward = False
-        print(f"Loaded VecNormalize from {vecnorm_path}")
+    env = SSL1v1ContinuousEnv(action_type=action_type, reward_type=reward_type, render_mode="human")
 
     algo_class = CrossQ if sb3_algo == 'CrossQ' else globals()[sb3_algo]
     model = algo_class.load(path_to_model, env=env, device='cpu')
-    obs = env.reset()
+    obs, info = env.reset()
 
     print(f"Test Model: {path_to_model}")
     summe = 0.0
 
     while True:
         action, _states = model.predict(obs, deterministic=True)
-        obs, rewards, dones, infos = env.step(action)
+        obs, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
 
         env.render()
         time.sleep(0.025)
-        summe += rewards[0]
-        print(f"Reward: {rewards[0]:.2f}, Gesamt: {summe:.2f} ")
+        summe += reward
+        print(f"Reward: {reward:.2f}, Gesamt: {summe:.2f} ")
 
-        if dones[0]:
+        if done:
             print("\nEpisode done")
             summe = 0.0
-            obs = env.reset()
+            obs, info = env.reset()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train or test SSL 1v1 Model.')

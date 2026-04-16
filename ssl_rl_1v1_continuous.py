@@ -172,8 +172,9 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             else:
                 dribble_dist = np.linalg.norm(robot_pos - self.dribble_start_pos)
                 if dribble_dist > self.max_dribble_dist:
-                    reward -= 0.5
-                    self.dribble_start_pos = robot_pos.copy()
+                    reward -= 1.0
+                    truncated = True
+                    self.match_result = -1
         else:
             self.is_dribbling = False
             self.dribble_start_pos = None
@@ -449,11 +450,11 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             done = True
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0: # Goal for Yellow
-                    reward += 10.0
+                    reward += 100.0
                     reward += (self.max_steps - self.current_step) * 0.01 
                     self.match_result = 1 
                 else: # Goal for Blue (Defeat)
-                    reward -= 10.0
+                    reward -= 100.0
                     self.match_result = -1 
             else:
                 reward -= 1.0
@@ -477,7 +478,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         if self.current_step >= self.max_steps:
             truncated = True
             done = True
-            reward -= 0.5
+            reward -= 5.0
             self.match_result = -1
             return reward, done
 
@@ -505,27 +506,16 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
             if self.last_dist_ball_goal is not None:
                 delta_ball_goal = self.last_dist_ball_goal - dist_ball_to_goal
-                reward += np.clip(delta_ball_goal * 10.0, -0.02, 0.1)
+                reward += np.clip(delta_ball_goal * 10.0, -0.06, 0.1)
             self.last_dist_ball_goal = dist_ball_to_goal
-
-            # Goal Alignment: reward agent for being behind ball relative to goal
-            robot_to_ball = np.array([ball.x - yellow.x, ball.y - yellow.y])
-            ball_to_goal_vec = np.array([-max_x - ball.x, 0.0 - ball.y])
-            rtb_norm = np.linalg.norm(robot_to_ball)
-            btg_norm = np.linalg.norm(ball_to_goal_vec)
-            if rtb_norm > 0.01 and btg_norm > 0.01:
-                alignment = np.dot(robot_to_ball, ball_to_goal_vec) / (rtb_norm * btg_norm)
-                reward += 0.003 * max(0.0, alignment)
 
             # Ballpossession
             if dist_robot_ball < 0.12 or yellow.infrared:
                 reward += 0.01
                 self.yellow_possession_steps += 1
-                # Bonus for facing the goal while possessing
-                angle_to_goal = math.atan2(0.0 - yellow.y, -max_x - yellow.x)
-                facing_diff = abs((angle_to_goal - math.radians(yellow.theta) + math.pi) % (2 * math.pi) - math.pi)
-                if facing_diff < 0.3:
-                    reward += 0.01
+
+            if ball.v_x < -0.5:
+                reward += 0.02 * min(-ball.v_x, 3.0)
                 
         return reward, done
 

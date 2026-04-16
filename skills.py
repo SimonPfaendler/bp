@@ -87,8 +87,8 @@ def shoot_at_goal_center(env, robot, team_color):
 
 def shoot_at_point(robot, target_point):
     v_theta = turn_to_point(robot, target_point)
-    
-    if abs(v_theta) < 0.1:
+
+    if abs(v_theta) < 0.15:
         
         return np.array([0.0, 0.0, 0.0, 1.0, 0.0])
     else:

@@ -14,11 +14,11 @@ def main():
 
 
     executor.update_parameters(
-        slurm_job_name="Benchmarking_4h",
-        slurm_time="04:00:00",
-        slurm_partition="gpu_a100_short",
-        slurm_cpus_per_task=12,
-        slurm_mem="94000MB",
+        slurm_job_name="Benchmarking_h100",
+        slurm_time="72:00:00",
+        slurm_partition="gpu_h100",
+        slurm_cpus_per_task=24,
+        slurm_mem="193300MB",
 
         slurm_additional_parameters={
             "gres": "gpu:1"

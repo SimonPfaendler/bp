@@ -97,7 +97,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             self.action_space = Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
         
         
-        obs_size = 29
+        obs_size = 31
         
         if self.action_type == "skills":
             obs_size += 2
@@ -129,7 +129,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.yellow_possession_steps = 0
         self.is_dribbling = False
         self.dribble_start_pos = None
-        self.max_dribble_dist = 1.0
+        self.max_dribble_dist = 1.5
         self.robot_ball_contact = 0.12
 
         
@@ -172,9 +172,8 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             else:
                 dribble_dist = np.linalg.norm(robot_pos - self.dribble_start_pos)
                 if dribble_dist > self.max_dribble_dist:
-                    reward -= 1.0
-                    truncated = True
-                    self.match_result = 0
+                    reward -= 0.5
+                    self.dribble_start_pos = robot_pos.copy()
         else:
             self.is_dribbling = False
             self.dribble_start_pos = None
@@ -280,8 +279,10 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             self.norm_pos(blue.x), self.norm_pos(blue.y),
             np.sin(np.deg2rad(blue.theta)), np.cos(np.deg2rad(blue.theta)),
             self.norm_v(blue.v_x), self.norm_v(blue.v_y), self.norm_w(blue.v_theta),
-            dist_blue_ball / max_dist,           
-            
+            dist_blue_ball / max_dist,
+            1.0 if blue.infrared else 0.0,
+            (dist_yellow_ball - dist_blue_ball) / max_dist,
+
             # PREDICTION
             self.norm_pos(pred_x), self.norm_pos(pred_y),
             self.norm_pos(pred_x - yellow.x), self.norm_pos(pred_y - yellow.y) # Relativer Vektor zur Landestelle
@@ -357,16 +358,16 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
             # Skill Execution
             if self.current_skill == 4: # Dribble
-                raw_action = dribble_to_point(yellow, target_point, speed=0.8)
+                raw_action = dribble_to_point(yellow, target_point, speed=1.6)
                 # print(f"Skill: Dribble to Point ({target_x:.2f}, {target_y:.2f})", end='\r')
             elif self.current_skill == 0:
-                raw_action = move_to_ball(yellow, ball, speed=1.0)
+                raw_action = move_to_ball(yellow, ball, speed=2.0)
                 # print(f"Skill: Move to Ball (Dist: {current_dist_ball:.2f})", end='\r')
             elif self.current_skill == 1:
                 raw_action = shoot_at_point(yellow, target_point)
                 # print(f"Skill: Shoot at Point ({target_x:.2f}, {target_y:.2f})", end='\r')
             elif self.current_skill == 2:
-                v_x, v_y = move_to_point(yellow, target_point, speed=1.0)
+                v_x, v_y = move_to_point(yellow, target_point, speed=2.0)
                 raw_action[0], raw_action[1] = v_x, v_y
                 # print(f"Skill: Move to Point ({target_x:.2f}, {target_y:.2f})", end='\r')
             else:
@@ -487,7 +488,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
             if self.last_dist_robot_ball is not None:
                 delta_robot_ball = self.last_dist_robot_ball - dist_robot_ball
-                reward += np.clip(delta_robot_ball * 5.0, -0.01, 0.05)
+                reward += np.clip(delta_robot_ball * 5.0, -0.05, 0.05)
             self.last_dist_robot_ball = dist_robot_ball
 
             # Ball to Goal
@@ -496,7 +497,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             goal_vec = goal_b - goal_a
             ball_pos = np.array([ball.x, ball.y])
             ball_to_goal_a = ball_pos - goal_a
-            
+
             t = np.dot(ball_to_goal_a, goal_vec) / np.dot(goal_vec, goal_vec)
             t = np.clip(t, 0.0, 1.0)
             closest_goal_point = goal_a + t * goal_vec
@@ -507,10 +508,24 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 reward += np.clip(delta_ball_goal * 10.0, -0.02, 0.1)
             self.last_dist_ball_goal = dist_ball_to_goal
 
+            # Goal Alignment: reward agent for being behind ball relative to goal
+            robot_to_ball = np.array([ball.x - yellow.x, ball.y - yellow.y])
+            ball_to_goal_vec = np.array([-max_x - ball.x, 0.0 - ball.y])
+            rtb_norm = np.linalg.norm(robot_to_ball)
+            btg_norm = np.linalg.norm(ball_to_goal_vec)
+            if rtb_norm > 0.01 and btg_norm > 0.01:
+                alignment = np.dot(robot_to_ball, ball_to_goal_vec) / (rtb_norm * btg_norm)
+                reward += 0.003 * max(0.0, alignment)
+
             # Ballpossession
             if dist_robot_ball < 0.12 or yellow.infrared:
-                reward += 0.005
+                reward += 0.01
                 self.yellow_possession_steps += 1
+                # Bonus for facing the goal while possessing
+                angle_to_goal = math.atan2(0.0 - yellow.y, -max_x - yellow.x)
+                facing_diff = abs((angle_to_goal - math.radians(yellow.theta) + math.pi) % (2 * math.pi) - math.pi)
+                if facing_diff < 0.3:
+                    reward += 0.01
                 
         return reward, done
 
@@ -590,7 +605,11 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 blue_y = self.np_random.uniform(-2.0, 2.0)
                 pos_frame.robots_blue[0] = Robot(x=blue_x, y=blue_y, theta=0)
                 pos_frame.ball = Ball(x=blue_x+0.15, y=blue_y)
-                pos_frame.robots_yellow[0] = Robot(x=3.0, y=0.0, theta=180)
+                pos_frame.robots_yellow[0] = Robot(
+                    x=blue_x + self.np_random.uniform(0.5, 1.5),
+                    y=self.np_random.uniform(-2.0, 2.0),
+                    theta=180
+                )
 
             else:
                 # Chaos

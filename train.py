@@ -124,8 +124,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
                             learning_starts=25000,
                             ent_coef='auto',
                             target_entropy='auto',
-                            policy_kwargs=custom_policy_kwargs,
-                            gamma=0.995)
+                            policy_kwargs=custom_policy_kwargs)
         elif sb3_algo == 'SAC':
             model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
                         train_freq=48,
@@ -136,8 +135,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
                         learning_rate=3e-4,
                         learning_starts=25000,
                         ent_coef=0.05,
-                        target_entropy='auto',
-                        gamma=0.995
+                        target_entropy='auto'
                     )
 
 
@@ -173,9 +171,10 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
     model.save(final_save_path)
     print(f"Training done: {final_save_path}")
 
-def test(sb3_algo, action_type, reward_type, path_to_model):
+def test(sb3_algo, action_type, reward_type, path_to_model, test_level=3):
     env = SSL1v1ContinuousEnv(action_type=action_type, reward_type=reward_type, render_mode="human")
-
+    if hasattr(env, 'set_curriculum_level'):
+        env.set_curriculum_level(test_level)
     algo_class = CrossQ if sb3_algo == 'CrossQ' else globals()[sb3_algo]
     model = algo_class.load(path_to_model, env=env, device='cpu')
     obs, info = env.reset()

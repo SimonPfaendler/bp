@@ -150,7 +150,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
 
     TOTAL_STEPS = 16500000
 
-    curriculum_callback = CurriculumCallback(total_timesteps=TOTAL_STEPS)
+    curriculum_callback = CurriculumCallback()
     
     checkpoint_callback = CheckpointCallback(
         save_freq=10000, 

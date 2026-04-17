@@ -26,10 +26,10 @@ def main():
     )
 
     
-    algos = ["SAC", "CrossQ"]
+    algos = ["SAC"]
     action_types = ["low_level", "skills"]
-    reward_types = ["dense", "sparse"]
-    seeds = [400]
+    reward_types = ["dense"]
+    seeds = [700]
 
     jobs = []
 

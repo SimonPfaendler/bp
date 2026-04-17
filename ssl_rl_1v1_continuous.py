@@ -152,7 +152,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.has_touched_ball = False
 
         roll = self.np_random.random()
-        if roll < 0.7:
+        if roll < 0.6:
             self.blue_personality = "defensive"
         else:
             self.blue_personality = "aggressive"
@@ -179,7 +179,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             else:
                 dribble_dist = np.linalg.norm(robot_pos - self.dribble_start_pos)
                 if dribble_dist > self.max_dribble_dist:
-                    reward -= 20.0
+                    reward -= 10.0
                     truncated = True
                     self.match_result = -1
         else:
@@ -491,7 +491,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         # Robot out of bounds
         if abs(yellow.x) > max_x or abs(yellow.y) > max_y:
             done = True
-            reward -= 50.0
+            reward -= 20.0
             self.match_result = -1
             return reward, done
         

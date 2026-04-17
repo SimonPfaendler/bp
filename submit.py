@@ -14,10 +14,10 @@ def main():
 
 
     executor.update_parameters(
-        slurm_job_name="Benchmarking_h100",
-        slurm_time="72:00:00",
-        slurm_partition="gpu_h100",
-        slurm_cpus_per_task=24,
+        slurm_job_name="Test",
+        slurm_time="00:30:00",
+        slurm_partition="dev_gpu_h100",
+        slurm_cpus_per_task=48,
         slurm_mem="193300MB",
 
         slurm_additional_parameters={

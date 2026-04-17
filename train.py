@@ -104,14 +104,14 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
                             gamma=0.995)
         elif sb3_algo == 'SAC':
             model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
-                        train_freq=24,
-                        gradient_steps=24,
+                        train_freq=48,
+                        gradient_steps=48,
                         batch_size=4096,
                         policy_kwargs=custom_policy_kwargs,
                         buffer_size=1_000_000,
                         learning_rate=3e-4,
                         learning_starts=25000,
-                        ent_coef='auto',
+                        ent_coef=0.05,
                         target_entropy='auto',
                         gamma=0.995
                     )

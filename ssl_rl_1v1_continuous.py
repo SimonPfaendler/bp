@@ -462,7 +462,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         #  Time Penalty (-0.001 to -0.004)
         if self.reward_type == "dense":
             progress = self.current_step / self.max_steps
-            reward -= 0.001 * (1.0 + 3.0 * progress)
+            reward -= 0.002 * (1.0 + 2.0 * progress)
 
         
         
@@ -491,7 +491,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         # Robot out of bounds
         if abs(yellow.x) > max_x or abs(yellow.y) > max_y:
             done = True
-            reward -= 20.0
+            reward -= 15.0
             self.match_result = -1
             return reward, done
         

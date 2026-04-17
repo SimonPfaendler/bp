@@ -10,6 +10,8 @@ from stable_baselines3.common.monitor import Monitor
 import datetime
 import numpy as np
 import math
+import random
+from collections import deque
 import wandb
 from ssl_rl_1v1_continuous import SSL1v1ContinuousEnv
 from stable_baselines3.common.vec_env import SubprocVecEnv
@@ -25,34 +27,51 @@ os.makedirs(model_dir, exist_ok=True)
 os.makedirs(log_dir, exist_ok=True)
 
 class CurriculumCallback(BaseCallback):
-    def __init__(self, total_timesteps, verbose=0):
+    def __init__(self, verbose=0):
         super().__init__(verbose)
-        self.total_timesteps = total_timesteps
-
+        self.current_level = 1
+        self.success_buffer = deque(maxlen=150)
+        
     def _on_step(self) -> bool:
-        if self.num_timesteps < 300_000:
-            level = 1 
+        dones = self.locals.get("dones", [])
+        infos = self.locals.get("infos", [])
+        
+        for i, done in enumerate(dones):
+            if done:
+                is_success = float(infos[i].get("is_success", 0.0))
+                self.success_buffer.append(is_success)
 
-        elif self.num_timesteps < 1_200_000:
-            level = 2 
+        if len(self.success_buffer) == self.success_buffer.maxlen:
+            success_rate = np.mean(self.success_buffer)
 
-        elif self.num_timesteps < 3_000_000:
-            level = 3 
+            if self.current_level == 1 and success_rate >= 0.80:
+                self.current_level = 2
+                self.success_buffer.clear()
 
-        elif self.num_timesteps < 5_500_000:
-            level = 4 
 
-        else:
+            elif self.current_level == 2 and success_rate >= 0.65:
+                self.current_level = 3
+                self.success_buffer.clear()
+
+            elif self.current_level == 3 and success_rate >= 0.50:
+                self.current_level = 4
+                self.success_buffer.clear()
+
+
+        level_to_set = self.current_level
+
+        if self.current_level == 4:
             roll = random.random()
-            if roll < 0.05: 
-                level = 1
-            elif roll < 0.10: 
-                level = 2
-            else: 
-                level = 5
+            if roll < 0.05: level_to_set = 1
+            elif roll < 0.10: level_to_set = 2
+            else: level_to_set = 5
 
-        self.training_env.env_method("set_curriculum_level", level)
-        self.logger.record("curriculum/level", level)
+        self.training_env.env_method("set_curriculum_level", level_to_set)
+        
+        self.logger.record("curriculum/level", self.current_level)
+        if len(self.success_buffer) > 0:
+            self.logger.record("curriculum/live_success_rate", np.mean(self.success_buffer))
+
         return True
 
 def train(sb3_algo, action_type, reward_type, seed, load_path=None):
@@ -129,7 +148,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TOTAL_STEPS = 6500000
+    TOTAL_STEPS = 16500000
 
     curriculum_callback = CurriculumCallback(total_timesteps=TOTAL_STEPS)
     

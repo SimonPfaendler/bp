@@ -43,13 +43,20 @@ def blue_attacker_heuristic(env, robot):
         a = ball_speed * ball_speed - s * s
         b = 2.0 * (dx * ball.v_x + dy * ball.v_y)
         c = dx * dx + dy * dy
-        disc = b * b - 4.0 * a * c
         t = None
-        if disc >= 0.0:
-            sq = math.sqrt(disc)
-            roots = [r for r in ((-b - sq) / (2.0 * a), (-b + sq) / (2.0 * a)) if r > 0.0]
-            if roots:
-                t = min(roots)
+        if abs(a) < 1e-6:
+            # ball_speed ≈ pursuit_speed → linear: b·t + c = 0
+            if abs(b) > 1e-6:
+                cand = -c / b
+                if cand > 0.0:
+                    t = cand
+        else:
+            disc = b * b - 4.0 * a * c
+            if disc >= 0.0:
+                sq = math.sqrt(max(disc, 0.0))
+                roots = [r for r in ((-b - sq) / (2.0 * a), (-b + sq) / (2.0 * a)) if r > 0.0]
+                if roots:
+                    t = min(roots)
         if t is not None and t < 2.0:
             target = np.array([ball.x + ball.v_x * t, ball.y + ball.v_y * t])
             dx, dy = target[0] - robot.x, target[1] - robot.y

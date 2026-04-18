@@ -171,7 +171,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
     model.save(final_save_path)
     print(f"Training done: {final_save_path}")
 
-def test(sb3_algo, action_type, reward_type, path_to_model, test_level=3):
+def test(sb3_algo, action_type, reward_type, path_to_model, test_level=4):
     env = SSL1v1ContinuousEnv(action_type=action_type, reward_type=reward_type, render_mode="human")
     if hasattr(env, 'set_curriculum_level'):
         env.set_curriculum_level(test_level)

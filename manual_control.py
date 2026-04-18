@@ -21,10 +21,14 @@ class SSL1v1ManualEnv(SSL1v1ContinuousEnv):
         kick = 6.0 if actions[3] > 0.5 else 0.0
         dribble = True if actions[4] > 0.5 else False
 
+        # Auto-release: mirror of SSL1v1ContinuousEnv._get_commands
+        if self.must_release:
+            dribble = False
+        if not dribble and yellow.infrared and kick == 0.0:
+            kick = 3.0
 
-
-        robot_yellow = Robot(yellow=True, id=0, 
-                             v_x=v_x_global, v_y=v_y_global, v_theta=v_theta, 
+        robot_yellow = Robot(yellow=True, id=0,
+                             v_x=v_x_global, v_y=v_y_global, v_theta=v_theta,
                              kick_v_x=kick, dribbler=dribble)
 
         difficulty = getattr(self, 'difficulty_factor', 0.2)
@@ -93,8 +97,13 @@ def interactive_debug_live():
         yellow = env.frame.robots_yellow[0]
         ball = env.frame.ball
         ball_speed = math.hypot(ball.v_x, ball.v_y)
+        if env.dribble_start_pos is not None:
+            dribble_dist = float(np.linalg.norm(
+                np.array([ball.x, ball.y]) - env.dribble_start_pos))
+        else:
+            dribble_dist = 0.0
 
-        print(f"\r Aktion: {current_action} | Reward: {reward:7.2f} | Gesamt: {total_reward:7.2f} | Y_Pos: ({yellow.x:4.2f}, {yellow.y:4.2f}) | Ball Speed: {ball_speed:5.2f} ")
+        print(f"\r Aktion: {current_action} | IR: {yellow.infrared} | must_release: {env.must_release} | dribble_dist: {dribble_dist:4.2f} | Ball Speed: {ball_speed:5.2f} | Y_Pos: ({yellow.x:4.2f}, {yellow.y:4.2f}) ")
 
         if done:
             print("\n EPISODE DONE\n")

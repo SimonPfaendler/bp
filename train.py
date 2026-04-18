@@ -76,7 +76,7 @@ class CurriculumCallback(BaseCallback):
 
 def train(sb3_algo, action_type, reward_type, seed, load_path=None):
 
-    log_freq = 50
+    log_freq = 100
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_name = f"{sb3_algo}_{action_type}_{reward_type}_seed{seed}_{timestamp}"
     current_log_dir = os.path.join(log_dir, run_name)
@@ -127,14 +127,14 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
                             policy_kwargs=custom_policy_kwargs)
         elif sb3_algo == 'SAC':
             model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
-                        train_freq=48,
-                        gradient_steps=96,
+                        train_freq=24,
+                        gradient_steps=48,
                         batch_size=4096,
                         policy_kwargs=custom_policy_kwargs,
                         buffer_size=1_000_000,
                         learning_rate=3e-4,
                         learning_starts=25000,
-                        ent_coef=0.05,
+                        ent_coef='auto',
                         target_entropy='auto'
                     )
 
@@ -146,12 +146,12 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TOTAL_STEPS = 16500000
+    TOTAL_STEPS = 35500000
 
     curriculum_callback = CurriculumCallback()
     
     checkpoint_callback = CheckpointCallback(
-        save_freq=10000, 
+        save_freq=40000, 
         save_path=model_dir,
         name_prefix=run_name,
         save_replay_buffer=False

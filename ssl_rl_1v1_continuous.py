@@ -138,7 +138,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.has_touched_ball = False
         self.blue_personality = "defensive"
         self.must_release = False
-        self.min_release_distance = 0.15
+        self.min_release_distance = 0.12
 
 
 
@@ -405,13 +405,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
         # If must_release: force the dribbler off
         if self.must_release:
-            dribble = False
-
-        # Nudge the ball off the dribbler: if the dribbler is off but the ball
-        # is still attached (infrared=True), fire a tiny kick so contact breaks.
-        # Without this, the robot just keeps pushing the ball with its body.
-        if not dribble and yellow.infrared and kick == 0.0:
-            kick = 3.0
+            kick = 0.25
 
         robot_yellow = Robot(yellow=True, id=0,
                              v_x=v_x_local, v_y=v_y_local, v_theta=v_theta_clipped,

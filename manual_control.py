@@ -23,9 +23,9 @@ class SSL1v1ManualEnv(SSL1v1ContinuousEnv):
 
         # Auto-release: mirror of SSL1v1ContinuousEnv._get_commands
         if self.must_release:
-            dribble = False
-        if not dribble and yellow.infrared and kick == 0.0:
-            kick = 3.0
+            kick = 0.25
+        #if not dribble and kick == 0.0:
+            #kick = 0.1
 
         robot_yellow = Robot(yellow=True, id=0,
                              v_x=v_x_global, v_y=v_y_global, v_theta=v_theta,

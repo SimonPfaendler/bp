@@ -481,9 +481,9 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0: # Goal for Yellow
                     reward += 1.0
-                    reward += (self.max_steps - self.current_step) * 0.0001 
-                    self.match_result = 1 
-            	else:
+                    reward += (self.max_steps - self.current_step) * 0.0001
+                    self.match_result = 1
+                else: # Goal for Blue (Defeat)
                     reward -= 0.2
                     self.match_result = -1
             else:

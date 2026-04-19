@@ -132,13 +132,13 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.match_result = 0
         self.yellow_possession_steps = 0
         self.is_dribbling = False
-        self.dribble_start_pos = None
         self.max_dribble_dist = 1.0
         self.robot_ball_contact = 0.12
         self.has_touched_ball = False
         self.blue_personality = "defensive"
         self.must_release = False
-        self.min_release_distance = 0.12
+        self.min_release_distance = 0.13
+
 
 
 
@@ -148,7 +148,6 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.current_step = 0
         self.skill_counter = 0
         self.current_skill = 0
-        self.dribble_start_pos = None
         self.last_possession = None
         self.blue_shot_in_progress = False
         self.match_result = 0
@@ -165,6 +164,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             self.blue_personality = "aggressive"
 
         return super().reset(seed=seed, **kwargs)
+
     
     
     def step(self, action):
@@ -194,6 +194,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 if dist_robot_ball >= self.min_release_distance:
                     self.must_release = False
                     self.dribble_start_pos = None
+                    self.is_dribbling = False
             else:
                 self.is_dribbling = False
                 self.dribble_start_pos = None

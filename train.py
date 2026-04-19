@@ -21,6 +21,8 @@ from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback,
 slurm_cpus = int(os.environ.get('SLURM_CPUS_PER_TASK', 1))
 torch.set_num_threads(slurm_cpus)
 
+os.environ.setdefault("WANDB__SERVICE_WAIT", "300")
+
 model_dir = "models"
 log_dir = "logs"
 os.makedirs(model_dir, exist_ok=True)

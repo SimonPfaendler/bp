@@ -331,7 +331,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             dribbler_trigger = actions[5]
             
             
-            if kick_trigger > 0.0:
+            if kick_trigger > 0.5:
                 kick = 3.0 + ((raw_kick_power + 1.0) / 2.0) * 3.0
             else:
                 kick = 0.0
@@ -480,20 +480,20 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             done = True
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0: # Goal for Yellow
-                    reward += 1.0
-                    reward += (self.max_steps - self.current_step) * 0.01 
+                    reward += 10.0
+                    reward += (self.max_steps - self.current_step) * 0.0001 
                     self.match_result = 1 
                 else: # Goal for Blue (Defeat)
                     reward -= 1.0
                     self.match_result = -1 
             else:
-                reward -= 0.5
+                reward -= 0.0
             return reward, done
 
         # Ball out of bounds
         if abs(ball.y) > max_y:
             done = True
-            reward -= 1.0
+            reward -= 0.0
             self.match_result = -1 
             return reward, done
 
@@ -508,7 +508,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         if self.current_step >= self.max_steps:
             truncated = True
             done = True
-            reward -= 1.0
+            reward -= 0.0
             self.match_result = -1
             return reward, done
 
@@ -524,7 +524,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
             if self.last_dist_robot_ball is not None:
                 delta_robot_ball = self.last_dist_robot_ball - dist_robot_ball
-                reward += np.clip(delta_robot_ball * 5.0, -0.0005, 0.0005)
+                reward += np.clip(delta_robot_ball * 0.05, -0.0005, 0.0005)
             self.last_dist_robot_ball = dist_robot_ball
 
             # Ball to Goal
@@ -541,7 +541,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
             if self.last_dist_ball_goal is not None:
                 delta_ball_goal = self.last_dist_ball_goal - dist_ball_to_goal
-                reward += np.clip(delta_ball_goal * 10.0, -0.0006, 0.001)
+                reward += np.clip(delta_ball_goal * 0.1, -0.0006, 0.001)
             self.last_dist_ball_goal = dist_ball_to_goal
 
             # Ballpossession

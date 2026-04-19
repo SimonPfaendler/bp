@@ -15,10 +15,10 @@ def main():
 
     executor.update_parameters(
         slurm_job_name="Test",
-        slurm_time="04:00:00",
-        slurm_partition="gpu_h100_short",
-        slurm_cpus_per_task=24,
-        slurm_mem="193300MB",
+        slurm_time="00:30:00",
+        slurm_partition="dev_gpu_h100",
+        slurm_cpus_per_task=48,
+        slurm_mem="193300mb",
 
         slurm_additional_parameters={
             "gres": "gpu:1"
@@ -29,7 +29,7 @@ def main():
     algos = ["SAC"]
     action_types = ["low_level"]
     reward_types = ["dense"]
-    seeds = [810]
+    seeds = [811]
 
     jobs = []
 

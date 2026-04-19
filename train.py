@@ -20,6 +20,7 @@ from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback,
 
 slurm_cpus = int(os.environ.get('SLURM_CPUS_PER_TASK', 1))
 torch.set_num_threads(slurm_cpus)
+os.environ.setdefault("WANDB__SERVICE_WAIT", "300")
 
 model_dir = "models"
 log_dir = "logs"
@@ -67,7 +68,7 @@ class CurriculumCallback(BaseCallback):
 
 def train(sb3_algo, action_type, reward_type, seed, load_path=None):
 
-    log_freq = 100
+    log_freq = 75
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_name = f"{sb3_algo}_{action_type}_{reward_type}_seed{seed}_{timestamp}"
     current_log_dir = os.path.join(log_dir, run_name)
@@ -118,8 +119,8 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
                             policy_kwargs=custom_policy_kwargs)
         elif sb3_algo == 'SAC':
             model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
-                        train_freq=24,
-                        gradient_steps=48,
+                        train_freq=48,
+                        gradient_steps=96,
                         batch_size=4096,
                         policy_kwargs=custom_policy_kwargs,
                         buffer_size=1_000_000,
@@ -142,7 +143,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
     curriculum_callback = CurriculumCallback()
     
     checkpoint_callback = CheckpointCallback(
-        save_freq=40000, 
+        save_freq=20000, 
         save_path=model_dir,
         name_prefix=run_name,
         save_replay_buffer=False

@@ -412,7 +412,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                              kick_v_x=kick, dribbler=dribble)
 
         # Blue Heuristic
-        level = getattr(self, 'curriculum_level', 5)
+        level = getattr(self, 'curriculum_level', 1)
 
         if level <= 2:
             # LEVEL 1 & 2: Blue steht still
@@ -470,7 +470,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         #  Time Penalty (-0.001 to -0.004)
         if self.reward_type == "dense":
             progress = self.current_step / self.max_steps
-            reward -= 0.04 * (1.0 + 2.0 * progress)
+            reward -= 0.0004 * (1.0 + 2.0 * progress)
 
         
         
@@ -479,27 +479,27 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             done = True
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0: # Goal for Yellow
-                    reward += 100.0
+                    reward += 1.0
                     reward += (self.max_steps - self.current_step) * 0.01 
                     self.match_result = 1 
                 else: # Goal for Blue (Defeat)
-                    reward -= 100.0
+                    reward -= 1.0
                     self.match_result = -1 
             else:
-                reward -= 10.0
+                reward -= 0.5
             return reward, done
 
         # Ball out of bounds
         if abs(ball.y) > max_y:
             done = True
-            reward -= 10.0
+            reward -= 1.0
             self.match_result = -1 
             return reward, done
 
         # Robot out of bounds
         if abs(yellow.x) > max_x or abs(yellow.y) > max_y:
             done = True
-            reward -= 15.0
+            reward -= 1.0
             self.match_result = -1
             return reward, done
         
@@ -507,7 +507,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         if self.current_step >= self.max_steps:
             truncated = True
             done = True
-            reward -= 10.0
+            reward -= 1.0
             self.match_result = -1
             return reward, done
 
@@ -517,13 +517,13 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
             if not getattr(self, 'has_touched_ball', False) and (dist_robot_ball < 0.15 or yellow.infrared):
                 self.has_touched_ball = True
-                reward += 10.0
+                reward += 0.1
             
             # Robot to Ball
             dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
             if self.last_dist_robot_ball is not None:
                 delta_robot_ball = self.last_dist_robot_ball - dist_robot_ball
-                reward += np.clip(delta_robot_ball * 5.0, -0.05, 0.05)
+                reward += np.clip(delta_robot_ball * 5.0, -0.0005, 0.0005)
             self.last_dist_robot_ball = dist_robot_ball
 
             # Ball to Goal
@@ -540,16 +540,16 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
             if self.last_dist_ball_goal is not None:
                 delta_ball_goal = self.last_dist_ball_goal - dist_ball_to_goal
-                reward += np.clip(delta_ball_goal * 10.0, -0.06, 0.1)
+                reward += np.clip(delta_ball_goal * 10.0, -0.0006, 0.001)
             self.last_dist_ball_goal = dist_ball_to_goal
 
             # Ballpossession
             if dist_robot_ball < 0.12 or yellow.infrared:
-                reward += 0.01
+                reward += 0.0001
                 self.yellow_possession_steps += 1
 
             if ball.v_x < -0.5:
-                reward += 0.02 * min(-ball.v_x, 3.0)
+                reward += 0.0002 * min(-ball.v_x, 3.0)
                 
         return reward, done
 
@@ -557,7 +557,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
     def _get_initial_positions_frame(self):
         pos_frame = Frame()
         
-        level = getattr(self, 'curriculum_level', 4)
+        level = getattr(self, 'curriculum_level', 1)
 
         if level == 1:
             # LEVEL 1: PENALTY - Ball nah am Tor, Yellow direkt dahinter Richtung Tor
@@ -659,7 +659,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             else:
                 # Chaos
                 pos_frame.ball = Ball(x=self.np_random.uniform(-3, 3), y=self.np_random.uniform(-2, 2))
-                pos_frame.robots_yellow[0] = Robot(x=self.np_random.uniform(0, 3.5), y=self.np_random.uniform(-2.5, 2.5), theta=self.np_random.uniform(-180, 180))
-                pos_frame.robots_blue[0] = Robot(x=self.np_random.uniform(-3.5, 0), y=self.np_random.uniform(-2.5, 2.5), theta=self.np_random.uniform(-180, 180))
+                pos_frame.robots_yellow[0] = Robot(x=self.np_random.uniform(0.2, 3.5), y=self.np_random.uniform(-2.5, 2.5), theta=self.np_random.uniform(-180, 180))
+                pos_frame.robots_blue[0] = Robot(x=self.np_random.uniform(-3.5, -0.2), y=self.np_random.uniform(-2.5, 2.5), theta=self.np_random.uniform(-180, 180))
 
         return pos_frame

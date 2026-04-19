@@ -41,33 +41,24 @@ class CurriculumCallback(BaseCallback):
                 is_success = float(infos[i].get("is_success", 0.0))
                 self.success_buffer.append(is_success)
 
-        if len(self.success_buffer) == self.success_buffer.maxlen:
+        if len(self.success_buffer) == self.success_buffer.maxlen and self.current_level < 5:
             success_rate = np.mean(self.success_buffer)
+            new_level = self.current_level
 
-            if self.current_level == 1 and success_rate >= 0.80:
-                self.current_level = 2
+            if self.current_level == 1 and success_rate >= 0.90:
+                new_level = 2
+            elif self.current_level == 2 and success_rate >= 0.75:
+                new_level = 3
+            elif self.current_level == 3 and success_rate >= 0.60:
+                new_level = 4
+            elif self.current_level == 4 and success_rate >= 0.50:
+                new_level = 5
+
+            if new_level != self.current_level:
+                self.current_level = new_level
                 self.success_buffer.clear()
+                self.training_env.env_method("set_curriculum_level", self.current_level)
 
-
-            elif self.current_level == 2 and success_rate >= 0.65:
-                self.current_level = 3
-                self.success_buffer.clear()
-
-            elif self.current_level == 3 and success_rate >= 0.50:
-                self.current_level = 4
-                self.success_buffer.clear()
-
-
-        level_to_set = self.current_level
-
-        if self.current_level == 4:
-            roll = random.random()
-            if roll < 0.05: level_to_set = 1
-            elif roll < 0.10: level_to_set = 2
-            else: level_to_set = 5
-
-        self.training_env.env_method("set_curriculum_level", level_to_set)
-        
         self.logger.record("curriculum/level", self.current_level)
         if len(self.success_buffer) > 0:
             self.logger.record("curriculum/live_success_rate", np.mean(self.success_buffer))

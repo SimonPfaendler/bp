@@ -125,7 +125,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
         elif sb3_algo == 'SAC':
             model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
                         train_freq=4,
-                        gradient_steps=194,
+                        gradient_steps=48,
                         batch_size=512,
                         policy_kwargs=custom_policy_kwargs,
                         buffer_size=1_000_000,

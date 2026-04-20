@@ -331,7 +331,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             dribbler_trigger = actions[5]
             
             
-            if kick_trigger > 0.5:
+            if kick_trigger > 0.0:
                 kick = 3.0 + ((raw_kick_power + 1.0) / 2.0) * 3.0
             else:
                 kick = 0.0

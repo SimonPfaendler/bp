@@ -124,15 +124,15 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
                             policy_kwargs=custom_policy_kwargs)
         elif sb3_algo == 'SAC':
             model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
-                        train_freq=4,
-                        gradient_steps=48,
-                        batch_size=512,
+                        train_freq=48,
+                        gradient_steps=96,
+                        batch_size=4096,
                         policy_kwargs=custom_policy_kwargs,
                         buffer_size=1_000_000,
-                        learning_rate=1e-4,
+                        learning_rate=3e-4,
                         learning_starts=10000,
-                        ent_coef='auto',
-                        target_entropy=-3.0,
+                        ent_coef=0.05,
+                        target_entropy='auto',
                         gamma=0.99
                     )
 
@@ -144,7 +144,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TOTAL_STEPS = 1400000
+    TOTAL_STEPS = 3000000
 
     curriculum_callback = CurriculumCallback()
     

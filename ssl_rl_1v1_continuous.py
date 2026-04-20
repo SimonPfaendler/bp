@@ -104,12 +104,12 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             self.action_space = Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
         
         
-        obs_size = 26
-            
+        obs_size = 34 if self.action_type == "skills" else 32
+
         self.observation_space = Box(
-            low=-self.NORM_BOUNDS, 
-            high=self.NORM_BOUNDS, 
-            shape=(obs_size,), 
+            low=-self.NORM_BOUNDS,
+            high=self.NORM_BOUNDS,
+            shape=(obs_size,),
             dtype=np.float32
         )
         self.last_dist_robot_ball = None 
@@ -231,84 +231,88 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
     
     def _frame_to_observations(self):
-        ball = np.array([self.frame.ball.x, self.frame.ball.y])
+        ball = self.frame.ball
         yellow = self.frame.robots_yellow[0]
         blue = self.frame.robots_blue[0]
 
-        observation = []
+        max_x = self.field.length / 2.0
+        max_y = self.field.width / 2.0
         max_dist = math.hypot(self.field.length, self.field.width)
 
-        # BALL
-        observation.append(self.norm_pos(self.frame.ball.x))
-        observation.append(self.norm_pos(self.frame.ball.y))
-        observation.append(self.norm_v(self.frame.ball.v_x))
-        observation.append(self.norm_v(self.frame.ball.v_y))
+        # Ball Prediction (0.5s ahead)
+        future_time = 0.5
+        pred_x = np.clip(ball.x + (ball.v_x * future_time), -max_x, max_x)
+        pred_y = np.clip(ball.y + (ball.v_y * future_time), -max_y, max_y)
 
-        # Distance Ball to Blue Goal
-        goal_blue_a = np.array([-self.field.length / 2, self.field.goal_width / 2])
-        goal_blue_b = np.array([-self.field.length / 2, -self.field.goal_width / 2])
-        goal_blue = goal_blue_b - goal_blue_a
-        ball_to_goal_blue = ball - goal_blue_a
-        t_blue = (ball_to_goal_blue @ goal_blue) / (goal_blue @ goal_blue)
-        t_blue = np.clip(t_blue, 0, 1)
-        closest_point_blue = goal_blue_a + t_blue * goal_blue
-        dist_ball_to_goal_blue = np.linalg.norm(ball - closest_point_blue)
+        # Goal projection (closest point on blue goal line to ball)
+        goal_half_width = self.field.goal_width / 2.0
+        ball_pos = np.array([ball.x, ball.y])
+        goal_a = np.array([-max_x, goal_half_width])
+        goal_b = np.array([-max_x, -goal_half_width])
+        goal_vec = goal_b - goal_a
+        ball_to_goal_a = ball_pos - goal_a
+        t = np.clip(np.dot(ball_to_goal_a, goal_vec) / np.dot(goal_vec, goal_vec), 0.0, 1.0)
+        closest_goal_point = goal_a + t * goal_vec
+        dist_ball_to_goal = np.linalg.norm(ball_pos - closest_goal_point)
 
-        # Distance Ball to Yellow Goal
-        goal_yellow_a = np.array([self.field.length / 2, self.field.goal_width / 2])
-        goal_yellow_b = np.array([self.field.length / 2, -self.field.goal_width / 2])
-        goal_yellow = goal_yellow_b - goal_yellow_a
-        ball_to_goal_yellow = ball - goal_yellow_a
-        t_yellow = (ball_to_goal_yellow @ goal_yellow) / (goal_yellow @ goal_yellow)
-        t_yellow = np.clip(t_yellow, 0, 1)
-        closest_point_yellow = goal_yellow_a + t_yellow * goal_yellow
-        dist_ball_to_goal_yellow = np.linalg.norm(ball - closest_point_yellow)
+        yellow_theta_rad = math.radians(yellow.theta)
 
-        # Normalisierte Distanzen anhängen
-        observation.append(np.clip(dist_ball_to_goal_blue / max_dist, -1.0, 1.0))
-        observation.append(np.clip(dist_ball_to_goal_yellow / max_dist, -1.0, 1.0))
+        # Relative angle Yellow → Ball (in robot frame)
+        angle_yellow_to_ball = math.atan2(ball.y - yellow.y, ball.x - yellow.x)
+        rel_angle_ball = (angle_yellow_to_ball - yellow_theta_rad + math.pi) % (2 * math.pi) - math.pi
 
-        # YELLOW ROBOT
-        observation.append(self.norm_pos(yellow.x))
-        observation.append(self.norm_pos(yellow.y))
-        observation.append(np.sin(np.deg2rad(yellow.theta)))
-        observation.append(np.cos(np.deg2rad(yellow.theta)))
-        observation.append(self.norm_v(yellow.v_x))
-        observation.append(self.norm_v(yellow.v_y))
-        observation.append(self.norm_w(yellow.v_theta))
-        observation.append(1.0 if yellow.infrared else 0.0)
+        # Relative angle Yellow → Goal (in robot frame)
+        angle_yellow_to_goal = math.atan2(closest_goal_point[1] - yellow.y, closest_goal_point[0] - yellow.x)
+        rel_angle_goal = (angle_yellow_to_goal - yellow_theta_rad + math.pi) % (2 * math.pi) - math.pi
 
-        # Dist to Ball
-        robot_yellow_pos = np.array([yellow.x, yellow.y])
-        dist_yellow_ball = np.linalg.norm(ball - robot_yellow_pos)
-        observation.append(np.clip(dist_yellow_ball / max_dist, -1.0, 1.0))
-
-        
+        # Dribble progress
         dribble_meter = 0.0
-        if getattr(self, 'is_dribbling', False) and getattr(self, 'dribble_start_pos', None) is not None:
-            current_dribble_dist = np.linalg.norm(np.array([self.frame.ball.x, self.frame.ball.y]) - self.dribble_start_pos)
+        if self.is_dribbling and self.dribble_start_pos is not None:
+            current_dribble_dist = np.linalg.norm(ball_pos - self.dribble_start_pos)
             dribble_meter = np.clip(current_dribble_dist / self.max_dribble_dist, 0.0, 1.0)
-        observation.append(dribble_meter)
 
-        # Release state: 1.0 if must release, else 0.0
-        observation.append(1.0 if self.must_release else 0.0)
+        # Distances
+        dist_yellow_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
+        dist_blue_ball = math.hypot(blue.x - ball.x, blue.y - ball.y)
 
-        # BLUE ROBOT
-        observation.append(self.norm_pos(blue.x))
-        observation.append(self.norm_pos(blue.y))
-        observation.append(np.sin(np.deg2rad(blue.theta)))
-        observation.append(np.cos(np.deg2rad(blue.theta)))
-        observation.append(self.norm_v(blue.v_x))
-        observation.append(self.norm_v(blue.v_y))
-        observation.append(self.norm_w(blue.v_theta))
-        observation.append(1.0 if blue.infrared else 0.0)
+        obs = [
+            # BALL
+            self.norm_pos(ball.x), self.norm_pos(ball.y),
+            self.norm_v(ball.v_x), self.norm_v(ball.v_y),
+            dist_ball_to_goal / max_dist,
 
-        # Dist to Ball
-        robot_blue_pos = np.array([blue.x, blue.y])
-        dist_blue_ball = np.linalg.norm(ball - robot_blue_pos)
-        observation.append(np.clip(dist_blue_ball / max_dist, -1.0, 1.0))
+            # YELLOW ROBOT
+            self.norm_pos(yellow.x), self.norm_pos(yellow.y),
+            np.sin(yellow_theta_rad), np.cos(yellow_theta_rad),
+            self.norm_v(yellow.v_x), self.norm_v(yellow.v_y), self.norm_w(yellow.v_theta),
+            1.0 if yellow.infrared else 0.0,
+            dist_yellow_ball / max_dist,
+            rel_angle_ball / math.pi,
+            rel_angle_goal / math.pi,
+            dribble_meter,
+            1.0 if self.must_release else 0.0,
 
-        return np.array(observation, dtype=np.float32)
+            # BLUE ROBOT
+            self.norm_pos(blue.x), self.norm_pos(blue.y),
+            np.sin(np.deg2rad(blue.theta)), np.cos(np.deg2rad(blue.theta)),
+            self.norm_v(blue.v_x), self.norm_v(blue.v_y), self.norm_w(blue.v_theta),
+            dist_blue_ball / max_dist,
+            1.0 if blue.infrared else 0.0,
+            (dist_yellow_ball - dist_blue_ball) / max_dist,
+
+            # PREDICTION
+            self.norm_pos(pred_x), self.norm_pos(pred_y),
+            self.norm_pos(pred_x - yellow.x), self.norm_pos(pred_y - yellow.y),
+        ]
+
+        # Skill info (only for skills action_type)
+        if self.action_type == "skills":
+            obs.extend([
+                self.current_skill / 4.0,
+                self.skill_counter / 40.0,
+            ])
+
+        return np.array(obs, dtype=np.float32)
 
     
     def _get_commands(self, actions):

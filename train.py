@@ -24,6 +24,7 @@ torch.set_num_threads(num_threads)
 torch.set_num_interop_threads(num_threads)
 print(f"New number of threads: {torch.get_num_threads()}")
 print(f"New number of inter-op threads: {torch.get_num_interop_threads()}")
+slurm_cpus = num_threads
 os.environ.setdefault("WANDB__SERVICE_WAIT", "300")
 
 

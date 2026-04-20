@@ -406,7 +406,8 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
         # If must_release: force the dribbler off
         if self.must_release:
-            kick = 0.25
+            kick = 0.01
+            dribble = False
 
         robot_yellow = Robot(yellow=True, id=0,
                              v_x=v_x_local, v_y=v_y_local, v_theta=v_theta_clipped,
@@ -468,10 +469,10 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         max_y = self.field.width / 2.0
         goal_half_width = self.field.goal_width / 2.0
 
-        #  Time Penalty
+        #  Time Penalty (-0.001 to -0.004)
         if self.reward_type == "dense":
             progress = self.current_step / self.max_steps
-            reward -= 0.0002 * (1.0 + 2.0 * progress)
+            reward -= 0.04 * (1.0 + 2.0 * progress)
 
         
         
@@ -480,61 +481,51 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             done = True
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0: # Goal for Yellow
-                    reward += 1.0
-                    reward += (self.max_steps - self.current_step) * 0.0001
-                    self.match_result = 1
+                    reward += 100.0
+                    reward += (self.max_steps - self.current_step) * 0.01 
+                    self.match_result = 1 
                 else: # Goal for Blue (Defeat)
-                    reward -= 0.2
-                    self.match_result = -1
+                    reward -= 100.0
+                    self.match_result = -1 
             else:
-                reward -= 0.02
+                reward -= 10.0
             return reward, done
 
         # Ball out of bounds
         if abs(ball.y) > max_y:
             done = True
-            reward -= 0.02
-            self.match_result = -1
+            reward -= 10.0
+            self.match_result = -1 
             return reward, done
 
         # Robot out of bounds
         if abs(yellow.x) > max_x or abs(yellow.y) > max_y:
             done = True
-            reward -= 0.02
+            reward -= 15.0
             self.match_result = -1
             return reward, done
-
+        
         # Timeout
         if self.current_step >= self.max_steps:
             truncated = True
             done = True
-            reward -= 0.01
+            reward -= 10.0
             self.match_result = -1
             return reward, done
 
         # DENSE REWARDS
         if self.reward_type == "dense":
-
+            
             dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
-            yellow_has_ball = (dist_robot_ball < 0.12) or yellow.infrared
-
             if not getattr(self, 'has_touched_ball', False) and (dist_robot_ball < 0.15 or yellow.infrared):
                 self.has_touched_ball = True
-                reward += 0.1
-
-            # Crash avoidance (Yellow <-> Blue)
-            dist_yellow_blue = math.hypot(yellow.x - blue.x, yellow.y - blue.y)
-            if dist_yellow_blue < 0.22:
-                reward -= 0.0005
-            if dist_yellow_blue < 0.18:
-                reward -= 0.02
-
-            # Robot to Ball (with shot-flying protection)
+                reward += 10.0
+            
+            # Robot to Ball
+            dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
             if self.last_dist_robot_ball is not None:
                 delta_robot_ball = self.last_dist_robot_ball - dist_robot_ball
-                is_shot_flying = (ball.v_x < -0.1 and delta_robot_ball < 0)
-                if not is_shot_flying:
-                    reward += delta_robot_ball * 0.05
+                reward += np.clip(delta_robot_ball * 5.0, -0.05, 0.05)
             self.last_dist_robot_ball = dist_robot_ball
 
             # Ball to Goal
@@ -551,17 +542,17 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
             if self.last_dist_ball_goal is not None:
                 delta_ball_goal = self.last_dist_ball_goal - dist_ball_to_goal
-                is_good_shot = (ball.v_x < -0.1 and delta_ball_goal > 0)
-                if yellow_has_ball or is_good_shot:
-                    distance_factor = 1.0 + (1.0 / (dist_ball_to_goal + 0.5))
-                    reward += delta_ball_goal * 0.1 * distance_factor
+                reward += np.clip(delta_ball_goal * 10.0, -0.06, 0.1)
             self.last_dist_ball_goal = dist_ball_to_goal
 
-            # Possession
-            if yellow_has_ball:
-                reward += 0.0001
+            # Ballpossession
+            if dist_robot_ball < 0.12 or yellow.infrared:
+                reward += 0.01
                 self.yellow_possession_steps += 1
 
+            if ball.v_x < -0.5:
+                reward += 0.02 * min(-ball.v_x, 3.0)
+                
         return reward, done
 
     

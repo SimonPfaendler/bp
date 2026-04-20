@@ -129,8 +129,11 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
                         batch_size=512,
                         policy_kwargs=custom_policy_kwargs,
                         buffer_size=1_000_000,
-                        learning_rate=3e-4,
-                        ent_coef=0.05
+                        learning_rate=1e-4,
+                        learning_starts=10000,
+                        ent_coef='auto',
+                        target_entropy=-3.0,
+                        gamma=0.99
                     )
 
 

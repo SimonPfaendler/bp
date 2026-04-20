@@ -468,10 +468,10 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         max_y = self.field.width / 2.0
         goal_half_width = self.field.goal_width / 2.0
 
-        #  Time Penalty (-0.001 to -0.004)
+        #  Time Penalty
         if self.reward_type == "dense":
             progress = self.current_step / self.max_steps
-            reward -= 0.0004 * (1.0 + 2.0 * progress)
+            reward -= 0.0002 * (1.0 + 2.0 * progress)
 
         
         
@@ -571,16 +571,16 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         level = getattr(self, 'curriculum_level', 1)
 
         if level == 1:
-            # LEVEL 1: PENALTY - Ball nah am Tor, Yellow direkt dahinter Richtung Tor
+            # LEVEL 1: APPROACH + SHOOT - Ball nah am Tor, Yellow muss hinfahren und sich ausrichten
             goal_x = -self.field.length / 2.0
-            bx = self.np_random.uniform(goal_x + 0.5, goal_x + 1.5)
-            by = self.np_random.uniform(-0.3, 0.3)
+            bx = self.np_random.uniform(goal_x + 0.8, goal_x + 2.0)
+            by = self.np_random.uniform(-0.6, 0.6)
             pos_frame.ball = Ball(x=bx, y=by)
 
             pos_frame.robots_yellow[0] = Robot(
-                x=bx + 0.15,
-                y=by,
-                theta=180.0 + self.np_random.uniform(-10.0, 10.0)
+                x=bx + self.np_random.uniform(0.4, 1.0),
+                y=by + self.np_random.uniform(-0.4, 0.4),
+                theta=self.np_random.uniform(90.0, 270.0)
             )
 
             pos_frame.robots_blue[0] = Robot(x=0.0, y=3.0, theta=0.0)

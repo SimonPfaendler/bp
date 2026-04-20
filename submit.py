@@ -14,7 +14,7 @@ def main():
 
 
     executor.update_parameters(
-        slurm_job_name="Test",
+        slurm_job_name="SAC_low",
         slurm_time="00:30:00",
         slurm_partition="dev_gpu_h100",
         slurm_cpus_per_task=48,
@@ -27,9 +27,9 @@ def main():
 
     
     algos = ["SAC"]
-    action_types = ["low_level"]
+    action_types = ["low_level", "skills"]
     reward_types = ["dense"]
-    seeds = [811]
+    seeds = [815]
 
     jobs = []
 

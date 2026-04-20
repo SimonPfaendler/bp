@@ -18,11 +18,14 @@ from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, CallbackList
 
-slurm_cpus = int(os.environ.get('SLURM_CPUS_PER_TASK', 1))
-torch.set_num_threads(slurm_cpus)
+num_threads = torch.get_num_threads()
+print(f"Current number of threads: {num_threads}")
+torch.set_num_threads(num_threads)
+torch.set_num_interop_threads(num_threads)
+print(f"New number of threads: {torch.get_num_threads()}")
+print(f"New number of inter-op threads: {torch.get_num_interop_threads()}")
 os.environ.setdefault("WANDB__SERVICE_WAIT", "300")
 
-os.environ.setdefault("WANDB__SERVICE_WAIT", "300")
 
 model_dir = "models"
 log_dir = "logs"
@@ -70,7 +73,7 @@ class CurriculumCallback(BaseCallback):
 
 def train(sb3_algo, action_type, reward_type, seed, load_path=None):
 
-    log_freq = 75
+    log_freq = 10
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_name = f"{sb3_algo}_{action_type}_{reward_type}_seed{seed}_{timestamp}"
     current_log_dir = os.path.join(log_dir, run_name)
@@ -107,7 +110,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
     else:
         print("Start new Training")
 
-        custom_policy_kwargs = dict(net_arch=[512, 512])
+        custom_policy_kwargs = dict(net_arch=[256, 256])
         if sb3_algo == 'CrossQ':
             model = CrossQ('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
                             train_freq=24,
@@ -121,15 +124,13 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
                             policy_kwargs=custom_policy_kwargs)
         elif sb3_algo == 'SAC':
             model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
-                        train_freq=48,
-                        gradient_steps=96,
-                        batch_size=4096,
+                        train_freq=4,
+                        gradient_steps=194,
+                        batch_size=512,
                         policy_kwargs=custom_policy_kwargs,
                         buffer_size=1_000_000,
                         learning_rate=3e-4,
-                        learning_starts=25000,
-                        ent_coef='auto',
-                        target_entropy='auto'
+                        ent_coef=0.05
                     )
 
 
@@ -140,7 +141,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TOTAL_STEPS = 35500000
+    TOTAL_STEPS = 1400000
 
     curriculum_callback = CurriculumCallback()
     

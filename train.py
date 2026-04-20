@@ -18,13 +18,12 @@ from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, CallbackList
 
-num_threads = torch.get_num_threads()
-print(f"Current number of threads: {num_threads}")
-torch.set_num_threads(num_threads)
-torch.set_num_interop_threads(num_threads)
-print(f"New number of threads: {torch.get_num_threads()}")
-print(f"New number of inter-op threads: {torch.get_num_interop_threads()}")
-slurm_cpus = num_threads
+slurm_cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 1))
+print(f"Detected CPUs: {slurm_cpus}")
+torch.set_num_threads(slurm_cpus)
+torch.set_num_interop_threads(slurm_cpus)
+print(f"Torch threads: {torch.get_num_threads()}")
+print(f"Torch inter-op threads: {torch.get_num_interop_threads()}")
 os.environ.setdefault("WANDB__SERVICE_WAIT", "300")
 
 

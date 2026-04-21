@@ -137,7 +137,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.has_touched_ball = False
         self.blue_personality = "defensive"
         self.must_release = False
-        self.min_release_distance = 0.13
+        self.min_release_distance = 0.1
         self.last_yellow_had_ball = False
 
 
@@ -181,6 +181,12 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         dist_robot_ball = np.linalg.norm(robot_pos - ball_pos)
         has_contact = (dist_robot_ball < self.robot_ball_contact) or yellow_robot.infrared
 
+
+        if self.must_release and dist_robot_ball >= self.min_release_distance:
+            self.must_release = False
+            self.dribble_start_pos = None
+            self.is_dribbling = False
+
         if has_contact:
             if not self.is_dribbling:
                 self.is_dribbling = True
@@ -191,13 +197,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                     self.must_release = True
                     self.is_dribbling = False
         else:
-            if self.must_release:
-                # Check if robot has enough distance to ball
-                if dist_robot_ball >= self.min_release_distance:
-                    self.must_release = False
-                    self.dribble_start_pos = None
-                    self.is_dribbling = False
-            else:
+            if not self.must_release:
                 self.is_dribbling = False
                 self.dribble_start_pos = None
 

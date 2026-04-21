@@ -110,7 +110,12 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=
     if load_path and os.path.exists(load_path):
         print(f"Lade existierendes Modell von {load_path} zum Weitertrainieren...")
         algo_class = CrossQ if sb3_algo == 'CrossQ' else globals()[sb3_algo]
-        model = algo_class.load(load_path, env=env, device='auto', tensorboard_log=current_log_dir, custom_objects={'learning_rate': 0.0001})
+        new_ent_coef = 0.15
+        model = algo_class.load(load_path, env=env, device='auto', tensorboard_log=current_log_dir,
+                                custom_objects={'learning_rate': 0.0001, 'ent_coef': new_ent_coef})
+        if sb3_algo == 'SAC' and hasattr(model, 'ent_coef_tensor'):
+            model.ent_coef_tensor = torch.tensor(float(new_ent_coef), device=model.device)
+            print(f"Overwrote ent_coef_tensor -> {new_ent_coef}")
     else:
         print("Start new Training")
 
@@ -192,7 +197,7 @@ def test(sb3_algo, action_type, reward_type, path_to_model, test_level=4):
         env.render()
         time.sleep(0.025)
         summe += reward
-        print(f"Reward: {reward:.2f}, Gesamt: {summe:.2f} ")
+        print(f"Reward: {reward:.2f}, Gesamt: {summe:.2f}, Action: {action}", end="\r")
 
         if done:
             print("\nEpisode done")

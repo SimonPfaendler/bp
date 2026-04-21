@@ -508,7 +508,13 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         # Robot OOB
         if abs(yellow.x) > max_x or abs(yellow.y) > max_y:
             done = True
-            reward -= 200.0
+            level = getattr(self, 'curriculum_level', 1)
+            if level <= 2:
+                reward -= 20.0
+            elif level == 3:
+                reward -= 50.0
+            else:
+                reward -= 200.0
             self.match_result = -1
             return reward, done
 
@@ -529,7 +535,10 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             # Absolutes Distanz-Potential: konstanter Gradient Richtung Ball, auch ohne Bewegung
             max_dist = math.hypot(self.field.length, self.field.width)
             reward += 0.05 * (1.0 - dist_robot_ball / max_dist)
-
+            
+            robot_speed = math.hypot(yellow.v_x, yellow.v_y)
+            if robot_speed < 0.1 and not yellow_has_ball:
+                reward -= 0.05
             # Robot to Ball
             if self.last_dist_robot_ball is not None:
                 delta_robot_ball = self.last_dist_robot_ball - dist_robot_ball

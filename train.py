@@ -33,10 +33,14 @@ os.makedirs(model_dir, exist_ok=True)
 os.makedirs(log_dir, exist_ok=True)
 
 class CurriculumCallback(BaseCallback):
-    def __init__(self, verbose=0):
+    def __init__(self, start_level=1, verbose=0):
         super().__init__(verbose)
-        self.current_level = 1
+        self.current_level = start_level
         self.success_buffer = deque(maxlen=150)
+
+    def _on_training_start(self) -> None:
+        if self.current_level > 1:
+            self.training_env.env_method("set_curriculum_level", self.current_level)
         
     def _on_step(self) -> bool:
         dones = self.locals.get("dones", [])
@@ -71,7 +75,7 @@ class CurriculumCallback(BaseCallback):
 
         return True
 
-def train(sb3_algo, action_type, reward_type, seed, load_path=None):
+def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=1):
 
     log_freq = 10
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -146,7 +150,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None):
 
     TOTAL_STEPS = 3000000
 
-    curriculum_callback = CurriculumCallback()
+    curriculum_callback = CurriculumCallback(start_level=start_level)
     
     checkpoint_callback = CheckpointCallback(
         save_freq=20000, 
@@ -204,11 +208,15 @@ if __name__ == '__main__':
     parser.add_argument('--action_type', choices=['skills', 'low_level'], default='skills')
     parser.add_argument('--reward_type', choices=['sparse', 'dense'], default='dense')
     parser.add_argument('--seed', type=int, default=0, help='Zufalls-Seed für das Training')
+    parser.add_argument('--start_level', type=int, default=1, choices=[1, 2, 3, 4, 5],
+                        help='Curriculum-Level beim Start (1-5). Nützlich beim Weitertrainieren.')
     args = parser.parse_args()
 
     if args.train:
-        path = ""  # Path to model for continued training
-        train(args.sb3_algo, args.action_type, args.reward_type, args.seed, load_path=path if os.path.isfile(path) else None)
+        path = "models/SAC_low_level_dense_seed820_20260420-144701_20160000_steps.zip"  # Path to model for continued training
+        train(args.sb3_algo, args.action_type, args.reward_type, args.seed,
+              load_path=path if os.path.isfile(path) else None,
+              start_level=args.start_level)
 
 
     if args.test:

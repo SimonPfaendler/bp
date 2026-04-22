@@ -680,7 +680,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 pos_frame.ball = Ball(x=blue_x+0.15, y=blue_y)
                 pos_frame.robots_yellow[0] = Robot(
                     x=blue_x + self.np_random.uniform(0.5, 1.5),
-                    y=self.np_random.uniform(-2.0, 2.0),
+                    y=blue_y + self.np_random.uniform(-1.0, 1.0),
                     theta=180
                 )
 

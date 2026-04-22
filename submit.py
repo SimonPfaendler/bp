@@ -15,7 +15,7 @@ def main():
 
     executor.update_parameters(
         slurm_job_name="SAC_low",
-        slurm_time="04:00:00",
+        slurm_time="04:30:00",
         slurm_partition="gpu_h100_short",
         slurm_cpus_per_task=48,
         slurm_mem="193300mb",

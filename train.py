@@ -110,16 +110,16 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=
     if load_path and os.path.exists(load_path):
         print(f"Lade existierendes Modell von {load_path} zum Weitertrainieren...")
         algo_class = CrossQ if sb3_algo == 'CrossQ' else globals()[sb3_algo]
-        new_ent_coef = 0.15
+        new_ent_coef = 0.05
         model = algo_class.load(load_path, env=env, device='auto', tensorboard_log=current_log_dir,
-                                custom_objects={'learning_rate': 0.0001, 'ent_coef': new_ent_coef})
+                                custom_objects={'learning_rate': 0.0003, 'ent_coef': new_ent_coef})
         if sb3_algo == 'SAC' and hasattr(model, 'ent_coef_tensor'):
             model.ent_coef_tensor = torch.tensor(float(new_ent_coef), device=model.device)
             print(f"Overwrote ent_coef_tensor -> {new_ent_coef}")
     else:
         print("Start new Training")
 
-        custom_policy_kwargs = dict(net_arch=[256, 256])
+        custom_policy_kwargs = dict(net_arch=[512, 512, 512])
         if sb3_algo == 'CrossQ':
             model = CrossQ('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
                             train_freq=24,
@@ -153,7 +153,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TOTAL_STEPS = 3000000
+    TOTAL_STEPS = 36000000
 
     curriculum_callback = CurriculumCallback(start_level=start_level)
     
@@ -218,7 +218,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.train:
-        path = "models/SAC_low_level_dense_seed820_20260420-144701_20160000_steps.zip"  # Path to model for continued training
+        path = "models/SAC_low_level_dense_seed820_20260421-202203_final.zip"  # Path to model for continued training
         train(args.sb3_algo, args.action_type, args.reward_type, args.seed,
               load_path=path if os.path.isfile(path) else None,
               start_level=args.start_level)

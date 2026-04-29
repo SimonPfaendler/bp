@@ -134,8 +134,8 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=
         elif sb3_algo == 'SAC':
             model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
                         train_freq=48,
-                        gradient_steps=96,
-                        batch_size=4096,
+                        gradient_steps=48,
+                        batch_size=2048,
                         policy_kwargs=custom_policy_kwargs,
                         buffer_size=1_000_000,
                         learning_rate=3e-4,
@@ -153,7 +153,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TOTAL_STEPS = 36000000
+    TOTAL_STEPS = 22000000
 
     curriculum_callback = CurriculumCallback(start_level=start_level)
     
@@ -218,7 +218,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.train:
-        path = "models/SAC_low_level_dense_seed820_20260421-202203_final.zip"  # Path to model for continued training
+        path = "models/SAC_low_level_dense_seed820_20260422-110918_final.zip"  # Path to model for continued training
         train(args.sb3_algo, args.action_type, args.reward_type, args.seed,
               load_path=path if os.path.isfile(path) else None,
               start_level=args.start_level)

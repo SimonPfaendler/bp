@@ -122,19 +122,19 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=
         custom_policy_kwargs = dict(net_arch=[512, 512, 512])
         if sb3_algo == 'CrossQ':
             model = CrossQ('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
-                            train_freq=24,
-                            gradient_steps=24,
-                            batch_size=4096,
+                            train_freq=48,
+                            gradient_steps=48,
+                            batch_size=512,
                             buffer_size=1_000_000,
                             learning_rate=3e-4,
-                            learning_starts=25000,
-                            ent_coef='auto',
+                            learning_starts=10000,
+                            ent_coef=0.05,
                             target_entropy='auto',
                             policy_kwargs=custom_policy_kwargs)
         elif sb3_algo == 'SAC':
             model = SAC('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
                         train_freq=48,
-                        gradient_steps=48,
+                        gradient_steps=96,
                         batch_size=2048,
                         policy_kwargs=custom_policy_kwargs,
                         buffer_size=1_000_000,
@@ -153,7 +153,7 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=
             print(f"Algo {sb3_algo} nicht gefunden")
             return
 
-    TOTAL_STEPS = 22000000
+    TOTAL_STEPS = 3800000
 
     curriculum_callback = CurriculumCallback(start_level=start_level)
     
@@ -218,7 +218,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.train:
-        path = "models/SAC_low_level_dense_seed820_20260422-110918_final.zip"  # Path to model for continued training
+        path = ""  # Path to model for continued training
         train(args.sb3_algo, args.action_type, args.reward_type, args.seed,
               load_path=path if os.path.isfile(path) else None,
               start_level=args.start_level)

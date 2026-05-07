@@ -155,15 +155,28 @@ def _pair_worker(remote, parent_remote, env_fn_wrapper):
             cmd, data = remote.recv()
             if cmd == "step":
                 pair_action = data
-                obs, rewards, done, truncated, info = env.step(pair_action)
-                terminal = bool(done) or bool(truncated)
-                terminal_obs = None
-                if terminal:
-                    terminal_obs = obs.copy()
-                    obs, _ = env.reset()
-                remote.send(
-                    (obs, rewards, bool(done), bool(truncated), info, terminal_obs)
-                )
+                try:
+                    obs, rewards, done, truncated, info = env.step(pair_action)
+                    terminal = bool(done) or bool(truncated)
+                    terminal_obs = None
+                    if terminal:
+                        terminal_obs = obs.copy()
+                        obs, _ = env.reset()
+                    remote.send(
+                        (obs, rewards, bool(done), bool(truncated), info, terminal_obs)
+                    )
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    try:
+                        obs, _ = env.reset()
+                    except Exception:
+                        raise
+                    zero_r = np.zeros(2, dtype=np.float32)
+                    err_info = {"worker_error": repr(e)}
+                    remote.send(
+                            (obs, zero_r, True, False, err_info, obs.copy())
+                    )
             elif cmd == "reset":
                 seed = data
                 obs, info = env.reset(seed=seed)

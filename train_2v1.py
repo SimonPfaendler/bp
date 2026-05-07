@@ -127,8 +127,7 @@ def train(sb3_algo, reward_type, seed, n_pairs, load_path=None, start_level=1):
         name=run_name,
         sync_tensorboard=True,
         config={
-            "algo": sb3_algo,
-            "reward_type": reward_type,
+            "algo": sb3_algo, "reward_type": reward_type,
             "seed": seed,
             "n_pairs": n_pairs,
             "n_agent_slots": 2 * n_pairs,
@@ -196,9 +195,8 @@ def train(sb3_algo, reward_type, seed, n_pairs, load_path=None, start_level=1):
         ]
     )
 
-    TOTAL_STEPS = 3_800_000
-    model.learn(
-        total_timesteps=TOTAL_STEPS,
+    TOTAL_STEPS = 5_000_000
+    model.learn( total_timesteps=TOTAL_STEPS,
         reset_num_timesteps=False,
         log_interval=10,
         callback=callbacks,
@@ -265,6 +263,7 @@ if __name__ == "__main__":
             seed=args.seed,
             n_pairs=args.n_pairs,
             start_level=args.start_level,
+            load_path="models/2v1_SAC_dense_seed820_20260507-170258_14361600_steps.zip",
         )
     if args.test:
         if os.path.isfile(args.test):

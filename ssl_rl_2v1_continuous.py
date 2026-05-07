@@ -34,7 +34,7 @@ def blue_defender_heuristic_2v1(env, robot):
     yellow as the threat-of-record.
     """
     ball = env.frame.ball
-    yellows = env.frame.robots_yellow
+    yellows = env.frame.robots_yellow.values()
     closest_yellow = min(
         yellows, key=lambda y: math.hypot(y.x - ball.x, y.y - ball.y)
     )
@@ -115,7 +115,7 @@ def blue_defender_heuristic_2v1(env, robot):
 #   [28:30] Own goal:    rel_x, rel_y
 #   [30:34] Wall distances
 #   [34:35] Team possession
-SINGLE_OBS_DIM = 35
+SINGLE_OBS_DIM = 36
 SINGLE_ACT_DIM = 6  # [v_x, v_y, v_theta, kick_power, kick_trigger, dribble]
 N_YELLOW = 2
 
@@ -176,6 +176,11 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         self.team_possession_steps = 0
         self.match_result = 0
 
+        # Pass tracking
+        self.last_yellow_carrier = None  # 0, 1, or None
+        self.blue_touched_since_yellow = False
+        self.passes_in_episode = 0
+
         # Episode tracking
         self.ep_reward = 0.0
         self.ep_length = 0
@@ -191,6 +196,9 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         self.last_dist_ball_goal = None
         self.team_possession_steps = 0
         self.match_result = 0
+        self.last_yellow_carrier = None
+        self.blue_touched_since_yellow = False
+        self.passes_in_episode = 0
         self.ep_reward = 0.0
         self.ep_length = 0
         self.ep_start_time = time.time()
@@ -328,6 +336,7 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         d_wall_pos_y = (max_y - self_robot.y) / max_y
 
         team_has_ball = 1.0 if (self_has_ball or mate_has_ball) else 0.0
+        i_am_closer = 1.0 if self_dist_ball < mate_dist_ball else 0.0
 
         obs = np.array(
             [
@@ -375,6 +384,8 @@ class SSL2v1SharedEnv(SSLBaseEnv):
                 d_wall_pos_y,
                 # Team possession
                 team_has_ball,
+                # Role tiebreaker (1 = I am the carrier-candidate)
+                i_am_closer,
             ],
             dtype=np.float32,
         )
@@ -506,6 +517,8 @@ class SSL2v1SharedEnv(SSLBaseEnv):
                 if ball.x < 0:  # Goal for yellow
                     reward += 100.0
                     reward += (self.max_steps - self.current_step) * 0.01
+                    # Bonus for goals scored after a pass.
+                    reward += 50.0 * min(self.passes_in_episode, 2)
                     self.match_result = 1
                 else:  # Goal for blue
                     reward -= 50.0
@@ -587,6 +600,44 @@ class SSL2v1SharedEnv(SSLBaseEnv):
                 reward += 0.02 * min(-ball.v_x, 3.0)
             if ball.v_x > 0.5:
                 reward -= 0.02 * min(ball.v_x, 3.0)
+
+            # Spacing: reward separation while team has ball.
+            mate_sep = math.hypot(ya.x - yb.x, ya.y - yb.y)
+            if yellow_has_ball:
+                reward += 0.02 * min(mate_sep / 2.0, 1.0)
+
+            # Anti-ball-hogging: both yellows crowding the ball.
+            if dist_a < 0.5 and dist_b < 0.5:
+                reward -= 0.05
+
+        # Pass detection (runs in both sparse and dense modes).
+        ya_has = (math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.12) or ya.infrared
+        yb_has = (math.hypot(yb.x - ball.x, yb.y - ball.y) < 0.12) or yb.infrared
+        blue = self.frame.robots_blue[0]
+        blue_has = (
+            math.hypot(blue.x - ball.x, blue.y - ball.y) < 0.12
+        ) or blue.infrared
+
+        if blue_has:
+            self.blue_touched_since_yellow = True
+            self.last_yellow_carrier = None
+
+        current_carrier = None
+        if ya_has and not yb_has:
+            current_carrier = 0
+        elif yb_has and not ya_has:
+            current_carrier = 1
+
+        if current_carrier is not None:
+            if (
+                self.last_yellow_carrier is not None
+                and current_carrier != self.last_yellow_carrier
+                and not self.blue_touched_since_yellow
+            ):
+                reward += 5.0
+                self.passes_in_episode += 1
+            self.last_yellow_carrier = current_carrier
+            self.blue_touched_since_yellow = False
 
         return reward, done, truncated
 

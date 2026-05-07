@@ -115,7 +115,7 @@ def blue_defender_heuristic_2v1(env, robot):
 #   [28:30] Own goal:    rel_x, rel_y
 #   [30:34] Wall distances
 #   [34:35] Team possession
-SINGLE_OBS_DIM = 36
+SINGLE_OBS_DIM = 38
 SINGLE_ACT_DIM = 6  # [v_x, v_y, v_theta, kick_power, kick_trigger, dribble]
 N_YELLOW = 2
 
@@ -181,6 +181,14 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         self.blue_touched_since_yellow = False
         self.passes_in_episode = 0
 
+        # Per-yellow dribble-distance tracking (SSL "max 1m" rule).
+        self.max_dribble_dist = 1.0
+        self.min_release_distance = 0.1
+        self.robot_ball_contact = 0.12
+        self.is_dribbling = [False, False]
+        self.dribble_start_pos = [None, None]
+        self.must_release = [False, False]
+
         # Episode tracking
         self.ep_reward = 0.0
         self.ep_length = 0
@@ -199,6 +207,9 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         self.last_yellow_carrier = None
         self.blue_touched_since_yellow = False
         self.passes_in_episode = 0
+        self.is_dribbling = [False, False]
+        self.dribble_start_pos = [None, None]
+        self.must_release = [False, False]
         self.ep_reward = 0.0
         self.ep_length = 0
         self.ep_start_time = time.time()
@@ -227,6 +238,7 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         self.last_frame = self.frame
         self.frame = self.rsim.get_frame()
 
+        self._update_dribble_state()
         obs = self._stacked_obs()
         team_r, done, truncated = self._calculate_team_reward_and_done()
         rewards = np.array([team_r, team_r], dtype=np.float32)
@@ -260,14 +272,14 @@ class SSL2v1SharedEnv(SSLBaseEnv):
     def _stacked_obs(self) -> np.ndarray:
         ya, yb = self.frame.robots_yellow[0], self.frame.robots_yellow[1]
         blue = self.frame.robots_blue[0]
-        obs_a = self._egocentric_obs(self_robot=ya, mate=yb, opp=blue)
-        obs_b = self._egocentric_obs(self_robot=yb, mate=ya, opp=blue)
+        obs_a = self._egocentric_obs(self_robot=ya, mate=yb, opp=blue, idx=0)
+        obs_b = self._egocentric_obs(self_robot=yb, mate=ya, opp=blue, idx=1)
         return np.stack([obs_a, obs_b], axis=0).astype(np.float32)
 
     def _frame_to_observations(self):
         return self._stacked_obs()
 
-    def _egocentric_obs(self, self_robot, mate, opp) -> np.ndarray:
+    def _egocentric_obs(self, self_robot, mate, opp, idx) -> np.ndarray:
         ball = self.frame.ball
         max_x = self.field.length / 2.0
         max_y = self.field.width / 2.0
@@ -338,6 +350,14 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         team_has_ball = 1.0 if (self_has_ball or mate_has_ball) else 0.0
         i_am_closer = 1.0 if self_dist_ball < mate_dist_ball else 0.0
 
+        if self.is_dribbling[idx] and self.dribble_start_pos[idx] is not None:
+            start = self.dribble_start_pos[idx]
+            cur_d = math.hypot(ball.x - start[0], ball.y - start[1])
+            dribble_meter = float(np.clip(cur_d / self.max_dribble_dist, 0.0, 1.0))
+        else:
+            dribble_meter = 0.0
+        must_release_flag = 1.0 if self.must_release[idx] else 0.0
+
         obs = np.array(
             [
                 # Self
@@ -386,16 +406,63 @@ class SSL2v1SharedEnv(SSLBaseEnv):
                 team_has_ball,
                 # Role tiebreaker (1 = I am the carrier-candidate)
                 i_am_closer,
+                # Dribble state (own)
+                dribble_meter,
+                must_release_flag,
             ],
             dtype=np.float32,
         )
         return np.clip(obs, -self.NORM_BOUNDS, self.NORM_BOUNDS)
 
-    def _yellow_command(self, robot, action) -> Robot:
+    def _update_dribble_state(self):
+        """Per-yellow SSL max-1m dribble enforcement."""
+        ball = self.frame.ball
+        yellows = (self.frame.robots_yellow[0], self.frame.robots_yellow[1])
+        for i, y in enumerate(yellows):
+            dist = math.hypot(y.x - ball.x, y.y - ball.y)
+            has_contact = (dist < self.robot_ball_contact) or y.infrared
+
+            if self.must_release[i] and dist >= self.min_release_distance:
+                self.must_release[i] = False
+                self.is_dribbling[i] = False
+                self.dribble_start_pos[i] = None
+
+            if has_contact:
+                if not self.is_dribbling[i]:
+                    self.is_dribbling[i] = True
+                    self.dribble_start_pos[i] = np.array([ball.x, ball.y])
+                else:
+                    start = self.dribble_start_pos[i]
+                    dribble_dist = math.hypot(
+                        ball.x - start[0], ball.y - start[1]
+                    )
+                    if dribble_dist > self.max_dribble_dist:
+                        self.must_release[i] = True
+                        self.is_dribbling[i] = False
+            else:
+                if not self.must_release[i]:
+                    self.is_dribbling[i] = False
+                    self.dribble_start_pos[i] = None
+
+    def convert_actions(self, action_array, angle):
+        """Denormalize, clip to absolute max and convert to local."""
+        v_x = action_array[0] * self.max_v_cmd
+        v_y = action_array[1] * self.max_v_cmd
+        v_theta = action_array[2] * self.max_w_cmd
+
+        v_x_local = v_x * math.cos(angle) + v_y * math.sin(angle)
+        v_y_local = -v_x * math.sin(angle) + v_y * math.cos(angle)
+
+        v_norm = math.hypot(v_x_local, v_y_local)
+        if v_norm > self.max_v_cmd:
+            c = self.max_v_cmd / v_norm
+            v_x_local *= c
+            v_y_local *= c
+
+        return v_x_local, v_y_local, v_theta
+
+    def _yellow_command(self, robot, action, idx) -> Robot:
         """Apply low-level action [v_x, v_y, v_theta, kick_pow, kick_trig, dribble]."""
-        v_x_global = float(action[0])
-        v_y_global = float(action[1])
-        v_theta = float(action[2])
         raw_kick = float(action[3])
         kick_trigger = float(action[4])
         dribble_trigger = float(action[5])
@@ -403,18 +470,14 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         kick = (3.0 + ((raw_kick + 1.0) / 2.0) * 3.0) if kick_trigger > 0.0 else 0.0
         dribble = dribble_trigger > 0.0
 
-        angle_rad = math.radians(robot.theta)
-        v_x = v_x_global * self.max_v_cmd
-        v_y = v_y_global * self.max_v_cmd
-        w = v_theta * self.max_w_cmd
+        if self.must_release[idx]:
+            kick = 0.01
+            dribble = False
 
-        v_x_local = v_x * math.cos(angle_rad) + v_y * math.sin(angle_rad)
-        v_y_local = -v_x * math.sin(angle_rad) + v_y * math.cos(angle_rad)
-        v_norm = math.hypot(v_x_local, v_y_local)
-        if v_norm > self.max_v_cmd:
-            c = self.max_v_cmd / v_norm
-            v_x_local *= c
-            v_y_local *= c
+        angle_rad = math.radians(robot.theta)
+        v_x_local, v_y_local, w = self.convert_actions(
+            [float(action[0]), float(action[1]), float(action[2])], angle_rad
+        )
 
         return Robot(
             yellow=True,
@@ -438,12 +501,9 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         elif level == 3:
             cmd = move_to_ball(blue, ball, speed=0.5)
             angle_rad = math.radians(blue.theta)
-            bv_x_g, bv_y_g, bv_w = cmd[0], cmd[1], cmd[2]
-            bv_x_g *= self.max_v_cmd
-            bv_y_g *= self.max_v_cmd
-            bv_w *= self.max_w_cmd
-            bv_x = bv_x_g * math.cos(angle_rad) + bv_y_g * math.sin(angle_rad)
-            bv_y = -bv_x_g * math.sin(angle_rad) + bv_y_g * math.cos(angle_rad)
+            bv_x, bv_y, bv_w = self.convert_actions(
+                [cmd[0], cmd[1], cmd[2]], angle_rad
+            )
             kick = 0.0
             dribble = False
         else:
@@ -451,15 +511,13 @@ class SSL2v1SharedEnv(SSLBaseEnv):
                 if blue.infrared:
                     cmd = shoot_at_goal_center(self, blue, team_color="blue")
                 else:
-                    cmd = move_to_ball(blue, ball, speed=1.5)
+                    cmd = move_to_ball(blue, ball, speed=2.0)
             else:
                 cmd = blue_defender_heuristic_2v1(self, blue)
             angle_rad = math.radians(blue.theta)
-            bv_x_g = cmd[0] * self.max_v_cmd
-            bv_y_g = cmd[1] * self.max_v_cmd
-            bv_w = cmd[2] * self.max_w_cmd
-            bv_x = bv_x_g * math.cos(angle_rad) + bv_y_g * math.sin(angle_rad)
-            bv_y = -bv_x_g * math.sin(angle_rad) + bv_y_g * math.cos(angle_rad)
+            bv_x, bv_y, bv_w = self.convert_actions(
+                [cmd[0], cmd[1], cmd[2]], angle_rad
+            )
             kick = float(cmd[3])
             dribble = bool(cmd[4] > 0)
 
@@ -476,10 +534,10 @@ class SSL2v1SharedEnv(SSLBaseEnv):
     def _build_commands(self, action_pair: np.ndarray):
         cmds = []
         cmds.append(
-            self._yellow_command(self.frame.robots_yellow[0], action_pair[0])
+            self._yellow_command(self.frame.robots_yellow[0], action_pair[0], 0)
         )
         cmds.append(
-            self._yellow_command(self.frame.robots_yellow[1], action_pair[1])
+            self._yellow_command(self.frame.robots_yellow[1], action_pair[1], 1)
         )
         cmds.append(self._blue_command())
         return cmds

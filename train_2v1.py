@@ -160,12 +160,15 @@ def train(sb3_algo, reward_type, seed, n_pairs, load_path=None, start_level=1):
             )
 
         # Checkpoint callback saves buffer as <prefix>_replay_buffer_<N>_steps.pkl
-        # alongside the model <prefix>_<N>_steps.zip.
-        rb_path = re.sub(
-            r"_(\d+)_steps\.zip$",
-            r"_replay_buffer_\1_steps.pkl",
-            load_path,
-        )
+        # alongside the model <prefix>_<N>_steps.zip; final save uses
+        if load_path.endswith("_final.zip"):
+            rb_path = load_path.replace("_final.zip", "_final_replay_buffer.pkl")
+        else:
+            rb_path = re.sub(
+                r"_(\d+)_steps\.zip$",
+                r"_replay_buffer_\1_steps.pkl",
+                load_path,
+            )
         if rb_path != load_path and os.path.exists(rb_path):
             print(f"Loading replay buffer {rb_path}")
             model.load_replay_buffer(rb_path)
@@ -278,7 +281,7 @@ if __name__ == "__main__":
             seed=args.seed,
             n_pairs=args.n_pairs,
             start_level=args.start_level,
-            load_path="models/2v1_SAC_dense_seed820_20260507-170258_14361600_steps.zip",
+            load_path="models/2v1_SAC_dense_seed820_20260507-203010_final.zip",
         )
     if args.test:
         if os.path.isfile(args.test):

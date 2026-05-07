@@ -17,11 +17,15 @@ from ssl_rl_1v1_continuous import SSL1v1ContinuousEnv
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, CallbackList
-
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 slurm_cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 1))
 print(f"Detected CPUs: {slurm_cpus}")
-torch.set_num_threads(slurm_cpus)
-torch.set_num_interop_threads(slurm_cpus)
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
 print(f"Torch threads: {torch.get_num_threads()}")
 print(f"Torch inter-op threads: {torch.get_num_interop_threads()}")
 os.environ.setdefault("WANDB__SERVICE_WAIT", "300")
@@ -123,8 +127,8 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=
         if sb3_algo == 'CrossQ':
             model = CrossQ('MlpPolicy', env, verbose=1, device='cuda', tensorboard_log=current_log_dir, seed=seed,
                             train_freq=48,
-                            gradient_steps=48,
-                            batch_size=512,
+                            gradient_steps=96,
+                            batch_size=2048,
                             buffer_size=1_000_000,
                             learning_rate=3e-4,
                             learning_starts=10000,

@@ -568,9 +568,9 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 self.yellow_possession_steps += 1
 
             # Interception Bonus
-            if yellow_has_ball and not self.last_yellow_had_ball:
-                reward += 2.0
-            self.last_yellow_had_ball = yellow_has_ball
+            #if yellow_has_ball and not self.last_yellow_had_ball:
+            #    reward += 2.0
+            #self.last_yellow_had_ball = yellow_has_ball
 
             # Ball-Direction:
             if ball.v_x < -0.5:
@@ -680,7 +680,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 pos_frame.ball = Ball(x=blue_x+0.15, y=blue_y)
                 pos_frame.robots_yellow[0] = Robot(
                     x=blue_x + self.np_random.uniform(0.5, 1.5),
-                    y=blue_y + self.np_random.uniform(-1.0, 1.0),
+                    y=blue_y + self.np_random.uniform(-0.2, 0.2),
                     theta=180
                 )
 

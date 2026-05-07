@@ -12,6 +12,7 @@ flow into the same replay buffer.
 import argparse
 import datetime
 import os
+import re
 import time
 from collections import deque
 
@@ -157,6 +158,19 @@ def train(sb3_algo, reward_type, seed, n_pairs, load_path=None, start_level=1):
             model.ent_coef_tensor = torch.tensor(
                 float(new_ent), device=model.device
             )
+
+        # Checkpoint callback saves buffer as <prefix>_replay_buffer_<N>_steps.pkl
+        # alongside the model <prefix>_<N>_steps.zip.
+        rb_path = re.sub(
+            r"_(\d+)_steps\.zip$",
+            r"_replay_buffer_\1_steps.pkl",
+            load_path,
+        )
+        if rb_path != load_path and os.path.exists(rb_path):
+            print(f"Loading replay buffer {rb_path}")
+            model.load_replay_buffer(rb_path)
+        else:
+            print(f"No replay buffer found at {rb_path}; starting empty")
     else:
         policy_kwargs = dict(net_arch=[512, 512, 512])
         common = dict(
@@ -190,7 +204,7 @@ def train(sb3_algo, reward_type, seed, n_pairs, load_path=None, start_level=1):
                 save_freq=20000,
                 save_path=MODEL_DIR,
                 name_prefix=run_name,
-                save_replay_buffer=False,
+                save_replay_buffer=True,
             ),
         ]
     )
@@ -203,6 +217,7 @@ def train(sb3_algo, reward_type, seed, n_pairs, load_path=None, start_level=1):
     )
     final = f"{MODEL_DIR}/{run_name}_final"
     model.save(final)
+    model.save_replay_buffer(f"{final}_replay_buffer")
     print(f"Saved {final}")
 
 

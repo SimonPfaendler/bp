@@ -21,9 +21,9 @@ class SSL1v1ManualEnv(SSL1v1ContinuousEnv):
         kick = 6.0 if actions[3] > 0.5 else 0.0
         dribble = True if actions[4] > 0.5 else False
 
-        # Auto-release: mirror of SSL1v1ContinuousEnv._get_commands
+        # Auto-release:
         if self.must_release:
-            kick = 0.25
+            kick = 0.01
         #if not dribble and kick == 0.0:
             #kick = 0.1
 

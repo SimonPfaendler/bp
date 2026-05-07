@@ -45,7 +45,7 @@ def blue_attacker_heuristic(env, robot):
         c = dx * dx + dy * dy
         t = None
         if abs(a) < 1e-6:
-            # ball_speed ≈ pursuit_speed → linear: b·t + c = 0
+            # ball_speed = pursuit_speed -> linear: b·t + c = 0
             if abs(b) > 1e-6:
                 cand = -c / b
                 if cand > 0.0:
@@ -532,7 +532,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             dist_robot_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
             yellow_has_ball = (dist_robot_ball < 0.12) or yellow.infrared
 
-            # Absolutes Distanz-Potential: konstanter Gradient Richtung Ball, auch ohne Bewegung
+            # Absolute distance potential: constant gradient towards the ball, even without movement.
             max_dist = math.hypot(self.field.length, self.field.width)
             reward += 0.05 * (1.0 - dist_robot_ball / max_dist)
             
@@ -588,7 +588,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         level = getattr(self, 'curriculum_level', 1)
 
         if level == 1:
-            # LEVEL 1: APPROACH + SHOOT - Ball nah am Tor, Yellow muss hinfahren und sich ausrichten
+            # LEVEL 1: APPROACH + SHOOT
             goal_x = -self.field.length / 2.0
             bx = self.np_random.uniform(goal_x + 0.8, goal_x + 2.0)
             by = self.np_random.uniform(-0.6, 0.6)
@@ -603,7 +603,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             pos_frame.robots_blue[0] = Robot(x=0.0, y=3.0, theta=0.0)
 
         elif level == 2:
-            # LEVEL 2: FREE BALL + statischer Goalie
+            # LEVEL 2: FREE BALL + static Goalie
             pos_frame.ball = Ball(
                 x=self.np_random.uniform(-1.0, 2.0),
                 y=self.np_random.uniform(-1.5, 1.5)
@@ -623,7 +623,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             )
 
         elif level == 3:
-            # LEVEL 3: FREE BALL + langsamer Blue bewegt sich zum Ball
+            # LEVEL 3: FREE BALL + Heuristic Blue (slow approach, no kick)
             pos_frame.ball = Ball(
                 x=self.np_random.uniform(-1.0, 2.0),
                 y=self.np_random.uniform(-1.5, 1.5)

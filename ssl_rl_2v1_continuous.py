@@ -173,6 +173,8 @@ class SSL2v1SharedEnv(SSLBaseEnv):
 
         self.last_min_dist_robot_ball = None
         self.last_dist_ball_goal = None
+        self.last_dist_to_ball = None
+        self.last_dist_to_pred_ball = [None, None]
         self.team_possession_steps = 0
         self.match_result = 0
 
@@ -202,6 +204,8 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         self.current_step = 0
         self.last_min_dist_robot_ball = None
         self.last_dist_ball_goal = None
+        self.last_dist_to_ball = None
+        self.last_dist_to_pred_ball = [None, None]
         self.team_possession_steps = 0
         self.match_result = 0
         self.last_yellow_carrier = None
@@ -240,10 +244,9 @@ class SSL2v1SharedEnv(SSLBaseEnv):
 
         self._update_dribble_state()
         obs = self._stacked_obs()
-        team_r, done, truncated = self._calculate_team_reward_and_done()
-        rewards = np.array([team_r, team_r], dtype=np.float32)
+        rewards, done, truncated = self._calculate_team_reward_and_done()
 
-        self.ep_reward += float(team_r)
+        self.ep_reward += float(rewards.mean())
         self.ep_length += 1
 
         info = {}
@@ -546,160 +549,232 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         return self._build_commands(np.zeros((N_YELLOW, SINGLE_ACT_DIM), dtype=np.float32))
 
     def _calculate_reward_and_done(self):
-        team_r, done, _ = self._calculate_team_reward_and_done()
-        return team_r, done
+        rewards, done, _ = self._calculate_team_reward_and_done()
+        return float(rewards.mean()), done
 
-    def _calculate_team_reward_and_done(self) -> Tuple[float, bool, bool]:
+    def _calculate_team_reward_and_done(self) -> Tuple[np.ndarray, bool, bool]:
+        """Per-agent reward + termination flags.
+
+        Decomposition:
+          - Shared (both): time penalty, terminations, goal-closing,
+            ball-velocity, pass event, anti-hogging, spacing.
+          - Carrier (closer to ball): ball-closing.
+          - Non-carrier: support-position, interception lane.
+          - Per-agent: standing-still, OOB-offender bonus penalty,
+            active-interception of moving ball.
+          - Pre-pass: kicker rewarded for kicking toward mate; receiver
+            rewarded for closing on predicted ball point.
+        """
         ball = self.frame.ball
         ya, yb = self.frame.robots_yellow[0], self.frame.robots_yellow[1]
+        yellows = (ya, yb)
+        blue = self.frame.robots_blue[0]
 
         max_x = self.field.length / 2.0
         max_y = self.field.width / 2.0
         goal_half_width = self.field.goal_width / 2.0
 
-        reward = 0.0
+        rewards = np.zeros(2, dtype=np.float32)
         done = False
         truncated = False
 
         if self.reward_type == "dense":
             progress = self.current_step / self.max_steps
-            # Symmetric stronger time penalty: agent must produce, not just exist.
-            reward -= 0.04 * (1.0 + 2.0 * progress)
+            rewards -= 0.04 * (1.0 + 2.0 * progress)
 
-        # Ball out of pitch: end conditions.
+        # --- Terminal: ball OOB / goal ---
         if abs(ball.x) > max_x:
             done = True
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0:  # Goal for yellow
-                    reward += 100.0
-                    reward += (self.max_steps - self.current_step) * 0.01
-                    # Bonus for goals scored after a pass.
-                    reward += 50.0 * min(self.passes_in_episode, 2)
+                    rewards += 100.0
+                    rewards += (self.max_steps - self.current_step) * 0.01
+                    rewards += 50.0 * min(self.passes_in_episode, 2)
                     self.match_result = 1
                 else:  # Goal for blue
-                    reward -= 50.0
+                    rewards -= 50.0
                     self.match_result = -1
             else:
-                reward -= 5.0
-            return reward, done, truncated
+                rewards -= 5.0
+            return rewards, done, truncated
 
         if abs(ball.y) > max_y:
             done = True
-            reward -= 5.0
+            rewards -= 5.0
             self.match_result = -1
-            return reward, done, truncated
+            return rewards, done, truncated
 
-        # Yellow OOB
-        for y in (ya, yb):
+        # --- Yellow OOB (offender takes extra hit) ---
+        for i, y in enumerate(yellows):
             if abs(y.x) > max_x or abs(y.y) > max_y:
                 done = True
                 level = self.curriculum_level
                 if level <= 2:
-                    reward -= 20.0
+                    base = -20.0
                 elif level == 3:
-                    reward -= 50.0
+                    base = -50.0
                 else:
-                    reward -= 200.0
+                    base = -200.0
+                rewards += base * 0.5
+                rewards[i] += base * 0.5
                 self.match_result = -1
-                return reward, done, truncated
+                return rewards, done, truncated
 
         if self.current_step >= self.max_steps:
             truncated = True
             done = False
-            reward -= 10.0
+            rewards -= 10.0
             self.match_result = -1
-            return reward, done, truncated
+            return rewards, done, truncated
 
+        # --- Dense shaping ---
         if self.reward_type == "dense":
             dist_a = math.hypot(ya.x - ball.x, ya.y - ball.y)
             dist_b = math.hypot(yb.x - ball.x, yb.y - ball.y)
-            min_dist = min(dist_a, dist_b)
-            yellow_has_ball = (
-                (dist_a < 0.12) or ya.infrared or (dist_b < 0.12) or yb.infrared
-            )
+            dists = (dist_a, dist_b)
+            carrier_idx = 0 if dist_a <= dist_b else 1
+            non_carrier_idx = 1 - carrier_idx
 
-            max_dist = math.hypot(self.field.length, self.field.width)
-            # (No constant ball-proximity bonus — delta term below carries the
-            # learning signal without a per-step "exist near ball" payout.)
+            ya_has_close = (dist_a < 0.12) or ya.infrared
+            yb_has_close = (dist_b < 0.12) or yb.infrared
+            yellow_has_ball = ya_has_close or yb_has_close
+            blue_has = (
+                math.hypot(blue.x - ball.x, blue.y - ball.y) < 0.12
+            ) or blue.infrared
 
-            # Penalize standing-still
-            for y in (ya, yb):
+            # Standing-still (per agent)
+            for i, y in enumerate(yellows):
                 speed = math.hypot(y.v_x, y.v_y)
                 if speed < 0.1 and not yellow_has_ball:
-                    reward -= 0.025
+                    rewards[i] -= 0.025
 
-            # Closing distance to ball
-            if self.last_min_dist_robot_ball is not None:
-                delta = self.last_min_dist_robot_ball - min_dist
-                reward += float(np.clip(delta * 5.0, -0.5, 0.5))
-            self.last_min_dist_robot_ball = min_dist
+            # Carrier-only ball-closing
+            if self.last_dist_to_ball is None:
+                self.last_dist_to_ball = [dist_a, dist_b]
+            delta_carrier = (
+                self.last_dist_to_ball[carrier_idx] - dists[carrier_idx]
+            )
+            rewards[carrier_idx] += float(
+                np.clip(delta_carrier * 5.0, -0.5, 0.5)
+            )
+            self.last_dist_to_ball = [dist_a, dist_b]
+            # Keep legacy field for any downstream code.
+            self.last_min_dist_robot_ball = min(dist_a, dist_b)
 
-            # Ball -> goal progress
+            # Goal-closing (shared)
             ball_pos = np.array([ball.x, ball.y])
             ga = np.array([-max_x, goal_half_width])
-            gb = np.array([-max_x, -goal_half_width])
-            gv = gb - ga
-            t = float(np.clip(np.dot(ball_pos - ga, gv) / np.dot(gv, gv), 0.0, 1.0))
+            gb_pt = np.array([-max_x, -goal_half_width])
+            gv = gb_pt - ga
+            t = float(
+                np.clip(np.dot(ball_pos - ga, gv) / np.dot(gv, gv), 0.0, 1.0)
+            )
             closest_goal_pt = ga + t * gv
             dist_ball_goal = float(np.linalg.norm(ball_pos - closest_goal_pt))
-
             if self.last_dist_ball_goal is not None:
                 delta_bg = self.last_dist_ball_goal - dist_ball_goal
-                reward += float(np.clip(delta_bg * 10.0, -1.0, 1.5))
+                rewards += float(np.clip(delta_bg * 10.0, -1.0, 1.5))
             self.last_dist_ball_goal = dist_ball_goal
 
             if yellow_has_ball:
-                # Track for stats; no per-step bonus to avoid possession-farming.
                 self.team_possession_steps += 1
 
-            # Ball-velocity bonus: shoot toward goal pays off harder than holding.
+            # Ball-velocity (shared)
             if ball.v_x < -0.5:
-                reward += 0.05 * min(-ball.v_x, 5.0)
+                rewards += 0.05 * min(-ball.v_x, 5.0)
             if ball.v_x > 0.5:
-                reward -= 0.05 * min(ball.v_x, 5.0)
+                rewards -= 0.05 * min(ball.v_x, 5.0)
 
-            # Spacing: reward separation while team has ball.
+            # D: stronger anti-hogging (shared penalty when both crowd ball).
+            if dist_a < 0.5 and dist_b < 0.5:
+                rewards -= 0.15
+
+            # Spacing (shared, only when team has ball)
             mate_sep = math.hypot(ya.x - yb.x, ya.y - yb.y)
             if yellow_has_ball:
-                reward += 0.02 * min(mate_sep / 2.0, 1.0)
+                rewards += 0.02 * min(mate_sep / 2.0, 1.0)
 
-            # Anti-ball-hogging: both yellows crowding the ball.
-            if dist_a < 0.5 and dist_b < 0.5:
-                reward -= 0.05
+            # Support-position (non-carrier only)
+            nc_y = yellows[non_carrier_idx]
+            c_y = yellows[carrier_idx]
+            if nc_y.x < ball.x:
+                rewards[non_carrier_idx] += 0.02
+            sep = math.hypot(nc_y.x - c_y.x, nc_y.y - c_y.y)
+            if sep > 1.0:
+                rewards[non_carrier_idx] += 0.015
+            ideal_x = ball.x - 1.5
+            ideal_y = 0.8 if c_y.y < 0 else -0.8
+            d_ideal = math.hypot(nc_y.x - ideal_x, nc_y.y - ideal_y)
+            if d_ideal < 1.0:
+                rewards[non_carrier_idx] += 0.04 * (1.0 - d_ideal)
 
-            # Support-position reward for the non-carrier agent.
-            # Goal: give the second agent a concrete positive incentive
-            # instead of just "don't crowd / don't stand still".
-            for self_y, mate_y in ((ya, yb), (yb, ya)):
-                self_dist = math.hypot(self_y.x - ball.x, self_y.y - ball.y)
-                mate_dist = math.hypot(mate_y.x - ball.x, mate_y.y - ball.y)
-                # Clear non-carrier: at least 0.3m further from ball than mate.
-                if self_dist <= mate_dist + 0.3:
-                    continue
-                # 1. Be on the offensive side of the ball (ahead toward goal).
-                if self_y.x < ball.x:
-                    reward += 0.02
-                # 2. Maintain spread from teammate (open passing angle).
-                sep = math.hypot(self_y.x - mate_y.x, self_y.y - mate_y.y)
-                if sep > 1.0:
-                    reward += 0.015
-                # 3. Be near a useful support point: 1.5m goal-side of ball,
-                #    offset on the opposite y-side of the teammate.
-                ideal_x = ball.x - 1.5
-                ideal_y = 0.8 if mate_y.y < 0 else -0.8
-                d_ideal = math.hypot(self_y.x - ideal_x, self_y.y - ideal_y)
-                if d_ideal < 1.0:
-                    reward += 0.04 * (1.0 - d_ideal)
+            # B: Interception lane — non-carrier blocks blue→own-goal line
+            # whenever blue threatens (has or is near the ball).
+            blue_dist_ball = math.hypot(blue.x - ball.x, blue.y - ball.y)
+            if blue_has or blue_dist_ball < 0.5:
+                blue_pos = np.array([blue.x, blue.y])
+                own_goal_pos = np.array([max_x, 0.0])
+                line_vec = own_goal_pos - blue_pos
+                line_len = float(np.linalg.norm(line_vec))
+                if line_len > 0.1:
+                    line_dir = line_vec / line_len
+                    nc_pos = np.array([nc_y.x, nc_y.y])
+                    proj = float(np.dot(nc_pos - blue_pos, line_dir))
+                    if 0.0 < proj < line_len:
+                        perp = float(
+                            np.linalg.norm(
+                                (nc_pos - blue_pos) - proj * line_dir
+                            )
+                        )
+                        if perp < 0.5:
+                            rewards[non_carrier_idx] += 0.05 * (
+                                1.0 - perp / 0.5
+                            )
 
-        # Pass detection (runs in both sparse and dense modes).
+            # B: Active interception — fast loose ball, both agents rewarded
+            # for closing on its predicted point.
+            ball_speed = math.hypot(ball.v_x, ball.v_y)
+            if ball_speed > 1.0 and not yellow_has_ball:
+                pred_x = ball.x + ball.v_x * 0.5
+                pred_y = ball.y + ball.v_y * 0.5
+                for i, y in enumerate(yellows):
+                    pd = math.hypot(y.x - pred_x, y.y - pred_y)
+                    last_pd = self.last_dist_to_pred_ball[i]
+                    if last_pd is not None:
+                        dpd = last_pd - pd
+                        rewards[i] += float(np.clip(dpd * 3.0, -0.3, 0.3))
+                    self.last_dist_to_pred_ball[i] = pd
+            else:
+                self.last_dist_to_pred_ball = [None, None]
+
+            # C: Pre-pass shaping — kicker rewarded for kicking toward mate,
+            # receiver rewarded for closing on predicted ball point.
+            if ball_speed > 1.5 and self.last_yellow_carrier is not None:
+                kicker = self.last_yellow_carrier
+                receiver = 1 - kicker
+                r_y = yellows[receiver]
+                bd_x = ball.v_x / ball_speed
+                bd_y = ball.v_y / ball_speed
+                rx, ry = r_y.x - ball.x, r_y.y - ball.y
+                rd = math.hypot(rx, ry)
+                if 0.3 < rd < 4.0:
+                    rxn, ryn = rx / rd, ry / rd
+                    cos_align = bd_x * rxn + bd_y * ryn
+                    if cos_align > 0.7:
+                        rewards[kicker] += 0.1
+                        pred_x = ball.x + ball.v_x * 0.5
+                        pred_y = ball.y + ball.v_y * 0.5
+                        pd = math.hypot(r_y.x - pred_x, r_y.y - pred_y)
+                        rewards[receiver] += 0.05 * max(0.0, 1.0 - pd)
+
+        # --- Pass detection (event reward, shared) ---
         ya_has = (math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.15) or ya.infrared
         yb_has = (math.hypot(yb.x - ball.x, yb.y - ball.y) < 0.15) or yb.infrared
-        blue = self.frame.robots_blue[0]
-        blue_has = (
+        blue_has2 = (
             math.hypot(blue.x - ball.x, blue.y - ball.y) < 0.12
         ) or blue.infrared
 
-        if blue_has:
+        if blue_has2:
             self.blue_touched_since_yellow = True
             self.last_yellow_carrier = None
 
@@ -715,12 +790,12 @@ class SSL2v1SharedEnv(SSLBaseEnv):
                 and current_carrier != self.last_yellow_carrier
                 and not self.blue_touched_since_yellow
             ):
-                reward += 15.0
+                rewards += 15.0
                 self.passes_in_episode += 1
             self.last_yellow_carrier = current_carrier
             self.blue_touched_since_yellow = False
 
-        return reward, done, truncated
+        return rewards, done, truncated
 
     def _get_initial_positions_frame(self) -> Frame:
         pos = Frame()

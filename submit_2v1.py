@@ -32,7 +32,7 @@ def main():
     algo = "SAC"
     reward_type = "dense"
     n_pairs = 24
-    start_level = 5
+    start_level = 1
     seeds = [820]
 
     jobs = []

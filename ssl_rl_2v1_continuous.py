@@ -668,9 +668,33 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             if dist_a < 0.5 and dist_b < 0.5:
                 reward -= 0.05
 
+            # Support-position reward for the non-carrier agent.
+            # Goal: give the second agent a concrete positive incentive
+            # instead of just "don't crowd / don't stand still".
+            for self_y, mate_y in ((ya, yb), (yb, ya)):
+                self_dist = math.hypot(self_y.x - ball.x, self_y.y - ball.y)
+                mate_dist = math.hypot(mate_y.x - ball.x, mate_y.y - ball.y)
+                # Clear non-carrier: at least 0.3m further from ball than mate.
+                if self_dist <= mate_dist + 0.3:
+                    continue
+                # 1. Be on the offensive side of the ball (ahead toward goal).
+                if self_y.x < ball.x:
+                    reward += 0.02
+                # 2. Maintain spread from teammate (open passing angle).
+                sep = math.hypot(self_y.x - mate_y.x, self_y.y - mate_y.y)
+                if sep > 1.0:
+                    reward += 0.015
+                # 3. Be near a useful support point: 1.5m goal-side of ball,
+                #    offset on the opposite y-side of the teammate.
+                ideal_x = ball.x - 1.5
+                ideal_y = 0.8 if mate_y.y < 0 else -0.8
+                d_ideal = math.hypot(self_y.x - ideal_x, self_y.y - ideal_y)
+                if d_ideal < 1.0:
+                    reward += 0.04 * (1.0 - d_ideal)
+
         # Pass detection (runs in both sparse and dense modes).
-        ya_has = (math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.12) or ya.infrared
-        yb_has = (math.hypot(yb.x - ball.x, yb.y - ball.y) < 0.12) or yb.infrared
+        ya_has = (math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.15) or ya.infrared
+        yb_has = (math.hypot(yb.x - ball.x, yb.y - ball.y) < 0.15) or yb.infrared
         blue = self.frame.robots_blue[0]
         blue_has = (
             math.hypot(blue.x - ball.x, blue.y - ball.y) < 0.12
@@ -692,7 +716,7 @@ class SSL2v1SharedEnv(SSLBaseEnv):
                 and current_carrier != self.last_yellow_carrier
                 and not self.blue_touched_since_yellow
             ):
-                reward += 5.0
+                reward += 15.0
                 self.passes_in_episode += 1
             self.last_yellow_carrier = current_carrier
             self.blue_touched_since_yellow = False

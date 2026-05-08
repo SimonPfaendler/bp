@@ -212,7 +212,7 @@ def train(sb3_algo, reward_type, seed, n_pairs, load_path=None, start_level=1):
         ]
     )
 
-    TOTAL_STEPS = 5_000_000
+    TOTAL_STEPS = 4_000_000
     model.learn( total_timesteps=TOTAL_STEPS,
         reset_num_timesteps=False,
         log_interval=10,

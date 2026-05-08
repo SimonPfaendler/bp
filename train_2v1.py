@@ -146,7 +146,7 @@ def train(sb3_algo, reward_type, seed, n_pairs, load_path=None, start_level=1):
     if load_path and os.path.exists(load_path):
         print(f"Loading model {load_path}")
         algo_class = CrossQ if sb3_algo == "CrossQ" else SAC
-        new_ent = 0.05
+        new_ent = 0.10
         model = algo_class.load(
             load_path,
             env=env,
@@ -183,13 +183,13 @@ def train(sb3_algo, reward_type, seed, n_pairs, load_path=None, start_level=1):
             device="cuda",
             tensorboard_log=current_log_dir,
             seed=seed,
-            train_freq=48,
-            gradient_steps=96,
+            train_freq=1,
+            gradient_steps=1,
             batch_size=2048,
             buffer_size=1_000_000,
             learning_rate=3e-4,
             learning_starts=10000,
-            ent_coef=0.05,
+            ent_coef=0.10,
             target_entropy="auto",
             policy_kwargs=policy_kwargs,
         )
@@ -212,7 +212,7 @@ def train(sb3_algo, reward_type, seed, n_pairs, load_path=None, start_level=1):
         ]
     )
 
-    TOTAL_STEPS = 4_000_000
+    TOTAL_STEPS = 7_000_000
     model.learn( total_timesteps=TOTAL_STEPS,
         reset_num_timesteps=False,
         log_interval=10,
@@ -281,7 +281,7 @@ if __name__ == "__main__":
             seed=args.seed,
             n_pairs=args.n_pairs,
             start_level=args.start_level,
-            load_path="",
+            load_path="models/2v1_SAC_dense_seed820_20260508-142543_final.zip", 
         )
     if args.test:
         if os.path.isfile(args.test):

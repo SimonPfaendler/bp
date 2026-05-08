@@ -281,7 +281,7 @@ if __name__ == "__main__":
             seed=args.seed,
             n_pairs=args.n_pairs,
             start_level=args.start_level,
-            load_path="models/2v1_SAC_dense_seed820_20260507-203010_final.zip",
+            load_path="",
         )
     if args.test:
         if os.path.isfile(args.test):

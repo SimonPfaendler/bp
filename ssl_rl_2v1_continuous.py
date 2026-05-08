@@ -563,10 +563,8 @@ class SSL2v1SharedEnv(SSLBaseEnv):
 
         if self.reward_type == "dense":
             progress = self.current_step / self.max_steps
-            if ball.x < 0:
-                reward -= 0.02 * (1.0 + 2.0 * progress)
-            else:
-                reward -= 0.04 * (1.0 + 2.0 * progress)
+            # Symmetric stronger time penalty: agent must produce, not just exist.
+            reward -= 0.04 * (1.0 + 2.0 * progress)
 
         # Ball out of pitch: end conditions.
         if abs(ball.x) > max_x:
@@ -621,8 +619,8 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             )
 
             max_dist = math.hypot(self.field.length, self.field.width)
-            # Constant gradient toward ball
-            reward += 0.05 * (1.0 - min_dist / max_dist)
+            # (No constant ball-proximity bonus — delta term below carries the
+            # learning signal without a per-step "exist near ball" payout.)
 
             # Penalize standing-still
             for y in (ya, yb):
@@ -651,13 +649,14 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             self.last_dist_ball_goal = dist_ball_goal
 
             if yellow_has_ball:
-                reward += 0.01
+                # Track for stats; no per-step bonus to avoid possession-farming.
                 self.team_possession_steps += 1
 
+            # Ball-velocity bonus: shoot toward goal pays off harder than holding.
             if ball.v_x < -0.5:
-                reward += 0.02 * min(-ball.v_x, 3.0)
+                reward += 0.05 * min(-ball.v_x, 5.0)
             if ball.v_x > 0.5:
-                reward -= 0.02 * min(ball.v_x, 3.0)
+                reward -= 0.05 * min(ball.v_x, 5.0)
 
             # Spacing: reward separation while team has ball.
             mate_sep = math.hypot(ya.x - yb.x, ya.y - yb.y)

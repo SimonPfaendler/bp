@@ -803,21 +803,49 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         rng = self.np_random
 
         if level == 1:
-            # Free ball 2 yellows nearby
-            bx = rng.uniform(-1.0, 2.0)
-            by = rng.uniform(-1.5, 1.5)
-            pos.ball = Ball(x=bx, y=by)
-            pos.robots_yellow[0] = Robot(
-                x=bx + rng.uniform(0.4, 1.2),
-                y=by + rng.uniform(-0.6, 0.6),
-                theta=rng.uniform(135.0, 225.0),
-            )
-            pos.robots_yellow[1] = Robot(
-                x=bx + rng.uniform(0.4, 1.5),
-                y=by + rng.uniform(-1.5, 1.5),
-                theta=rng.uniform(135.0, 225.0),
-            )
-            pos.robots_blue[0] = Robot(x=0.0, y=3.0, theta=0.0)
+            sub_roll = rng.random()
+            if sub_roll < 0.7:
+                # Free ball, 2 yellows nearby (basic ball-chase scenario).
+                bx = rng.uniform(-1.0, 2.0)
+                by = rng.uniform(-1.5, 1.5)
+                pos.ball = Ball(x=bx, y=by)
+                pos.robots_yellow[0] = Robot(
+                    x=bx + rng.uniform(0.4, 1.2),
+                    y=by + rng.uniform(-0.6, 0.6),
+                    theta=rng.uniform(135.0, 225.0),
+                )
+                pos.robots_yellow[1] = Robot(
+                    x=bx + rng.uniform(0.4, 1.5),
+                    y=by + rng.uniform(-1.5, 1.5),
+                    theta=rng.uniform(135.0, 225.0),
+                )
+                pos.robots_blue[0] = Robot(x=0.0, y=3.0, theta=0.0)
+            else:
+                # Pass drill: Yellow 0 has the ball, Blue is a static blocker
+                # on the direct shot line, Yellow 1 stands in a clean
+                # receiving slot on the opposite y-side. Mirror randomly so
+                # the policy doesn't memorize a fixed pass direction.
+                side = 1.0 if rng.random() < 0.5 else -1.0
+                ya_x = rng.uniform(1.5, 2.3)
+                ya_y = side * rng.uniform(0.4, 0.9)
+                yb_x = rng.uniform(0.2, 0.9)
+                yb_y = -side * rng.uniform(0.6, 1.1)
+                blue_x = rng.uniform(0.3, 0.9)
+                blue_y = side * rng.uniform(0.4, 0.9)
+                # Yellow 0 faces Yellow 1 (with noise) so a forward kick is
+                # already roughly a pass.
+                theta_a = math.degrees(
+                    math.atan2(yb_y - ya_y, yb_x - ya_x)
+                ) + rng.uniform(-15.0, 15.0)
+                theta_b = 180.0 + rng.uniform(-25.0, 25.0)
+                # Ball just in front of Yellow 0 along its facing direction.
+                theta_a_rad = math.radians(theta_a)
+                ball_x = ya_x + math.cos(theta_a_rad) * 0.11
+                ball_y = ya_y + math.sin(theta_a_rad) * 0.11
+                pos.ball = Ball(x=ball_x, y=ball_y)
+                pos.robots_yellow[0] = Robot(x=ya_x, y=ya_y, theta=theta_a)
+                pos.robots_yellow[1] = Robot(x=yb_x, y=yb_y, theta=theta_b)
+                pos.robots_blue[0] = Robot(x=blue_x, y=blue_y, theta=0.0)
 
         elif level == 2:
             bx = rng.uniform(-1.0, 2.0)

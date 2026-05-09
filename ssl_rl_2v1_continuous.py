@@ -553,14 +553,26 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         return float(rewards.mean()), done
 
     def _calculate_team_reward_and_done(self) -> Tuple[np.ndarray, bool, bool]:
-        """Minimal per-agent reward.
+        """Per-agent reward with role-conditional shaping.
 
-        Channels:
-          - Time penalty (shared, flat).
-          - Terminations: goal scored/conceded, ball OOB, yellow OOB, timeout.
-          - Carrier ball-closing.
-          - Goal-closing (shared, ball -> opponent's goal mouth).
-          - Pass event (+30 shared on a clean carrier swap).
+        Role split (carrier = closer yellow, non-carrier = the other):
+          - Carrier:     ball-closing, possession bonus
+          - Non-carrier: support-score (offensive side + spread + close-enough)
+
+        Shared per-step:
+          - Time penalty (asymmetric by ball half)
+          - Goal-closing
+          - Ball-velocity (toward attacking goal)
+          - Anti-hogging (when both agents crowd the ball)
+
+        Per-agent always:
+          - Standing-still penalty
+          - OOB extra penalty for the offender
+
+        Shared events:
+          - Goal +100 (+ speed bonus + 75 per pass)
+          - Goal conceded -50, ball OOB -20, yellow OOB -20/-50, timeout -10
+          - Pass event +50
         """
         ball = self.frame.ball
         ya, yb = self.frame.robots_yellow[0], self.frame.robots_yellow[1]
@@ -579,7 +591,7 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         if self.reward_type == "dense":
             rewards -= 0.02 if ball.x < 0 else 0.04
 
-        # --- Terminal: ball OOB / goal ---
+        # --- Terminal: ball goal/OOB ---
         if abs(ball.x) > max_x:
             done = True
             if abs(ball.y) <= goal_half_width:
@@ -601,7 +613,7 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             self.match_result = -1
             return rewards, done, truncated
 
-        # --- Yellow OOB (offender takes extra hit) ---
+        # --- Yellow OOB (offender extra) ---
         for i, y in enumerate(yellows):
             if abs(y.x) > max_x or abs(y.y) > max_y:
                 done = True
@@ -623,8 +635,23 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             dist_b = math.hypot(yb.x - ball.x, yb.y - ball.y)
             dists = (dist_a, dist_b)
             carrier_idx = 0 if dist_a <= dist_b else 1
+            non_carrier_idx = 1 - carrier_idx
 
-            # Carrier-only ball-closing
+            ya_has_ball = (dist_a < 0.12) or ya.infrared
+            yb_has_ball = (dist_b < 0.12) or yb.infrared
+            team_has_ball = ya_has_ball or yb_has_ball
+
+            # Standing-still (per-agent, only when no team possession).
+            for i, y in enumerate(yellows):
+                speed = math.hypot(y.v_x, y.v_y)
+                if speed < 0.1 and not team_has_ball:
+                    rewards[i] -= 0.05
+
+            # Anti-hogging (shared) when both crowd the ball.
+            if dist_a < 0.5 and dist_b < 0.5:
+                rewards -= 0.1
+
+            # Carrier ball-closing.
             if self.last_dist_to_ball is None:
                 self.last_dist_to_ball = [dist_a, dist_b]
             delta_carrier = (
@@ -635,7 +662,15 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             )
             self.last_dist_to_ball = [dist_a, dist_b]
 
-            # Goal-closing (shared)
+            # Carrier possession bonus.
+            carrier_has_ball = (
+                ya_has_ball if carrier_idx == 0 else yb_has_ball
+            )
+            if carrier_has_ball:
+                rewards[carrier_idx] += 0.01
+                self.team_possession_steps += 1
+
+            # Goal-closing (shared).
             ball_pos = np.array([ball.x, ball.y])
             ga = np.array([-max_x, goal_half_width])
             gb_pt = np.array([-max_x, -goal_half_width])
@@ -650,32 +685,26 @@ class SSL2v1SharedEnv(SSLBaseEnv):
                 rewards += float(np.clip(delta_bg * 10.0, -1.0, 1.5))
             self.last_dist_ball_goal = dist_ball_goal
 
-            if (dist_a < 0.12) or ya.infrared or (dist_b < 0.12) or yb.infrared:
-                self.team_possession_steps += 1
-
-            # Gentle ball-velocity bonus toward attacking goal.
+            # Ball-velocity (shared) toward the attacking goal.
             if ball.v_x < -0.5:
                 rewards += 0.02 * min(-ball.v_x, 3.0)
             if ball.v_x > 0.5:
                 rewards -= 0.02 * min(ball.v_x, 3.0)
 
-            # Pass-trajectory shaping: ball moving from last kicker toward
-            # the other yellow rewards both agents.
-            ball_speed = math.hypot(ball.v_x, ball.v_y)
-            if ball_speed > 0.5 and self.last_yellow_carrier is not None:
-                receiver_idx = 1 - self.last_yellow_carrier
-                r_y = yellows[receiver_idx]
-                rx = r_y.x - ball.x
-                ry = r_y.y - ball.y
-                rd = math.hypot(rx, ry)
-                if 0.3 < rd < 4.0:
-                    cos_align = (
-                        ball.v_x * rx + ball.v_y * ry
-                    ) / (ball_speed * rd)
-                    if cos_align > 0.5:
-                        rewards += 0.2 * cos_align
+            # Non-carrier support-score (single combined metric).
+            nc = yellows[non_carrier_idx]
+            c = yellows[carrier_idx]
+            support = 0.0
+            if nc.x < ball.x:                                # offensive side
+                support += 0.5
+            sep = math.hypot(nc.x - c.x, nc.y - c.y)
+            if 1.0 < sep < 3.0:                              # good spread
+                support += 0.3
+            if math.hypot(nc.x - ball.x, nc.y - ball.y) < 4.0:  # close enough
+                support += 0.2
+            rewards[non_carrier_idx] += 0.05 * support
 
-        # --- Pass detection (event reward, shared) ---
+        # --- Pass detection (shared event) ---
         ya_has = (math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.20) or ya.infrared
         yb_has = (math.hypot(yb.x - ball.x, yb.y - ball.y) < 0.20) or yb.infrared
         blue_has = (

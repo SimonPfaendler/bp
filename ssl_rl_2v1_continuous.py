@@ -575,8 +575,9 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         done = False
         truncated = False
 
+        # Asymmetric time penalty: lighter when ball is in attacking half.
         if self.reward_type == "dense":
-            rewards -= 0.02
+            rewards -= 0.02 if ball.x < 0 else 0.04
 
         # --- Terminal: ball OOB / goal ---
         if abs(ball.x) > max_x:
@@ -584,7 +585,8 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0:  # Goal for yellow
                     rewards += 100.0
-                    rewards += 50.0 * min(self.passes_in_episode, 2)
+                    rewards += (self.max_steps - self.current_step) * 0.01
+                    rewards += 75.0 * min(self.passes_in_episode, 2)
                     self.match_result = 1
                 else:  # Goal for blue
                     rewards -= 50.0
@@ -651,6 +653,28 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             if (dist_a < 0.12) or ya.infrared or (dist_b < 0.12) or yb.infrared:
                 self.team_possession_steps += 1
 
+            # Gentle ball-velocity bonus toward attacking goal.
+            if ball.v_x < -0.5:
+                rewards += 0.02 * min(-ball.v_x, 3.0)
+            if ball.v_x > 0.5:
+                rewards -= 0.02 * min(ball.v_x, 3.0)
+
+            # Pass-trajectory shaping: ball moving from last kicker toward
+            # the other yellow rewards both agents.
+            ball_speed = math.hypot(ball.v_x, ball.v_y)
+            if ball_speed > 0.5 and self.last_yellow_carrier is not None:
+                receiver_idx = 1 - self.last_yellow_carrier
+                r_y = yellows[receiver_idx]
+                rx = r_y.x - ball.x
+                ry = r_y.y - ball.y
+                rd = math.hypot(rx, ry)
+                if 0.3 < rd < 4.0:
+                    cos_align = (
+                        ball.v_x * rx + ball.v_y * ry
+                    ) / (ball_speed * rd)
+                    if cos_align > 0.5:
+                        rewards += 0.2 * cos_align
+
         # --- Pass detection (event reward, shared) ---
         ya_has = (math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.20) or ya.infrared
         yb_has = (math.hypot(yb.x - ball.x, yb.y - ball.y) < 0.20) or yb.infrared
@@ -674,7 +698,7 @@ class SSL2v1SharedEnv(SSLBaseEnv):
                 and current_carrier != self.last_yellow_carrier
                 and not self.blue_touched_since_yellow
             ):
-                rewards += 30.0
+                rewards += 50.0
                 self.passes_in_episode += 1
             self.last_yellow_carrier = current_carrier
             self.blue_touched_since_yellow = False

@@ -256,6 +256,10 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             info["possession_ratio"] = self.team_possession_steps / max(
                 1, self.current_step
             )
+            info["passes"] = self.passes_in_episode
+            info["scored_after_pass"] = 1.0 if (
+                self.match_result == 1 and self.passes_in_episode > 0
+            ) else 0.0
             info["episode"] = {
                 "r": self.ep_reward,
                 "l": self.ep_length,
@@ -470,7 +474,7 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         kick_trigger = float(action[4])
         dribble_trigger = float(action[5])
 
-        kick = (3.0 + ((raw_kick + 1.0) / 2.0) * 3.0) if kick_trigger > 0.0 else 0.0
+        kick = max(0.0, raw_kick) * 6.0 if kick_trigger > 0.0 else 0.0
         dribble = dribble_trigger > 0.0
 
         if self.must_release[idx]:

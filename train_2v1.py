@@ -67,6 +67,8 @@ class CurriculumCallback(BaseCallback):
         super().__init__(verbose)
         self.current_level = start_level
         self.success_buffer = deque(maxlen=300)
+        self.passes_buffer = deque(maxlen=300)
+        self.scored_after_pass_buffer = deque(maxlen=300)
 
     def _on_training_start(self) -> None:
         if self.current_level > 1:
@@ -78,8 +80,16 @@ class CurriculumCallback(BaseCallback):
         dones = self.locals.get("dones", [])
         infos = self.locals.get("infos", [])
         for i, done in enumerate(dones):
-            if done and "is_success" in infos[i]:
+            if not done:
+                continue
+            if "is_success" in infos[i]:
                 self.success_buffer.append(float(infos[i]["is_success"]))
+            if "passes" in infos[i]:
+                self.passes_buffer.append(float(infos[i]["passes"]))
+            if "scored_after_pass" in infos[i]:
+                self.scored_after_pass_buffer.append(
+                    float(infos[i]["scored_after_pass"])
+                )
 
         if (
             len(self.success_buffer) == self.success_buffer.maxlen
@@ -107,6 +117,15 @@ class CurriculumCallback(BaseCallback):
         if len(self.success_buffer) > 0:
             self.logger.record(
                 "curriculum/live_success_rate", float(np.mean(self.success_buffer))
+            )
+        if len(self.passes_buffer) > 0:
+            self.logger.record(
+                "rollout/passes_per_episode", float(np.mean(self.passes_buffer))
+            )
+        if len(self.scored_after_pass_buffer) > 0:
+            self.logger.record(
+                "rollout/scored_after_pass_rate",
+                float(np.mean(self.scored_after_pass_buffer)),
             )
         return True
 

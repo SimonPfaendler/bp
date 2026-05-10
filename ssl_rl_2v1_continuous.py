@@ -169,7 +169,7 @@ class SSL2v1SharedEnv(SSLBaseEnv):
 
         self.current_step = 0
         self.total_steps = 0
-        self.max_steps = 1500
+        self.max_steps = 600  # L1 default; raised by set_curriculum_level for L≥2
 
         self.last_dist_ball_goal = None
         self.last_dist_to_ball = None
@@ -269,6 +269,9 @@ class SSL2v1SharedEnv(SSLBaseEnv):
 
     def set_curriculum_level(self, level: int):
         self.curriculum_level = int(level)
+        # Shorter episodes early so more attempts fit per wall-clock and the
+        # safe-passive equilibrium can't run out the clock as easily.
+        self.max_steps = 600 if self.curriculum_level <= 1 else 1000
 
     # ---------- internals ----------
 
@@ -604,12 +607,13 @@ class SSL2v1SharedEnv(SSLBaseEnv):
                     rewards -= 50.0
                     self.match_result = -1
             else:
-                rewards -= 20.0
+                # Missed shot: cheap at L1/L2 so exploration isn't punished.
+                rewards -= 5.0 if self.curriculum_level <= 2 else 20.0
             return rewards, done, truncated
 
         if abs(ball.y) > max_y:
             done = True
-            rewards -= 20.0
+            rewards -= 5.0 if self.curriculum_level <= 2 else 20.0
             self.match_result = -1
             return rewards, done, truncated
 
@@ -617,7 +621,12 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         for i, y in enumerate(yellows):
             if abs(y.x) > max_x or abs(y.y) > max_y:
                 done = True
-                base = -50.0 if self.curriculum_level >= 3 else -20.0
+                if self.curriculum_level <= 2:
+                    base = -5.0
+                elif self.curriculum_level == 3:
+                    base = -50.0
+                else:
+                    base = -50.0
                 rewards += base * 0.5
                 rewards[i] += base * 0.5
                 self.match_result = -1
@@ -662,12 +671,9 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             )
             self.last_dist_to_ball = [dist_a, dist_b]
 
-            # Carrier possession bonus.
-            carrier_has_ball = (
-                ya_has_ball if carrier_idx == 0 else yb_has_ball
-            )
-            if carrier_has_ball:
-                rewards[carrier_idx] += 0.01
+            # Track possession for stats (no per-step bonus — it created
+            # an incentive to hold the ball instead of shooting).
+            if team_has_ball:
                 self.team_possession_steps += 1
 
             # Goal-closing (shared).

@@ -131,7 +131,7 @@ class SSL2v1SharedEnv(SSLBaseEnv):
       info:     dict
     """
 
-    def __init__(self, render_mode=None, reward_type="dense"):
+    def __init__(self, render_mode=None, reward_type="dense", joint_action_mode=False):
         super().__init__(
             field_type=1,
             n_robots_blue=1,
@@ -140,6 +140,7 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             render_mode=render_mode,
         )
         self.reward_type = reward_type
+        self.joint_action_mode = joint_action_mode
 
         self.single_observation_space = Box(
             low=-self.NORM_BOUNDS,
@@ -151,18 +152,34 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             low=-1.0, high=1.0, shape=(SINGLE_ACT_DIM,), dtype=np.float32
         )
 
-        self.observation_space = Box(
-            low=-self.NORM_BOUNDS,
-            high=self.NORM_BOUNDS,
-            shape=(N_YELLOW, SINGLE_OBS_DIM),
-            dtype=np.float32,
-        )
-        self.action_space = Box(
-            low=-1.0,
-            high=1.0,
-            shape=(N_YELLOW, SINGLE_ACT_DIM),
-            dtype=np.float32,
-        )
+        if joint_action_mode:
+            # JAL: single agent perspective on joint obs/action.
+            self.observation_space = Box(
+                low=-self.NORM_BOUNDS,
+                high=self.NORM_BOUNDS,
+                shape=(N_YELLOW * SINGLE_OBS_DIM,),
+                dtype=np.float32,
+            )
+            self.action_space = Box(
+                low=-1.0,
+                high=1.0,
+                shape=(N_YELLOW * SINGLE_ACT_DIM,),
+                dtype=np.float32,
+            )
+        else:
+            # IL with parameter sharing (consumed by PairVecEnv).
+            self.observation_space = Box(
+                low=-self.NORM_BOUNDS,
+                high=self.NORM_BOUNDS,
+                shape=(N_YELLOW, SINGLE_OBS_DIM),
+                dtype=np.float32,
+            )
+            self.action_space = Box(
+                low=-1.0,
+                high=1.0,
+                shape=(N_YELLOW, SINGLE_ACT_DIM),
+                dtype=np.float32,
+            )
 
         self.max_v_cmd = 2.0
         self.max_w_cmd = 10.0
@@ -221,17 +238,24 @@ class SSL2v1SharedEnv(SSLBaseEnv):
 
 
         super().reset(seed=seed, options=options)
-        return self._stacked_obs(), {}
+        obs = self._stacked_obs()
+        if self.joint_action_mode:
+            obs = obs.reshape(-1)
+        return obs, {}
 
-    def step(self, action_pair):
-        """action_pair: ndarray of shape (2, SINGLE_ACT_DIM)."""
+    def step(self, action):
+        """In IL mode: action shape (2, 6). In JAL mode: action shape (12,)."""
         self.current_step += 1
         self.total_steps += 1
 
-        action_pair = np.asarray(action_pair, dtype=np.float32)
-        assert action_pair.shape == (N_YELLOW, SINGLE_ACT_DIM), (
-            f"expected ({N_YELLOW},{SINGLE_ACT_DIM}), got {action_pair.shape}"
-        )
+        action = np.asarray(action, dtype=np.float32)
+        if self.joint_action_mode:
+            action_pair = action.reshape(N_YELLOW, SINGLE_ACT_DIM)
+        else:
+            assert action.shape == (N_YELLOW, SINGLE_ACT_DIM), (
+                f"expected ({N_YELLOW},{SINGLE_ACT_DIM}), got {action.shape}"
+            )
+            action_pair = action
 
         commands = self._build_commands(action_pair)
         self.rsim.send_commands(commands)
@@ -242,9 +266,13 @@ class SSL2v1SharedEnv(SSLBaseEnv):
 
         self._update_dribble_state()
         obs = self._stacked_obs()
-        rewards, done, truncated = self._calculate_team_reward_and_done()
 
-        self.ep_reward += float(rewards.mean())
+        if self.joint_action_mode:
+            reward, done, truncated = self._calculate_joint_reward_and_done()
+            self.ep_reward += float(reward)
+        else:
+            reward, done, truncated = self._calculate_team_reward_and_done()
+            self.ep_reward += float(reward.mean())
         self.ep_length += 1
 
         info = {}
@@ -267,7 +295,9 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         if self.render_mode == "human":
             self.render()
 
-        return obs, rewards, bool(done), bool(truncated), info
+        if self.joint_action_mode:
+            return obs.reshape(-1), float(reward), bool(done), bool(truncated), info
+        return obs, reward, bool(done), bool(truncated), info
 
     def set_curriculum_level(self, level: int):
         self.curriculum_level = int(level)
@@ -691,6 +721,126 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             self.blue_touched_since_yellow = False
 
         return rewards, done, truncated
+
+    def _calculate_joint_reward_and_done(self) -> Tuple[float, bool, bool]:
+        """JAL team reward (Ocana et al. 2019, Eq. 16). Single scalar.
+
+            R = Σᵢ D^B_Aᵢ + max( {D^Aᵢ_B, ∀i}, D^G_B ) + G
+
+        with the same non-negative shaping convention as the IL variant.
+        """
+        ball = self.frame.ball
+        ya, yb = self.frame.robots_yellow[0], self.frame.robots_yellow[1]
+        yellows = (ya, yb)
+        blue = self.frame.robots_blue[0]
+
+        max_x = self.field.length / 2.0
+        max_y = self.field.width / 2.0
+        goal_half_width = self.field.goal_width / 2.0
+
+        reward = 0.0
+        done = False
+        truncated = False
+
+        # --- Terminal: goal / ball OOB ---
+        if abs(ball.x) > max_x:
+            done = True
+            if abs(ball.y) <= goal_half_width:
+                if ball.x < 0:
+                    reward += 100.0
+                    self.match_result = 1
+                else:
+                    reward -= 50.0
+                    self.match_result = -1
+            return reward, done, truncated
+
+        if abs(ball.y) > max_y:
+            done = True
+            return reward, done, truncated
+
+        for y in yellows:
+            if abs(y.x) > max_x or abs(y.y) > max_y:
+                done = True
+                return reward, done, truncated
+
+        if self.current_step >= self.max_steps:
+            truncated = True
+            return reward, done, truncated
+
+        # --- Per-step shaping (≥ 0) ---
+        if self.reward_type == "dense":
+            dist_a = math.hypot(ya.x - ball.x, ya.y - ball.y)
+            dist_b = math.hypot(yb.x - ball.x, yb.y - ball.y)
+
+            # Σᵢ D^B_Aᵢ — sum of per-agent ball-closing.
+            if self.last_dist_to_ball is None:
+                self.last_dist_to_ball = [dist_a, dist_b]
+            for i, d in enumerate((dist_a, dist_b)):
+                delta = self.last_dist_to_ball[i] - d
+                reward += float(np.clip(delta * 5.0, 0.0, 0.5))
+            self.last_dist_to_ball = [dist_a, dist_b]
+
+            # max( ball→agent_i, ball→goal ) — single shared term, not doubled.
+            ball_pos = np.array([ball.x, ball.y])
+            ga = np.array([-max_x, goal_half_width])
+            gb_pt = np.array([-max_x, -goal_half_width])
+            gv = gb_pt - ga
+            t = float(
+                np.clip(np.dot(ball_pos - ga, gv) / np.dot(gv, gv), 0.0, 1.0)
+            )
+            closest_goal_pt = ga + t * gv
+            dist_ball_goal = float(np.linalg.norm(ball_pos - closest_goal_pt))
+
+            if self.last_dist_ball_goal is not None:
+                goal_delta = self.last_dist_ball_goal - dist_ball_goal
+            else:
+                goal_delta = 0.0
+            self.last_dist_ball_goal = dist_ball_goal
+
+            if self.last_ball_pos is None:
+                pass_delta = 0.0
+            else:
+                prev_bx, prev_by = self.last_ball_pos
+                pass_delta = max(
+                    math.hypot(prev_bx - ya.x, prev_by - ya.y) - dist_a,
+                    math.hypot(prev_bx - yb.x, prev_by - yb.y) - dist_b,
+                )
+            self.last_ball_pos = (ball.x, ball.y)
+
+            shared = max(pass_delta, goal_delta)
+            reward += float(np.clip(shared * 10.0, 0.0, 1.5))
+
+            if (dist_a < 0.12) or ya.infrared or (dist_b < 0.12) or yb.infrared:
+                self.team_possession_steps += 1
+
+        # --- Pass detection (stats only) ---
+        ya_has = (math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.20) or ya.infrared
+        yb_has = (math.hypot(yb.x - ball.x, yb.y - ball.y) < 0.20) or yb.infrared
+        blue_has = (
+            math.hypot(blue.x - ball.x, blue.y - ball.y) < 0.12
+        ) or blue.infrared
+
+        if blue_has:
+            self.blue_touched_since_yellow = True
+            self.last_yellow_carrier = None
+
+        current_carrier = None
+        if ya_has and not yb_has:
+            current_carrier = 0
+        elif yb_has and not ya_has:
+            current_carrier = 1
+
+        if current_carrier is not None:
+            if (
+                self.last_yellow_carrier is not None
+                and current_carrier != self.last_yellow_carrier
+                and not self.blue_touched_since_yellow
+            ):
+                self.passes_in_episode += 1
+            self.last_yellow_carrier = current_carrier
+            self.blue_touched_since_yellow = False
+
+        return reward, done, truncated
 
     def _get_initial_positions_frame(self) -> Frame:
         pos = Frame()

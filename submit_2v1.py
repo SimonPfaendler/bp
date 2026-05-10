@@ -3,9 +3,10 @@ import os
 import submitit
 
 
-def run_experiment(algo, reward_type, seed, n_pairs, start_level=1):
+def run_experiment(algo, reward_type, seed, n_pairs, start_level=1, joint=True):
+    joint_flag = "--joint " if joint else ""
     cmd = (
-        f"python train_2v1.py {algo} -t "
+        f"python train_2v1.py {algo} -t {joint_flag}"
         f"--reward_type {reward_type} --seed {seed} "
         f"--n_pairs {n_pairs} --start_level {start_level}"
     )
@@ -32,16 +33,17 @@ def main():
     algo = "SAC"
     reward_type = "dense"
     n_pairs = 24
-    start_level = 2
+    start_level = 1
     seeds = [820]
+    joint = True  # JAL: joint-action learner (single policy, joint obs/action)
 
     jobs = []
     for seed in seeds:
         job = executor.submit(
-            run_experiment, algo, reward_type, seed, n_pairs, start_level
+            run_experiment, algo, reward_type, seed, n_pairs, start_level, joint
         )
         jobs.append(job)
-    print(f"Submitted {len(jobs)} job(s)")
+    print(f"Submitted {len(jobs)} job(s) (joint={joint})")
 
 
 if __name__ == "__main__":

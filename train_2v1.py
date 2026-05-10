@@ -27,6 +27,8 @@ from stable_baselines3.common.callbacks import (
     CheckpointCallback,
 )
 
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+
 from pair_vec_env import DummyPairVecEnv, SubprocPairVecEnv
 from ssl_rl_2v1_continuous import SSL2v1SharedEnv
 
@@ -48,9 +50,11 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 
-def make_env_fn(reward_type: str, seed: int):
+def make_env_fn(reward_type: str, seed: int, joint: bool = False):
     def _init():
-        env = SSL2v1SharedEnv(reward_type=reward_type)
+        env = SSL2v1SharedEnv(
+            reward_type=reward_type, joint_action_mode=joint
+        )
         env.reset(seed=seed)
         return env
 
@@ -130,16 +134,31 @@ class CurriculumCallback(BaseCallback):
         return True
 
 
-def build_vec_env(n_pairs: int, reward_type: str, seed: int, use_subproc: bool):
-    fns = [make_env_fn(reward_type, seed + i) for i in range(n_pairs)]
-    if use_subproc and n_pairs > 1:
+def build_vec_env(
+    n_envs: int,
+    reward_type: str,
+    seed: int,
+    use_subproc: bool,
+    joint: bool = False,
+):
+    fns = [make_env_fn(reward_type, seed + i, joint=joint) for i in range(n_envs)]
+    if joint:
+        # JAL: each env is a self-contained gym.Env returning a scalar reward.
+        if use_subproc and n_envs > 1:
+            return SubprocVecEnv(fns, start_method="spawn")
+        return DummyVecEnv(fns)
+    # IL with parameter sharing: PairVecEnv exposes 2*n_envs SB3 slots.
+    if use_subproc and n_envs > 1:
         return SubprocPairVecEnv(fns)
     return DummyPairVecEnv(fns)
 
 
-def train(sb3_algo, reward_type, seed, n_pairs, load_path=None, start_level=1):
+def train(
+    sb3_algo, reward_type, seed, n_envs, load_path=None, start_level=1, joint=False
+):
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_name = f"2v1_{sb3_algo}_{reward_type}_seed{seed}_{timestamp}"
+    mode_tag = "jal" if joint else "il"
+    run_name = f"2v1_{mode_tag}_{sb3_algo}_{reward_type}_seed{seed}_{timestamp}"
     current_log_dir = os.path.join(LOG_DIR, run_name)
 
     wandb.init(
@@ -147,19 +166,24 @@ def train(sb3_algo, reward_type, seed, n_pairs, load_path=None, start_level=1):
         name=run_name,
         sync_tensorboard=True,
         config={
-            "algo": sb3_algo, "reward_type": reward_type,
+            "algo": sb3_algo,
+            "reward_type": reward_type,
             "seed": seed,
-            "n_pairs": n_pairs,
-            "n_agent_slots": 2 * n_pairs,
+            "n_envs": n_envs,
+            "mode": "JAL" if joint else "IL_param_sharing",
         },
     )
 
     env = build_vec_env(
-        n_pairs=n_pairs, reward_type=reward_type, seed=seed, use_subproc=True
+        n_envs=n_envs,
+        reward_type=reward_type,
+        seed=seed,
+        use_subproc=True,
+        joint=joint,
     )
     print(
-        f"Training {sb3_algo} | reward={reward_type} | seed={seed} | "
-        f"pairs={n_pairs} | slots={env.num_envs}"
+        f"Training {sb3_algo} ({mode_tag.upper()}) | reward={reward_type} | "
+        f"seed={seed} | envs={n_envs} | slots={env.num_envs}"
     )
 
     if load_path and os.path.exists(load_path):
@@ -243,9 +267,13 @@ def train(sb3_algo, reward_type, seed, n_pairs, load_path=None, start_level=1):
     print(f"Saved {final}")
 
 
-def test(sb3_algo, reward_type, model_path, test_level=4):
-    """Render one trained shared policy controlling both yellows."""
-    env = SSL2v1SharedEnv(reward_type=reward_type, render_mode="human")
+def test(sb3_algo, reward_type, model_path, test_level=4, joint=False):
+    """Render one trained policy controlling both yellows."""
+    env = SSL2v1SharedEnv(
+        reward_type=reward_type,
+        render_mode="human",
+        joint_action_mode=joint,
+    )
     env.set_curriculum_level(test_level)
     env.reset()
 
@@ -255,13 +283,14 @@ def test(sb3_algo, reward_type, model_path, test_level=4):
 
     total = 0.0
     while True:
-        # obs is (2, OBS); SB3 predict expects batched shape, which works directly.
-        actions, _ = model.predict(obs, deterministic=True)
-        obs, rewards, done, truncated, info = env.step(actions)
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, done, truncated, info = env.step(action)
         env.render()
         time.sleep(0.025)
-        total += float(rewards[0])
-        print(f"r={rewards[0]:.2f} sum={total:.2f}", end="\r")
+        # IL returns (2,) reward array; JAL returns scalar.
+        step_r = float(reward) if joint else float(reward[0])
+        total += step_r
+        print(f"r={step_r:.2f} sum={total:.2f}", end="\r")
         if done or truncated:
             print(f"\nepisode end: {info}")
             total = 0.0
@@ -286,10 +315,15 @@ if __name__ == "__main__":
         "--n_pairs",
         type=int,
         default=max(1, slurm_cpus // 2),
-        help="Number of pair envs (each = 1 physics sim, 2 agent slots).",
+        help="In IL: number of pair envs (each = 1 sim, 2 agent slots). "
+             "In JAL: number of independent envs.",
     )
     parser.add_argument(
         "--test_level", type=int, default=5, choices=[1, 2, 3, 4, 5]
+    )
+    parser.add_argument(
+        "--joint", action="store_true",
+        help="Use JAL: single policy on joint obs/action.",
     )
     args = parser.parse_args()
 
@@ -298,9 +332,10 @@ if __name__ == "__main__":
             sb3_algo=args.sb3_algo,
             reward_type=args.reward_type,
             seed=args.seed,
-            n_pairs=args.n_pairs,
+            n_envs=args.n_pairs,
             start_level=args.start_level,
-            load_path="models/2v1_SAC_dense_seed820_20260508-142543_final.zip", 
+            load_path="",
+            joint=args.joint,
         )
     if args.test:
         if os.path.isfile(args.test):
@@ -309,6 +344,7 @@ if __name__ == "__main__":
                 reward_type=args.reward_type,
                 model_path=args.test,
                 test_level=args.test_level,
+                joint=args.joint,
             )
         else:
             print(f"file {args.test} not found")

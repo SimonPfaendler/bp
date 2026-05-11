@@ -1007,7 +1007,7 @@ class SSL2v1SharedEnv(SSLBaseEnv):
                 blue_x = rng.uniform(-1.0, 2.0)
                 blue_y = rng.uniform(-2.0, 2.0)
                 pos.robots_blue[0] = Robot(x=blue_x, y=blue_y, theta=0)
-                pos.ball = Ball(x=blue_x + 0.15, y=blue_y)
+                pos.ball = Ball(x=blue_x + 0.30, y=blue_y)
                 pos.robots_yellow[0] = Robot(
                     x=blue_x + rng.uniform(0.5, 1.5),
                     y=blue_y + rng.uniform(-0.3, 0.3),

@@ -625,6 +625,9 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0:  # Goal for yellow
                     rewards += 100.0
+                    # Goal-after-pass bonus: pushes the policy to score via
+                    # pass rather than solo. Capped at 2 passes.
+                    rewards += 50.0 * min(self.passes_in_episode, 2)
                     self.match_result = 1
                 else:  # Goal for blue
                     rewards -= 50.0
@@ -716,6 +719,7 @@ class SSL2v1SharedEnv(SSLBaseEnv):
                 and current_carrier != self.last_yellow_carrier
                 and not self.blue_touched_since_yellow
             ):
+                rewards += 30.0    # Discrete pass-event bonus (shared).
                 self.passes_in_episode += 1
             self.last_yellow_carrier = current_carrier
             self.blue_touched_since_yellow = False

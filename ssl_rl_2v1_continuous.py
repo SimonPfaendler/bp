@@ -198,6 +198,8 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         self.last_yellow_carrier = None  # 0, 1, or None
         self.blue_touched_since_yellow = False
         self.passes_in_episode = 0
+        self.last_action_pair = None
+        self.last_yellow_kick_speed = 6.0
 
         # Per-yellow dribble-distance tracking (SSL "max 1m" rule).
         self.max_dribble_dist = 1.0
@@ -226,6 +228,8 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         self.last_yellow_carrier = None
         self.blue_touched_since_yellow = False
         self.passes_in_episode = 0
+        self.last_action_pair = None
+        self.last_yellow_kick_speed = 6.0
         self.is_dribbling = [False, False]
         self.dribble_start_pos = [None, None]
         self.must_release = [False, False]
@@ -260,6 +264,7 @@ class SSL2v1SharedEnv(SSLBaseEnv):
         commands = self._build_commands(action_pair)
         self.rsim.send_commands(commands)
         self.sent_commands = commands
+        self.last_action_pair = action_pair
 
         self.last_frame = self.frame
         self.frame = self.rsim.get_frame()
@@ -696,12 +701,39 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             if (dist_a < 0.12) or ya.infrared or (dist_b < 0.12) or yb.infrared:
                 self.team_possession_steps += 1
 
-        # --- Pass detection (stats only, no event reward) ---
+        # --- Pass detection ---
         ya_has = (math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.20) or ya.infrared
         yb_has = (math.hypot(yb.x - ball.x, yb.y - ball.y) < 0.20) or yb.infrared
         blue_has = (
             math.hypot(blue.x - ball.x, blue.y - ball.y) < 0.12
         ) or blue.infrared
+
+        # Pass-attempt shaping (per-agent): kick triggered while owning ball
+        # and oriented toward teammate (±30°). Bridges the gradient gap between
+        # "no pass" and "successful pass". Also records the kick speed of the
+        # last yellow-owned kick, used to modulate the pass-event bonus.
+        if self.last_action_pair is not None:
+            has = (ya_has, yb_has)
+            for i in range(2):
+                if not has[i]:
+                    continue
+                kick_trig = float(self.last_action_pair[i, 4])
+                if kick_trig <= 0.0:
+                    continue
+                y_self = yellows[i]
+                y_mate = yellows[1 - i]
+                dx = y_mate.x - y_self.x
+                dy = y_mate.y - y_self.y
+                angle_to_mate = math.atan2(dy, dx)
+                self_theta = math.radians(y_self.theta)
+                d_angle = abs(
+                    ((angle_to_mate - self_theta + math.pi) % (2 * math.pi))
+                    - math.pi
+                )
+                if d_angle <= math.radians(30):
+                    rewards[i] += 2.0
+                raw_k = max(0.0, float(self.last_action_pair[i, 3]))
+                self.last_yellow_kick_speed = raw_k * 6.0
 
         if blue_has:
             self.blue_touched_since_yellow = True
@@ -719,7 +751,10 @@ class SSL2v1SharedEnv(SSLBaseEnv):
                 and current_carrier != self.last_yellow_carrier
                 and not self.blue_touched_since_yellow
             ):
-                rewards += 30.0    # Discrete pass-event bonus (shared).
+                # Bonus modulated by softness of originating kick.
+                # softness in [0,1]: 1 at 0 m/s, 0 at 6 m/s → bonus in [15, 45].
+                softness = 1.0 - min(self.last_yellow_kick_speed / 6.0, 1.0)
+                rewards += 15.0 + 30.0 * softness
                 self.passes_in_episode += 1
             self.last_yellow_carrier = current_carrier
             self.blue_touched_since_yellow = False

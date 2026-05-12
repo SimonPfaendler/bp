@@ -3,7 +3,7 @@ import os
 import submitit
 
 
-def run_experiment(algo, reward_type, seed, n_pairs, start_level=1, joint=True):
+def run_experiment(algo, reward_type, seed, n_pairs, start_level=1, joint=False):
     joint_flag = "--joint " if joint else ""
     cmd = (
         f"python train_2v1.py {algo} -t {joint_flag}"
@@ -33,9 +33,9 @@ def main():
     algo = "SAC"
     reward_type = "dense"
     n_pairs = 24
-    start_level = 1
-    seeds = [820]
-    joint = True  # JAL: joint-action learner (single policy, joint obs/action)
+    start_level = 5
+    seeds = [822]
+    joint = False  # JAL: joint-action learner (single policy, joint obs/action)
 
     jobs = []
     for seed in seeds:

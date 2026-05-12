@@ -55,7 +55,7 @@ def blue_defender_heuristic_2v1(env, robot):
         bg = goal - ball_pos
         bg_len = np.linalg.norm(bg)
         if bg_len > 0.01:
-            stand = goal - (bg / bg_len) * min(1.0, bg_len * 0.4)
+            stand = goal - (bg / bg_len) * min(2.5, bg_len * 0.75)
         else:
             stand = np.array([defend_goal_x + 0.3, 0.0])
         v_x, v_y = move_to_point(robot, stand, speed=2.0)
@@ -624,10 +624,10 @@ class SSL2v1SharedEnv(SSLBaseEnv):
             done = True
             if abs(ball.y) <= goal_half_width:
                 if ball.x < 0:  # Goal for yellow
-                    rewards += 100.0
-                    # Goal-after-pass bonus: pushes the policy to score via
-                    # pass rather than solo. Capped at 2 passes.
-                    rewards += 50.0 * min(self.passes_in_episode, 2)
+                    if self.passes_in_episode > 0:
+                        rewards += 150.0
+                    else:
+                        rewards += 40.0
                     self.match_result = 1
                 else:  # Goal for blue
                     rewards -= 50.0

@@ -560,7 +560,9 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 self.last_dist_to_ball = [dist_a, dist_b]
             for i in range(2):
                 delta = self.last_dist_to_ball[i] - dists[i]
-                rewards[i] += float(np.clip(delta * 5.0, 0.0, 0.5))
+                # Halved from previous (5.0/0.5 → 2.5/0.25) to make
+                # per-step shaping less attractive than scoring.
+                rewards[i] += float(np.clip(delta * 2.5, 0.0, 0.25))
             self.last_dist_to_ball = [dist_a, dist_b]
 
             ball_pos = np.array([ball.x, ball.y])
@@ -590,10 +592,15 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             self.last_ball_pos = (ball.x, ball.y)
 
             shared = max(pass_delta, goal_delta)
-            rewards += float(np.clip(shared * 10.0, 0.0, 1.5))
+            # Halved from previous (10.0/1.5 → 5.0/0.75).
+            rewards += float(np.clip(shared * 5.0, 0.0, 0.75))
 
+            # Possession reward: holding the ball pays per step, breaking
+            # the ping-pong equilibrium where both teams kick the ball away
+            # without ever controlling it.
             if (dist_a < 0.12) or ya.infrared or (dist_b < 0.12) or yb.infrared:
                 self.team_possession_steps += 1
+                rewards += 0.05
 
         # Pass detection (yellow-side carriers; any blue touch resets)
         ya_has = (

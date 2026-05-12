@@ -33,7 +33,7 @@ def main():
 
     # v0 = the IL champion from yesterday's seed 822 run.
     frozen_path = (
-        "models/2v2_selfplay_SAC_dense_seed822_20260512-140452_final.zip"
+        "models/2v2_selfplay_SAC_dense_seed822_20260512-154059_final.zip"
     )
     init_path = None  # None → reuses frozen_path as yellow init (parity start).
     reward_type = "dense"

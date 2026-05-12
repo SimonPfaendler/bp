@@ -374,11 +374,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         )
         obs = np.clip(obs, -self.NORM_BOUNDS, self.NORM_BOUNDS)
         if not is_yellow:
-            # Mirror over y-axis: negate all egocentric-y components and the
-            # robot's own angular velocity. Together with the x-wall swap and
-            # the action mirror in _compute_blue_action, this presents the
-            # world to the yellow-trained policy as if blue were yellow.
-            for slot in (2, 6, 8, 10, 12, 14, 16, 18, 21, 23, 26, 29):
+            # Mirror over y-axis: negate all egocentric-y components, plus
+            # the robot's own local side-velocity (slot 1) and angular
+            # velocity (slot 2). Together with the x-wall swap and the action
+            # mirror in _compute_blue_action, this presents the world to the
+            # yellow-trained policy as if blue were yellow.
+            for slot in (1, 2, 6, 8, 10, 12, 14, 16, 18, 21, 23, 26, 29):
                 obs[slot] = -obs[slot]
         return obs
 

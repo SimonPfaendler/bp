@@ -146,7 +146,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         tensorboard_log=log_dir, seed=seed,
         train_freq=1, gradient_steps=1, batch_size=2048,
         buffer_size=1_000_000, learning_rate=3e-4,
-        learning_starts=10000, ent_coef="auto_0.2", target_entropy="auto",
+        learning_starts=10000, ent_coef=0.05, target_entropy="auto",
         policy_kwargs=policy_kwargs, gamma=0.99,
     )
     if init_load and os.path.exists(init_load):

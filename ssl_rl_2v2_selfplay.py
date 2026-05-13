@@ -46,7 +46,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
     def __init__(
         self, render_mode=None, reward_type="dense", frozen_path=None,
-        role_index=True, oob_grace_steps=100_000,
+        role_index=True, oob_grace_steps=0,
     ):
         super().__init__(
             field_type=1,

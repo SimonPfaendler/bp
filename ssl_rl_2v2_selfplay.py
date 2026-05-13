@@ -564,28 +564,27 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         done = False
         truncated = False
 
-        # Terminal: goal / ball OOB
-        if abs(ball.x) > max_x:
+        # Terminal: goal always. Ball-OOB-without-goal and robot-OOB only
+        # terminate after the grace period — during curriculum the agents
+        # keep practicing even if the ball or a robot leaves the field.
+        in_grace = self.total_steps <= self.oob_grace_steps
+        if abs(ball.x) > max_x and abs(ball.y) <= goal_half_width:
             done = True
-            if abs(ball.y) <= goal_half_width:
-                if ball.x < 0:  # Goal for yellow
-                    rewards += 100.0
-                    rewards += 50.0 * min(self.passes_in_episode, 2)
-                    self.match_result = 1
-                else:  # Goal for blue
-                    rewards -= 50.0
-                    self.match_result = -1
+            if ball.x < 0:  # Goal for yellow
+                rewards += 100.0
+                rewards += 50.0 * min(self.passes_in_episode, 2)
+                self.match_result = 1
+            else:  # Goal for blue
+                rewards -= 50.0
+                self.match_result = -1
             return rewards, done, truncated
 
-        if abs(ball.y) > max_y:
+        if (abs(ball.x) > max_x or abs(ball.y) > max_y) and not in_grace:
             done = True
             return rewards, done, truncated
 
         # OOB symmetric across teams: terminate if any robot leaves the field.
-        # Curriculum: during the grace period (first oob_grace_steps per env)
-        # we skip this so early agents accumulate more practice instead of
-        # killing episodes the moment a robot wanders off-pitch.
-        if self.total_steps > self.oob_grace_steps:
+        if not in_grace:
             for r in (*yellows, *blues):
                 if abs(r.x) > max_x or abs(r.y) > max_y:
                     done = True

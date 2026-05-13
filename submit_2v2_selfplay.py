@@ -42,7 +42,7 @@ def main():
     reward_type = "dense"
     n_pairs = 24
     seeds = [822]
-    total_steps = 2_000_000
+    total_steps = 5_000_000
 
     jobs = []
     for seed in seeds:

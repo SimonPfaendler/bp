@@ -4,13 +4,14 @@ import submitit
 
 
 def run_experiment(
-    reward_type, seed, n_pairs, frozen_path, init_path=None,
+    reward_type, seed, n_pairs, frozen_path=None, init_path=None,
     total_steps=5_000_000,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
+    frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
     cmd = (
         f"python train_2v2_selfplay.py "
-        f"--frozen_path {frozen_path} {init_flag}"
+        f"{frozen_flag}{init_flag}"
         f"--reward_type {reward_type} --seed {seed} "
         f"--n_pairs {n_pairs} --total_steps {total_steps}"
     )
@@ -31,16 +32,17 @@ def main():
         slurm_additional_parameters={"gres": "gpu:1"},
     )
 
-    # v4 = latest self-play champion (role-index off, 38-dim obs).
-    # Env auto-strips role-index dims before feeding to this frozen model.
-    frozen_path = (
-        "models/2v2_selfplay_SAC_dense_seed822_20260513-112105_final.zip"
-    )
-    init_path = None  # None → reuses frozen_path as yellow init (parity start).
+    # WARMUP PHASE: Blue stationary (frozen_path=None → zero actions).
+    # Goal: let Yellow with role-index calibrate its new input layers and
+    # build basic ball-handling vs an opponent that doesn't fight back.
+    # After ~2M steps the resulting checkpoint should be strong enough to
+    # train productively against v4.
+    frozen_path = None
+    init_path = None
     reward_type = "dense"
     n_pairs = 24
     seeds = [822]
-    total_steps = 5_000_000
+    total_steps = 2_000_000
 
     jobs = []
     for seed in seeds:

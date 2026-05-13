@@ -200,8 +200,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Train 2v2 SAC self-play with frozen opponent."
     )
-    parser.add_argument("--frozen_path", required=True,
-                        help="Path to frozen SAC checkpoint for blue side.")
+    parser.add_argument("--frozen_path", default=None,
+                        help="Path to frozen SAC checkpoint for blue side. "
+                             "Omit for stationary Blue (warmup phase).")
     parser.add_argument("--init_path", default=None,
                         help="Yellow init checkpoint. Defaults to frozen_path.")
     parser.add_argument("--reward_type", default="dense",

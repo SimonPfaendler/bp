@@ -25,7 +25,7 @@ def main():
     executor.update_parameters(
         slurm_job_name="sp2v2",
         slurm_time="00:30:00",
-        slurm_partition="dev_gpu_h100",
+        slurm_partition="gpu_h100_short",
         slurm_cpus_per_task=48,
         slurm_mem="193300mb",
         slurm_additional_parameters={"gres": "gpu:1"},

@@ -32,14 +32,13 @@ def main():
         slurm_additional_parameters={"gres": "gpu:1"},
     )
 
-    # v4 self-play continuation: same checkpoint as init AND frozen blue.
-    # Reward function ported from 1v1 with OOB/timeout penalties so the
-    # ping-pong equilibrium loses its profitability.
+    # v5 self-play (IBR iteration): 153210 as both init AND frozen blue.
+    # Each iteration the new champion plays against its frozen self.
     frozen_path = (
-        "models/2v2_selfplay_SAC_dense_seed822_20260513-112105_final.zip"
+        "models/2v2_selfplay_SAC_dense_seed822_20260513-153210_final.zip"
     )
     init_path = (
-        "models/2v2_selfplay_SAC_dense_seed822_20260513-112105_final.zip"
+        "models/2v2_selfplay_SAC_dense_seed822_20260513-153210_final.zip"
     )
     reward_type = "dense"
     n_pairs = 24

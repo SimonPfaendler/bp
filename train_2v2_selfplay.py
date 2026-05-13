@@ -59,6 +59,7 @@ class StatsCallback(BaseCallback):
     def __init__(self, verbose=0):
         super().__init__(verbose)
         self.success_buffer = deque(maxlen=300)
+        self.blue_goal_buffer = deque(maxlen=300)
         self.passes_buffer = deque(maxlen=300)
         self.scored_after_pass_buffer = deque(maxlen=300)
 
@@ -70,6 +71,8 @@ class StatsCallback(BaseCallback):
                 continue
             if "is_success" in infos[i]:
                 self.success_buffer.append(float(infos[i]["is_success"]))
+            if "blue_goal" in infos[i]:
+                self.blue_goal_buffer.append(float(infos[i]["blue_goal"]))
             if "passes" in infos[i]:
                 self.passes_buffer.append(float(infos[i]["passes"]))
             if "scored_after_pass" in infos[i]:
@@ -80,6 +83,11 @@ class StatsCallback(BaseCallback):
             self.logger.record(
                 "selfplay/live_success_rate",
                 float(np.mean(self.success_buffer)),
+            )
+        if self.blue_goal_buffer:
+            self.logger.record(
+                "selfplay/blue_goal_rate",
+                float(np.mean(self.blue_goal_buffer)),
             )
         if self.passes_buffer:
             self.logger.record(

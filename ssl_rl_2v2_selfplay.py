@@ -110,6 +110,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.last_yellow_carrier = None
         self.blue_touched_since_yellow = False
         self.passes_in_episode = 0
+        self.blue_goal_scored = False
 
         # SSL max-1m dribble enforcement, per team
         self.max_dribble_dist = 1.0
@@ -150,6 +151,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.last_yellow_carrier = None
         self.blue_touched_since_yellow = False
         self.passes_in_episode = 0
+        self.blue_goal_scored = False
         self.is_dribbling_y = [False, False]
         self.dribble_start_pos_y = [None, None]
         self.must_release_y = [False, False]
@@ -192,6 +194,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         info = {}
         if done or truncated:
             info["is_success"] = 1.0 if self.match_result == 1 else 0.0
+            info["blue_goal"] = 1.0 if self.blue_goal_scored else 0.0
             info["match_result"] = self.match_result
             info["possession_ratio"] = self.team_possession_steps / max(
                 1, self.current_step
@@ -578,6 +581,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             else:  # Blue goal
                 rewards -= 50.0
                 self.match_result = -1
+                self.blue_goal_scored = True
             return rewards, done, truncated
 
         # Ball OOB without goal: kills the OOB-exit reward hack.

@@ -32,13 +32,15 @@ def main():
         slurm_additional_parameters={"gres": "gpu:1"},
     )
 
-    # WARMUP PHASE: Blue stationary (frozen_path=None → zero actions).
-    # Goal: let Yellow with role-index calibrate its new input layers and
-    # build basic ball-handling vs an opponent that doesn't fight back.
-    # After ~2M steps the resulting checkpoint should be strong enough to
-    # train productively against v4.
-    frozen_path = None
-    init_path = None
+    # PHASE 2: warmed-up Yellow (140610, role-index, 40-dim) vs v4 frozen
+    # Blue (38-dim, auto-stripped in env). Adversarial pressure should
+    # force Yellow off the push-strategy onto real kicks.
+    frozen_path = (
+        "models/2v2_selfplay_SAC_dense_seed822_20260513-112105_final.zip"
+    )
+    init_path = (
+        "models/2v2_selfplay_SAC_dense_seed822_20260513-140610_final.zip"
+    )
     reward_type = "dense"
     n_pairs = 24
     seeds = [822]

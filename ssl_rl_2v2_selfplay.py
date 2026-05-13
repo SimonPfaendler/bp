@@ -25,7 +25,8 @@ from rsoccer_gym.ssl.ssl_gym_base import SSLBaseEnv
 from stable_baselines3 import SAC
 
 
-SINGLE_OBS_DIM = 38
+SINGLE_OBS_DIM_BASE = 38  # 2v1-IL compatible obs without role-index
+ROLE_INDEX_DIM = 2
 SINGLE_ACT_DIM = 6
 N_YELLOW = 2
 N_BLUE = 2
@@ -43,7 +44,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
       info:   dict
     """
 
-    def __init__(self, render_mode=None, reward_type="dense", frozen_path=None):
+    def __init__(
+        self, render_mode=None, reward_type="dense", frozen_path=None,
+        role_index=True, oob_grace_steps=100_000,
+    ):
         super().__init__(
             field_type=1,
             n_robots_blue=N_BLUE,
@@ -54,17 +58,36 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.reward_type = reward_type
         self.frozen_path = frozen_path
         self.frozen_model = None  # lazy-load on first step (subproc-safe)
+        # Frozen-model input dim (filled on lazy-load). If older than current
+        # obs (e.g. v3 trained without role-index), we strip role-index dims
+        # before predict so the same policy class can act as blue.
+        self.frozen_obs_dim = None
+
+        # Role-index: one-hot agent identity appended to obs. Breaks the
+        # permutation symmetry between yellow_a/yellow_b so the shared policy
+        # can specialize into roles (carrier/receiver, attacker/defender).
+        self.role_index = role_index
+        self.single_obs_dim = (
+            SINGLE_OBS_DIM_BASE + ROLE_INDEX_DIM if role_index
+            else SINGLE_OBS_DIM_BASE
+        )
+
+        # OOB curriculum: skip robot-OOB termination during the first
+        # `oob_grace_steps` per-env steps so early-stage agents get more
+        # productive practice instead of episodes ending the moment a robot
+        # wanders off the field.
+        self.oob_grace_steps = int(oob_grace_steps)
 
         self.single_observation_space = Box(
             low=-self.NORM_BOUNDS, high=self.NORM_BOUNDS,
-            shape=(SINGLE_OBS_DIM,), dtype=np.float32,
+            shape=(self.single_obs_dim,), dtype=np.float32,
         )
         self.single_action_space = Box(
             low=-1.0, high=1.0, shape=(SINGLE_ACT_DIM,), dtype=np.float32,
         )
         self.observation_space = Box(
             low=-self.NORM_BOUNDS, high=self.NORM_BOUNDS,
-            shape=(N_YELLOW, SINGLE_OBS_DIM), dtype=np.float32,
+            shape=(N_YELLOW, self.single_obs_dim), dtype=np.float32,
         )
         self.action_space = Box(
             low=-1.0, high=1.0,
@@ -111,6 +134,9 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
     def _maybe_load_frozen(self):
         if self.frozen_model is None and self.frozen_path:
             self.frozen_model = SAC.load(self.frozen_path, device="cpu")
+            self.frozen_obs_dim = int(
+                self.frozen_model.policy.observation_space.shape[-1]
+            )
 
     # ---------- gym API ----------
 
@@ -381,6 +407,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # yellow-trained policy as if blue were yellow.
             for slot in (1, 2, 6, 8, 10, 12, 14, 16, 18, 21, 23, 26, 29):
                 obs[slot] = -obs[slot]
+        if self.role_index:
+            # Append after mirror — role-index is position-independent
+            # agent identity, no reflection needed.
+            role = np.zeros(ROLE_INDEX_DIM, dtype=np.float32)
+            role[idx] = 1.0
+            obs = np.concatenate([obs, role]).astype(np.float32)
         return obs
 
     # ---------- dribble enforcement (both teams) ----------
@@ -468,6 +500,15 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         if self.frozen_model is None:
             return np.zeros((N_BLUE, SINGLE_ACT_DIM), dtype=np.float32)
         blue_obs = self._stacked_obs_blue()
+        # Frozen blue may have been trained with a smaller obs (e.g. v3 has
+        # 38 dims, current env outputs 40 with role-index). Truncate to the
+        # frozen model's expected input dim — role-index lives in the trailing
+        # ROLE_INDEX_DIM slots, so this drops exactly those.
+        if (
+            self.frozen_obs_dim is not None
+            and self.frozen_obs_dim < blue_obs.shape[-1]
+        ):
+            blue_obs = blue_obs[..., : self.frozen_obs_dim]
         action, _ = self.frozen_model.predict(blue_obs, deterministic=True)
         action = np.asarray(action, dtype=np.float32).copy()
         # Action is in world frame (v_x = world x velocity). Policy learned
@@ -541,10 +582,14 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             return rewards, done, truncated
 
         # OOB symmetric across teams: terminate if any robot leaves the field.
-        for r in (*yellows, *blues):
-            if abs(r.x) > max_x or abs(r.y) > max_y:
-                done = True
-                return rewards, done, truncated
+        # Curriculum: during the grace period (first oob_grace_steps per env)
+        # we skip this so early agents accumulate more practice instead of
+        # killing episodes the moment a robot wanders off-pitch.
+        if self.total_steps > self.oob_grace_steps:
+            for r in (*yellows, *blues):
+                if abs(r.x) > max_x or abs(r.y) > max_y:
+                    done = True
+                    return rewards, done, truncated
 
         if self.current_step >= self.max_steps:
             truncated = True

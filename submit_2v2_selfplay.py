@@ -31,9 +31,10 @@ def main():
         slurm_additional_parameters={"gres": "gpu:1"},
     )
 
-    # v0 = the IL champion from yesterday's seed 822 run.
+    # v4 = latest self-play champion (role-index off, 38-dim obs).
+    # Env auto-strips role-index dims before feeding to this frozen model.
     frozen_path = (
-        "models/2v2_selfplay_SAC_dense_seed822_20260513-095537_final.zip"
+        "models/2v2_selfplay_SAC_dense_seed822_20260513-112105_final.zip"
     )
     init_path = None  # None → reuses frozen_path as yellow init (parity start).
     reward_type = "dense"

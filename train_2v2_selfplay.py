@@ -151,9 +151,16 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     )
     if init_load and os.path.exists(init_load):
         print(f"Transferring policy weights from {init_load}")
-        old_model = SAC.load(init_load, device="cpu")
-        model.policy.load_state_dict(old_model.policy.state_dict())
-        del old_model
+        try:
+            old_model = SAC.load(init_load, device="cpu")
+            model.policy.load_state_dict(old_model.policy.state_dict())
+            del old_model
+        except (RuntimeError, ValueError) as e:
+            # Shape mismatch is expected when the env's obs space changes
+            # (e.g. adding role-index dims). Fall back to fresh training
+            # rather than crashing the run.
+            print(f"Skipping transfer (likely obs/act shape mismatch): {e}")
+            print("Training yellow from scratch instead.")
     else:
         print(f"No init checkpoint at {init_load}; training from scratch")
 

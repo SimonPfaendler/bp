@@ -46,7 +46,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
     def __init__(
         self, render_mode=None, reward_type="dense", frozen_path=None,
-        role_index=True, oob_grace_steps=0,
+        role_index=False, oob_grace_steps=0,
     ):
         super().__init__(
             field_type=1,
@@ -559,60 +559,90 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         max_x = self.field.length / 2.0
         max_y = self.field.width / 2.0
         goal_half_width = self.field.goal_width / 2.0
+        max_dist = math.hypot(self.field.length, self.field.width)
 
         rewards = np.zeros(2, dtype=np.float32)
         done = False
         truncated = False
 
-        # Terminal: goal always. Ball-OOB-without-goal and robot-OOB only
-        # terminate after the grace period — during curriculum the agents
-        # keep practicing even if the ball or a robot leaves the field.
         in_grace = self.total_steps <= self.oob_grace_steps
+
+        # Goal: always terminates. Speed bonus + pass bonus on yellow goal.
         if abs(ball.x) > max_x and abs(ball.y) <= goal_half_width:
             done = True
-            if ball.x < 0:  # Goal for yellow
+            if ball.x < 0:  # Yellow goal
                 rewards += 100.0
+                rewards += (self.max_steps - self.current_step) * 0.01
                 rewards += 50.0 * min(self.passes_in_episode, 2)
                 self.match_result = 1
-            else:  # Goal for blue
+            else:  # Blue goal
                 rewards -= 50.0
                 self.match_result = -1
             return rewards, done, truncated
 
+        # Ball OOB without goal: kills the OOB-exit reward hack.
         if (abs(ball.x) > max_x or abs(ball.y) > max_y) and not in_grace:
             done = True
+            rewards -= 5.0
+            self.match_result = -1
             return rewards, done, truncated
 
-        # OOB symmetric across teams: terminate if any robot leaves the field.
+        # Yellow robot OOB: heavy penalty (matches 1v1 level 4-5 scale,
+        # softened to -50 because 2v2 has more bodies that bump near edges).
         if not in_grace:
-            for r in (*yellows, *blues):
+            for r in yellows:
                 if abs(r.x) > max_x or abs(r.y) > max_y:
                     done = True
+                    rewards -= 50.0
+                    self.match_result = -1
                     return rewards, done, truncated
 
+        # Timeout: penalty avoids "wait for episode to end" stalls.
         if self.current_step >= self.max_steps:
             truncated = True
+            done = True
+            rewards -= 10.0
+            self.match_result = -1
             return rewards, done, truncated
 
         # Per-step shaping
         if self.reward_type == "dense":
-            # Timestep penalty: small negative per step makes long
-            # stall-equilibria unprofitable; goal at +100 still dominates.
-            rewards -= 0.02
-
             dist_a = math.hypot(ya.x - ball.x, ya.y - ball.y)
             dist_b = math.hypot(yb.x - ball.x, yb.y - ball.y)
             dists = (dist_a, dist_b)
 
             if self.last_dist_to_ball is None:
                 self.last_dist_to_ball = [dist_a, dist_b]
+
+            # Time penalty: ramps with episode progress; heavier when ball
+            # is in own half (push it out) than attack half (defending
+            # close to opponent goal shouldn't be over-penalized).
+            progress = self.current_step / self.max_steps
+            if ball.x < 0:  # attack half
+                rewards -= 0.02 * (1.0 + 2.0 * progress)
+            else:  # own half
+                rewards -= 0.04 * (1.0 + 2.0 * progress)
+
+            # Per-agent distance potential: small constant gradient toward
+            # the ball regardless of motion.
+            for i in range(2):
+                rewards[i] += 0.05 * (1.0 - dists[i] / max_dist)
+
+            # Per-agent stand-still penalty: kills "do nothing" strategies.
+            for i, agent in enumerate(yellows):
+                speed = math.hypot(agent.v_x, agent.v_y)
+                has_ball = (dists[i] < 0.12) or agent.infrared
+                if speed < 0.1 and not has_ball:
+                    rewards[i] -= 0.05
+
+            # Per-agent robot-to-ball delta (signed: penalize moving away).
             for i in range(2):
                 delta = self.last_dist_to_ball[i] - dists[i]
-                # Halved from previous (5.0/0.5 → 2.5/0.25) to make
-                # per-step shaping less attractive than scoring.
-                rewards[i] += float(np.clip(delta * 2.5, 0.0, 0.25))
+                rewards[i] += float(np.clip(delta * 5.0, -0.5, 0.5))
             self.last_dist_to_ball = [dist_a, dist_b]
 
+            # Shared ball-to-goal delta (signed: penalize ball moving away
+            # from yellow attack goal).
             ball_pos = np.array([ball.x, ball.y])
             ga = np.array([-max_x, goal_half_width])
             gb_pt = np.array([-max_x, -goal_half_width])
@@ -624,44 +654,21 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             dist_ball_goal = float(np.linalg.norm(ball_pos - closest_goal_pt))
 
             if self.last_dist_ball_goal is not None:
-                goal_delta = self.last_dist_ball_goal - dist_ball_goal
-            else:
-                goal_delta = 0.0
+                delta_ball_goal = self.last_dist_ball_goal - dist_ball_goal
+                rewards += float(np.clip(delta_ball_goal * 10.0, -1.0, 1.5))
             self.last_dist_ball_goal = dist_ball_goal
 
-            if self.last_ball_pos is None:
-                pass_delta = 0.0
-            else:
-                prev_bx, prev_by = self.last_ball_pos
-                pass_delta = max(
-                    math.hypot(prev_bx - ya.x, prev_by - ya.y) - dist_a,
-                    math.hypot(prev_bx - yb.x, prev_by - yb.y) - dist_b,
-                )
-            self.last_ball_pos = (ball.x, ball.y)
-
-            shared = max(pass_delta, goal_delta)
-            # Halved from previous (10.0/1.5 → 5.0/0.75).
-            rewards += float(np.clip(shared * 5.0, 0.0, 0.75))
-
-            # Possession reward: holding the ball pays per step, breaking
-            # the ping-pong equilibrium. Reduced from 0.05 to 0.03 because
-            # the previous magnitude produced a stall equilibrium where
-            # holding alone outweighed the risk-adjusted value of shooting.
+            # Shared possession
             if (dist_a < 0.12) or ya.infrared or (dist_b < 0.12) or yb.infrared:
                 self.team_possession_steps += 1
-                rewards += 0.03
+                rewards += 0.01
 
-            # Dribble reward: per-agent bonus when actively dribbling.
-            # Tuned to clearly dominate kick-and-chase: total dribble-forward
-            # per step (0.10 + 0.20 + 0.75 shared + 0.03 possession - 0.02
-            # timestep = +1.06) > peak kick-chase (~+0.98). Makes controlled
-            # ball-carrying the locally optimal strategy.
-            for i in range(2):
-                if self.is_dribbling_y[i]:
-                    rewards[i] += 0.10
-                    # Extra bonus for dribbling toward yellow attack (-x).
-                    if ball.v_x < -0.3:
-                        rewards[i] += 0.20
+            # Ball direction: ball flying toward yellow attack goal (-x)
+            # earns extra; toward blue goal (+x) is penalized.
+            if ball.v_x < -0.5:
+                rewards += 0.02 * min(-ball.v_x, 3.0)
+            elif ball.v_x > 0.5:
+                rewards -= 0.02 * min(ball.v_x, 3.0)
 
         # Pass detection (yellow-side carriers; any blue touch resets)
         ya_has = (

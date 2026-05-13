@@ -32,14 +32,14 @@ def main():
         slurm_additional_parameters={"gres": "gpu:1"},
     )
 
-    # PHASE 2: warmed-up Yellow (140610, role-index, 40-dim) vs v4 frozen
-    # Blue (38-dim, auto-stripped in env). Adversarial pressure should
-    # force Yellow off the push-strategy onto real kicks.
+    # v4 self-play continuation: same checkpoint as init AND frozen blue.
+    # Reward function ported from 1v1 with OOB/timeout penalties so the
+    # ping-pong equilibrium loses its profitability.
     frozen_path = (
         "models/2v2_selfplay_SAC_dense_seed822_20260513-112105_final.zip"
     )
     init_path = (
-        "models/2v2_selfplay_SAC_dense_seed822_20260513-140610_final.zip"
+        "models/2v2_selfplay_SAC_dense_seed822_20260513-112105_final.zip"
     )
     reward_type = "dense"
     n_pairs = 24

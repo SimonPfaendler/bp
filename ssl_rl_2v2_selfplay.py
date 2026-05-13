@@ -550,8 +550,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             truncated = True
             return rewards, done, truncated
 
-        # Per-step shaping (≥ 0)
+        # Per-step shaping
         if self.reward_type == "dense":
+            # Timestep penalty: small negative per step makes long
+            # stall-equilibria unprofitable; goal at +100 still dominates.
+            rewards -= 0.02
+
             dist_a = math.hypot(ya.x - ball.x, ya.y - ball.y)
             dist_b = math.hypot(yb.x - ball.x, yb.y - ball.y)
             dists = (dist_a, dist_b)
@@ -596,11 +600,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             rewards += float(np.clip(shared * 5.0, 0.0, 0.75))
 
             # Possession reward: holding the ball pays per step, breaking
-            # the ping-pong equilibrium where both teams kick the ball away
-            # without ever controlling it.
+            # the ping-pong equilibrium. Reduced from 0.05 to 0.03 because
+            # the previous magnitude produced a stall equilibrium where
+            # holding alone outweighed the risk-adjusted value of shooting.
             if (dist_a < 0.12) or ya.infrared or (dist_b < 0.12) or yb.infrared:
                 self.team_possession_steps += 1
-                rewards += 0.05
+                rewards += 0.03
 
         # Pass detection (yellow-side carriers; any blue touch resets)
         ya_has = (
@@ -629,8 +634,17 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 and current_carrier != self.last_yellow_carrier
                 and not self.blue_touched_since_yellow
             ):
-                rewards += 30.0
-                self.passes_in_episode += 1
+                # Strict pass detection: require the ball to be at least 0.5m
+                # from the previous carrier at the moment of transfer. Filters
+                # touch-swap artefacts where two yellows are both close to a
+                # slow-rolling ball and the carrier flag flips back and forth
+                # — that's ping-pong, not a real pass.
+                prev = yellows[self.last_yellow_carrier]
+                ball_to_prev = math.hypot(ball.x - prev.x, ball.y - prev.y)
+                if ball_to_prev > 0.5:
+                    self.passes_in_episode += 1
+                    if self.reward_type == "dense":
+                        rewards += 30.0
             self.last_yellow_carrier = current_carrier
             self.blue_touched_since_yellow = False
 

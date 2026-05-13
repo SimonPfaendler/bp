@@ -135,24 +135,27 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     )
 
     init_load = init_path or frozen_path
+    # Build a fresh SAC with the desired auto-tuned ent_coef. If we have a
+    # checkpoint we transfer just the policy weights (actor + critic networks)
+    # so we keep prior learning but start with a fresh entropy optimizer.
+    # This is a workaround for SB3's inability to switch a model saved with
+    # fixed ent_coef to auto_X via custom_objects on load.
+    policy_kwargs = dict(net_arch=[512, 512, 512])
+    model = SAC(
+        policy="MlpPolicy", env=env, verbose=1, device="cuda",
+        tensorboard_log=log_dir, seed=seed,
+        train_freq=1, gradient_steps=1, batch_size=2048,
+        buffer_size=1_000_000, learning_rate=3e-4,
+        learning_starts=10000, ent_coef="auto_0.2", target_entropy="auto",
+        policy_kwargs=policy_kwargs, gamma=0.99,
+    )
     if init_load and os.path.exists(init_load):
-        print(f"Loading yellow init from {init_load}")
-        model = SAC.load(
-            init_load, env=env, device="auto",
-            tensorboard_log=log_dir,
-            custom_objects={"learning_rate": 3e-4, "ent_coef": 0.10},
-        )
+        print(f"Transferring policy weights from {init_load}")
+        old_model = SAC.load(init_load, device="cpu")
+        model.policy.load_state_dict(old_model.policy.state_dict())
+        del old_model
     else:
         print(f"No init checkpoint at {init_load}; training from scratch")
-        policy_kwargs = dict(net_arch=[512, 512, 512])
-        model = SAC(
-            policy="MlpPolicy", env=env, verbose=1, device="cuda",
-            tensorboard_log=log_dir, seed=seed,
-            train_freq=1, gradient_steps=1, batch_size=2048,
-            buffer_size=1_000_000, learning_rate=3e-4,
-            learning_starts=10000, ent_coef=0.10, target_entropy="auto",
-            policy_kwargs=policy_kwargs, gamma=0.99,
-        )
 
     callbacks = CallbackList([
         StatsCallback(),

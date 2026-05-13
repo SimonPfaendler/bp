@@ -607,6 +607,18 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 self.team_possession_steps += 1
                 rewards += 0.03
 
+            # Dribble reward: per-agent bonus when actively dribbling.
+            # Tuned to clearly dominate kick-and-chase: total dribble-forward
+            # per step (0.10 + 0.20 + 0.75 shared + 0.03 possession - 0.02
+            # timestep = +1.06) > peak kick-chase (~+0.98). Makes controlled
+            # ball-carrying the locally optimal strategy.
+            for i in range(2):
+                if self.is_dribbling_y[i]:
+                    rewards[i] += 0.10
+                    # Extra bonus for dribbling toward yellow attack (-x).
+                    if ball.v_x < -0.3:
+                        rewards[i] += 0.20
+
         # Pass detection (yellow-side carriers; any blue touch resets)
         ya_has = (
             math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.20

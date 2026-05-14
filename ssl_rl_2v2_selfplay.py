@@ -99,11 +99,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
         self.current_step = 0
         self.total_steps = 0
-        self.max_steps = 1000
+        self.max_steps = 250
 
         self.last_dist_ball_goal = None
         self.last_dist_to_ball = None
         self.last_ball_pos = None
+        self.last_yellow_pos = None
         self.team_possession_steps = 0
         self.match_result = 0
 
@@ -146,6 +147,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.last_dist_ball_goal = None
         self.last_dist_to_ball = None
         self.last_ball_pos = None
+        self.last_yellow_pos = None
         self.team_possession_steps = 0
         self.match_result = 0
         self.last_yellow_carrier = None
@@ -553,6 +555,18 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         rewards, done, _ = self._calculate_team_reward_and_done()
         return float(rewards.mean()), done
 
+    def _dist_ball_to_goal(self, bx, by) -> float:
+        """Distance from the ball to the yellow attack-goal mouth — the
+        projection onto the goal-line segment between the posts
+        (Ocana et al. 2019, Eq. 15). Yellow attacks the goal at x=-max_x."""
+        goal_x = -self.field.length / 2.0
+        gh = self.field.goal_width / 2.0
+        if by >= gh:
+            return math.hypot(bx - goal_x, by - gh)
+        if by <= -gh:
+            return math.hypot(bx - goal_x, by + gh)
+        return abs(bx - goal_x)
+
     def _calculate_team_reward_and_done(self) -> Tuple[np.ndarray, bool, bool]:
         ball = self.frame.ball
         ya, yb = self.frame.robots_yellow[0], self.frame.robots_yellow[1]
@@ -569,89 +583,89 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
         in_grace = self.total_steps <= self.oob_grace_steps
 
-        # ---- Terminal events (thin: small, scoped magnitudes so the
-        # centralized critic's Q-values stay bounded) ----
-        # Goal: always terminates.
+        # ---- Terminal events. Paper-faithful (Ocana et al. 2019): G = +20
+        # on a goal, no OOB / timeout penalty — episodes just end. The -20
+        # concede term is our self-play addition (the paper's offensive
+        # free-kick task cannot concede). ----
         if abs(ball.x) > max_x and abs(ball.y) <= goal_half_width:
             done = True
             if ball.x < 0:  # Yellow goal
-                rewards += 10.0
+                rewards += 20.0
                 self.match_result = 1
             else:  # Blue goal
-                rewards -= 10.0
+                rewards -= 20.0
                 self.match_result = -1
                 self.blue_goal_scored = True
             return rewards, done, truncated
 
-        # Ball OOB without goal.
+        # Ball OOB / robot OOB: episode ends, no penalty.
         if (abs(ball.x) > max_x or abs(ball.y) > max_y) and not in_grace:
             done = True
-            rewards -= 2.0
             self.match_result = -1
             return rewards, done, truncated
-
-        # Yellow robot OOB ends the episode with a penalty; blue robot OOB
-        # ends it without penalizing yellow (yellow didn't cause it).
         if not in_grace:
-            for r in yellows:
-                if abs(r.x) > max_x or abs(r.y) > max_y:
-                    done = True
-                    rewards -= 3.0
-                    self.match_result = -1
-                    return rewards, done, truncated
-            for r in blues:
+            for r in (*yellows, *blues):
                 if abs(r.x) > max_x or abs(r.y) > max_y:
                     done = True
                     return rewards, done, truncated
 
-        # Timeout.
+        # Timeout: episode ends, no penalty.
         if self.current_step >= self.max_steps:
             truncated = True
             done = True
-            rewards -= 1.0
             self.match_result = -1
             return rewards, done, truncated
 
-        # ---- Thin shaping: two terms only, both pointing at the objective.
-        # Move the ball toward goal, and (minimally) get a body to the ball
-        # so it can be moved at all. Everything else (distance potential,
-        # stand-still, possession reward, ball-direction, dribble, pass
-        # bonus) is removed — with a centralized critic, cooperation should
-        # emerge from the team-Q, not from hand-crafted reward terms. ----
+        # ---- Shaped reward — Ocana et al. 2019 JAL formulation (Eq. 16-19):
+        #   R = Σᵢ D^B_Aᵢ + max(maxᵢ D^Aᵢ_B, D^G_B)
+        #   D^B_Aᵢ : how much agent i closed distance to the (current) ball
+        #   D^Aᵢ_B : how much the ball moved toward agent i (pass shaping)
+        #   D^G_B  : how much the ball moved toward the goal
+        # All deltas, no timestep penalty. A single team reward, identical
+        # for both agents (JAL / centralized formulation). ----
         if self.reward_type == "dense":
-            dist_a = math.hypot(ya.x - ball.x, ya.y - ball.y)
-            dist_b = math.hypot(yb.x - ball.x, yb.y - ball.y)
-            dists = (dist_a, dist_b)
-            if self.last_dist_to_ball is None:
-                self.last_dist_to_ball = [dist_a, dist_b]
+            ya_pos = (ya.x, ya.y)
+            yb_pos = (yb.x, yb.y)
+            ball_now = (ball.x, ball.y)
+            if self.last_yellow_pos is None:
+                self.last_yellow_pos = [ya_pos, yb_pos]
+            if self.last_ball_pos is None:
+                self.last_ball_pos = ball_now
+            ball_prev = self.last_ball_pos
 
-            # Flat timestep penalty — just enough to discourage stalling.
-            rewards -= 0.005
+            # Σᵢ D^B_Aᵢ — sum over agents of distance closed to current ball.
+            sum_db_a = 0.0
+            for cur, prev in zip((ya_pos, yb_pos), self.last_yellow_pos):
+                d_prev = math.hypot(
+                    ball_now[0] - prev[0], ball_now[1] - prev[1]
+                )
+                d_cur = math.hypot(ball_now[0] - cur[0], ball_now[1] - cur[1])
+                sum_db_a += d_prev - d_cur
 
-            # Per-agent ball-closing delta (minimal "get to the ball").
-            for i in range(2):
-                delta = self.last_dist_to_ball[i] - dists[i]
-                rewards[i] += float(np.clip(delta * 5.0, -0.3, 0.3))
-            self.last_dist_to_ball = [dist_a, dist_b]
-
-            # Shared ball-to-goal delta — the one shaping term aimed at the
-            # actual objective.
-            ball_pos = np.array([ball.x, ball.y])
-            ga = np.array([-max_x, goal_half_width])
-            gb_pt = np.array([-max_x, -goal_half_width])
-            gv = gb_pt - ga
-            t = float(
-                np.clip(np.dot(ball_pos - ga, gv) / np.dot(gv, gv), 0.0, 1.0)
+            # maxᵢ D^Aᵢ_B — ball moved toward an agent (pass shaping).
+            max_da_b = max(
+                math.hypot(ball_prev[0] - cur[0], ball_prev[1] - cur[1])
+                - math.hypot(ball_now[0] - cur[0], ball_now[1] - cur[1])
+                for cur in (ya_pos, yb_pos)
             )
-            closest_goal_pt = ga + t * gv
-            dist_ball_goal = float(np.linalg.norm(ball_pos - closest_goal_pt))
-            if self.last_dist_ball_goal is not None:
-                delta_ball_goal = self.last_dist_ball_goal - dist_ball_goal
-                rewards += float(np.clip(delta_ball_goal * 10.0, -1.0, 1.0))
-            self.last_dist_ball_goal = dist_ball_goal
+
+            # D^G_B — ball moved toward the yellow attack goal.
+            dg_b = (
+                self._dist_ball_to_goal(*ball_prev)
+                - self._dist_ball_to_goal(*ball_now)
+            )
+
+            rewards += float(sum_db_a + max(max_da_b, dg_b))
+
+            self.last_yellow_pos = [ya_pos, yb_pos]
+            self.last_ball_pos = ball_now
 
             # Possession counter kept for the info-dict metric (no reward).
-            if (dist_a < 0.12) or ya.infrared or (dist_b < 0.12) or yb.infrared:
+            if (
+                math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.12 or ya.infrared
+                or math.hypot(yb.x - ball.x, yb.y - ball.y) < 0.12
+                or yb.infrared
+            ):
                 self.team_possession_steps += 1
 
         # ---- Pass detection: metric only, no reward. Kept so

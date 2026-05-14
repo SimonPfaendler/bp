@@ -618,49 +618,51 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             self.match_result = -1
             return rewards, done, truncated
 
-        # ---- Shaped reward — Ocana et al. 2019 JAL formulation (Eq. 16-19):
-        #   R = Σᵢ D^B_Aᵢ + max(maxᵢ D^Aᵢ_B, D^G_B)
-        #   D^B_Aᵢ : how much agent i closed distance to the (current) ball
-        #   D^Aᵢ_B : how much the ball moved toward agent i (pass shaping)
-        #   D^G_B  : how much the ball moved toward the goal
-        # All deltas, no timestep penalty. A single team reward, identical
-        # for both agents (JAL / centralized formulation). ----
+        # ---- Shaped reward — non-negative, scaled variant of the Ocana et
+        # al. 2019 JAL formulation (Eq. 16-19), ported from the 2v1 env:
+        #   per-agent : clip(D^B_Aᵢ · 5, 0, 0.5)   ball-closing
+        #   shared    : clip(max(D^Aᵢ_B, D^G_B) · 10, 0, 1.5)
+        # The paper's raw signed deltas telescope to ~0 over an episode; the
+        # non-negative clip + scaling is what keeps the critic non-flat. ----
         if self.reward_type == "dense":
-            ya_pos = (ya.x, ya.y)
-            yb_pos = (yb.x, yb.y)
+            # Per-step shaping ported from the (working) 2v1 env: strictly
+            # non-negative and scaled. Stalling earns exactly 0, so SAC cannot
+            # find a passive equilibrium that ties an active strategy. The
+            # paper-faithful raw signed deltas telescoped to ~0 over an
+            # episode, leaving the critic flat and the actor without gradient.
+            dist_a = math.hypot(ya.x - ball.x, ya.y - ball.y)
+            dist_b = math.hypot(yb.x - ball.x, yb.y - ball.y)
+            dists = (dist_a, dist_b)
+
+            # 1) Per-agent ball-closing (D^B_Aᵢ), positive part only.
+            if self.last_dist_to_ball is None:
+                self.last_dist_to_ball = [dist_a, dist_b]
+            for i in range(2):
+                delta = self.last_dist_to_ball[i] - dists[i]
+                rewards[i] += float(np.clip(delta * 5.0, 0.0, 0.5))
+            self.last_dist_to_ball = [dist_a, dist_b]
+
+            # 2) Shared max( ball→agent_i (pass shaping), ball→goal-mouth ).
             ball_now = (ball.x, ball.y)
-            if self.last_yellow_pos is None:
-                self.last_yellow_pos = [ya_pos, yb_pos]
+            dist_ball_goal = self._dist_ball_to_goal(*ball_now)
+            if self.last_dist_ball_goal is not None:
+                goal_delta = self.last_dist_ball_goal - dist_ball_goal
+            else:
+                goal_delta = 0.0
+            self.last_dist_ball_goal = dist_ball_goal
+
             if self.last_ball_pos is None:
-                self.last_ball_pos = ball_now
-            ball_prev = self.last_ball_pos
-
-            # Σᵢ D^B_Aᵢ — sum over agents of distance closed to current ball.
-            sum_db_a = 0.0
-            for cur, prev in zip((ya_pos, yb_pos), self.last_yellow_pos):
-                d_prev = math.hypot(
-                    ball_now[0] - prev[0], ball_now[1] - prev[1]
+                pass_delta = 0.0
+            else:
+                prev_bx, prev_by = self.last_ball_pos
+                pass_delta = max(
+                    math.hypot(prev_bx - ya.x, prev_by - ya.y) - dist_a,
+                    math.hypot(prev_bx - yb.x, prev_by - yb.y) - dist_b,
                 )
-                d_cur = math.hypot(ball_now[0] - cur[0], ball_now[1] - cur[1])
-                sum_db_a += d_prev - d_cur
-
-            # maxᵢ D^Aᵢ_B — ball moved toward an agent (pass shaping).
-            max_da_b = max(
-                math.hypot(ball_prev[0] - cur[0], ball_prev[1] - cur[1])
-                - math.hypot(ball_now[0] - cur[0], ball_now[1] - cur[1])
-                for cur in (ya_pos, yb_pos)
-            )
-
-            # D^G_B — ball moved toward the yellow attack goal.
-            dg_b = (
-                self._dist_ball_to_goal(*ball_prev)
-                - self._dist_ball_to_goal(*ball_now)
-            )
-
-            rewards += float(sum_db_a + max(max_da_b, dg_b))
-
-            self.last_yellow_pos = [ya_pos, yb_pos]
             self.last_ball_pos = ball_now
+
+            shared = max(pass_delta, goal_delta)
+            rewards += float(np.clip(shared * 10.0, 0.0, 1.5))
 
             # Possession counter kept for the info-dict metric (no reward).
             if (
@@ -670,10 +672,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             ):
                 self.team_possession_steps += 1
 
-        # ---- Pass detection: metric only, no reward. Kept so
-        # passes_per_episode / scored_after_pass stay observable; the +30
-        # pass bonus is removed so cooperation has to emerge from the
-        # centralized critic rather than from an explicit incentive. ----
+        # ---- Pass detection: +30 shared bonus on a clean carrier handoff
+        # (ball ≥ 0.5 m from the previous carrier, no blue touch in between),
+        # plus the passes_per_episode / scored_after_pass metrics. The
+        # centralized critic alone did not produce cooperation, so the
+        # explicit incentive from the 2v1 env is restored. ----
         ya_has = (
             math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.20
         ) or ya.infrared
@@ -705,6 +708,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 prev = yellows[self.last_yellow_carrier]
                 ball_to_prev = math.hypot(ball.x - prev.x, ball.y - prev.y)
                 if ball_to_prev > 0.5:
+                    rewards += 30.0    # Discrete pass-event bonus (shared).
                     self.passes_in_episode += 1
             self.last_yellow_carrier = current_carrier
             self.blue_touched_since_yellow = False

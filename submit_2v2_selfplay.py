@@ -32,17 +32,14 @@ def main():
         slurm_additional_parameters={"gres": "gpu:1"},
     )
 
-    # Self-play from the 154059 checkpoint: used as both init AND frozen blue.
-    frozen_path = (
-        "models/2v2_selfplay_SAC_dense_seed822_20260512-154059_final.zip"
-    )
-    init_path = (
-        "models/2v2_selfplay_SAC_dense_seed822_20260512-154059_final.zip"
-    )
+    # RUN A — build a competent attacker from scratch with the clean stack
+    # (MASAC + LayerNorm + thin reward). Blue stands still (frozen_path=None),
+    frozen_path = None
+    init_path = None
     reward_type = "dense"
     n_pairs = 24
     seeds = [822]
-    total_steps = 5_000_000
+    total_steps = 2_000_000
 
     jobs = []
     for seed in seeds:

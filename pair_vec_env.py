@@ -31,6 +31,15 @@ def _resolve_pair_indices(n_pairs: int, indices: VecEnvIndices) -> List[int]:
     return sorted({int(i) // 2 for i in indices})
 
 
+def _resolve_joint_indices(n_pairs: int, indices: VecEnvIndices) -> List[int]:
+    """For Joint*PairVecEnv each slot *is* a pair, so indices map directly."""
+    if indices is None:
+        return list(range(n_pairs))
+    if isinstance(indices, int):
+        return [indices]
+    return [int(i) for i in indices]
+
+
 class DummyPairVecEnv(VecEnv):
     """Single-process pair vec env. Useful for debugging / smoke tests."""
 
@@ -342,6 +351,238 @@ class SubprocPairVecEnv(VecEnv):
         else:
             slot_indices = list(indices)
         return [False for _ in slot_indices]
+
+    def seed(self, seed: Optional[int] = None):
+        if seed is None:
+            self._pending_seeds = [None] * self.n_pairs
+        else:
+            self._pending_seeds = [seed + i for i in range(self.n_pairs)]
+        return self._pending_seeds
+
+    def get_images(self):
+        return []
+
+
+# ===========================================================================
+# Joint variants — keep the 2-agent pairing intact for a centralized critic.
+# Instead of unstacking each pair into 2 independent SB3 slots, these expose
+# n_pairs slots with joint (2, OBS) observations and (2, ACT) actions, so the
+# replay buffer stores joint transitions (required for CTDE / MASAC).
+# ===========================================================================
+
+
+class JointDummyPairVecEnv(VecEnv):
+    """Single-process joint pair vec env. Useful for debugging / smoke tests."""
+
+    def __init__(self, env_fns: Sequence[Callable[[], Any]]):
+        self.envs = [fn() for fn in env_fns]
+        self.n_pairs = len(self.envs)
+        sample = self.envs[0]
+        super().__init__(
+            num_envs=self.n_pairs,
+            observation_space=sample.observation_space,
+            action_space=sample.action_space,
+        )
+        self._actions: Optional[np.ndarray] = None
+        self._buf_obs = np.zeros(
+            (self.num_envs,) + self.observation_space.shape,
+            dtype=self.observation_space.dtype,
+        )
+        self._pending_seeds: List[Optional[int]] = [None] * self.n_pairs
+
+    def reset(self) -> np.ndarray:
+        for i, env in enumerate(self.envs):
+            obs, _ = env.reset(seed=self._pending_seeds[i])
+            self._buf_obs[i] = obs
+        self._pending_seeds = [None] * self.n_pairs
+        return self._buf_obs.copy()
+
+    def step_async(self, actions: np.ndarray) -> None:
+        self._actions = actions
+
+    def step_wait(self):
+        rewards = np.zeros(self.num_envs, dtype=np.float32)
+        dones = np.zeros(self.num_envs, dtype=bool)
+        infos: List[dict] = [{} for _ in range(self.num_envs)]
+        for i, env in enumerate(self.envs):
+            obs, r, done, truncated, info = env.step(self._actions[i])
+            terminal = bool(done) or bool(truncated)
+            if terminal:
+                terminal_obs = obs.copy()
+                obs, _ = env.reset()
+                info = dict(info)
+                info["terminal_observation"] = terminal_obs
+                info["TimeLimit.truncated"] = bool(truncated and not done)
+            else:
+                info = dict(info)
+            infos[i] = info
+            self._buf_obs[i] = obs
+            # Team reward: collapse the per-agent (2,) reward to a scalar.
+            rewards[i] = float(np.mean(r))
+            dones[i] = terminal
+        return self._buf_obs.copy(), rewards, dones, infos
+
+    def close(self) -> None:
+        for env in self.envs:
+            env.close()
+
+    def env_method(
+        self,
+        method_name: str,
+        *method_args,
+        indices: VecEnvIndices = None,
+        **method_kwargs,
+    ):
+        idx = _resolve_joint_indices(self.n_pairs, indices)
+        return [
+            getattr(self.envs[i], method_name)(*method_args, **method_kwargs)
+            for i in idx
+        ]
+
+    def get_attr(self, attr_name: str, indices: VecEnvIndices = None):
+        idx = _resolve_joint_indices(self.n_pairs, indices)
+        return [getattr(self.envs[i], attr_name) for i in idx]
+
+    def set_attr(
+        self, attr_name: str, value: Any, indices: VecEnvIndices = None
+    ) -> None:
+        for i in _resolve_joint_indices(self.n_pairs, indices):
+            setattr(self.envs[i], attr_name, value)
+
+    def env_is_wrapped(self, wrapper_class, indices: VecEnvIndices = None):
+        idx = _resolve_joint_indices(self.n_pairs, indices)
+        return [False for _ in idx]
+
+    def seed(self, seed: Optional[int] = None):
+        if seed is None:
+            self._pending_seeds = [None] * self.n_pairs
+        else:
+            self._pending_seeds = [seed + i for i in range(self.n_pairs)]
+        return self._pending_seeds
+
+    def get_images(self):
+        return []
+
+
+class JointSubprocPairVecEnv(VecEnv):
+    """Joint pair vec env with one subprocess per pair. Reuses _pair_worker —
+    the worker already ships pair-shaped (2, OBS)/(2,) tensors, so this just
+    skips the unstacking."""
+
+    def __init__(
+        self, env_fns: Sequence[Callable[[], Any]], start_method: str = "spawn"
+    ):
+        self.n_pairs = len(env_fns)
+        self.waiting = False
+        self.closed = False
+
+        ctx = mp.get_context(start_method)
+        self.remotes, self.work_remotes = zip(
+            *[ctx.Pipe() for _ in range(self.n_pairs)]
+        )
+        self.processes = []
+        for work_remote, remote, fn in zip(
+            self.work_remotes, self.remotes, env_fns
+        ):
+            args = (work_remote, remote, CloudpickleWrapper(fn))
+            p = ctx.Process(target=_pair_worker, args=args, daemon=True)
+            p.start()
+            self.processes.append(p)
+            work_remote.close()
+
+        # Probe the first env for the joint (pair-level) spaces.
+        self.remotes[0].send(("get_attr", "observation_space"))
+        obs_space = self.remotes[0].recv()
+        self.remotes[0].send(("get_attr", "action_space"))
+        act_space = self.remotes[0].recv()
+
+        super().__init__(
+            num_envs=self.n_pairs,
+            observation_space=obs_space,
+            action_space=act_space,
+        )
+
+        self._buf_obs = np.zeros(
+            (self.num_envs,) + obs_space.shape, dtype=obs_space.dtype
+        )
+        self._pending_seeds: List[Optional[int]] = [None] * self.n_pairs
+
+    def reset(self):
+        for remote, seed in zip(self.remotes, self._pending_seeds):
+            remote.send(("reset", seed))
+        for i, remote in enumerate(self.remotes):
+            obs, _ = remote.recv()
+            self._buf_obs[i] = obs
+        self._pending_seeds = [None] * self.n_pairs
+        return self._buf_obs.copy()
+
+    def step_async(self, actions: np.ndarray) -> None:
+        for i, remote in enumerate(self.remotes):
+            remote.send(("step", actions[i]))
+        self.waiting = True
+
+    def step_wait(self):
+        rewards = np.zeros(self.num_envs, dtype=np.float32)
+        dones = np.zeros(self.num_envs, dtype=bool)
+        infos: List[dict] = [{} for _ in range(self.num_envs)]
+        for i, remote in enumerate(self.remotes):
+            obs, r, done, truncated, info, terminal_obs = remote.recv()
+            terminal = done or truncated
+            self._buf_obs[i] = obs
+            rewards[i] = float(np.mean(r))
+            dones[i] = terminal
+            if terminal:
+                info = dict(info)
+                info["terminal_observation"] = terminal_obs
+                info["TimeLimit.truncated"] = bool(truncated and not done)
+            else:
+                info = dict(info)
+            infos[i] = info
+        self.waiting = False
+        return self._buf_obs.copy(), rewards, dones, infos
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        if self.waiting:
+            for remote in self.remotes:
+                remote.recv()
+        for remote in self.remotes:
+            remote.send(("close", None))
+        for p in self.processes:
+            p.join()
+        self.closed = True
+
+    def env_method(
+        self,
+        method_name: str,
+        *method_args,
+        indices: VecEnvIndices = None,
+        **method_kwargs,
+    ):
+        idx = _resolve_joint_indices(self.n_pairs, indices)
+        for i in idx:
+            self.remotes[i].send(
+                ("env_method", (method_name, method_args, method_kwargs))
+            )
+        return [self.remotes[i].recv() for i in idx]
+
+    def get_attr(self, attr_name: str, indices: VecEnvIndices = None):
+        idx = _resolve_joint_indices(self.n_pairs, indices)
+        for i in idx:
+            self.remotes[i].send(("get_attr", attr_name))
+        return [self.remotes[i].recv() for i in idx]
+
+    def set_attr(
+        self, attr_name: str, value: Any, indices: VecEnvIndices = None
+    ) -> None:
+        for i in _resolve_joint_indices(self.n_pairs, indices):
+            self.remotes[i].send(("set_attr", (attr_name, value)))
+            self.remotes[i].recv()
+
+    def env_is_wrapped(self, wrapper_class, indices: VecEnvIndices = None):
+        idx = _resolve_joint_indices(self.n_pairs, indices)
+        return [False for _ in idx]
 
     def seed(self, seed: Optional[int] = None):
         if seed is None:

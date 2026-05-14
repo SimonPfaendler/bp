@@ -1,8 +1,13 @@
-"""Train SAC self-play in 2v2 SSL.
+"""Train MASAC self-play in 2v2 SSL (CTDE — centralized critic).
 
-Blue side controlled by a frozen SAC checkpoint (no gradients). Yellow side
-is the training side; same checkpoint is loaded as yellow initialization for
-the first iteration so both teams start at parity.
+Blue side controlled by a frozen SAC/MASAC checkpoint (no gradients). Yellow
+side is the training side; same checkpoint is loaded as yellow initialization
+for the first iteration so both teams start at parity.
+
+MASAC keeps a parameter-shared decentralized actor (38 -> 6, transfers cleanly
+from prior SAC checkpoints) but replaces the per-agent critic with a
+centralized one that scores the joint (2x38) obs + (2x6) action — giving the
+policy gradient team-level credit assignment.
 
 For subsequent iterations, set --frozen_path to the previous run's _final.zip
 to keep climbing the response ladder.
@@ -17,14 +22,15 @@ from collections import deque
 import numpy as np
 import torch
 import wandb
-from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import (
     BaseCallback,
     CallbackList,
     CheckpointCallback,
 )
 
-from pair_vec_env import DummyPairVecEnv, SubprocPairVecEnv
+from masac import MASAC
+from masac_policy import MASACPolicy
+from pair_vec_env import JointDummyPairVecEnv, JointSubprocPairVecEnv
 from ssl_rl_2v2_selfplay import SSL2v2SelfPlayEnv
 
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -53,6 +59,22 @@ def make_env_fn(reward_type, seed, frozen_path):
         env.reset(seed=seed)
         return env
     return _init
+
+
+def _load_any(path):
+    """Load a checkpoint that may be a stock-SAC run or a MASAC iteration.
+
+    SB3 stores the policy class in the zip, so SAC.load reconstructs whichever
+    one it finds. MASAC.load is the fallback for any algorithm-level mismatch.
+    The caller only reads `.policy.state_dict()`.
+    """
+    from stable_baselines3 import SAC
+
+    try:
+        return SAC.load(path, device="cpu")
+    except Exception as e:
+        print(f"  SAC.load failed ({e}); retrying with MASAC.load")
+        return MASAC.load(path, device="cpu")
 
 
 class StatsCallback(BaseCallback):
@@ -107,15 +129,17 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc):
         make_env_fn(reward_type, seed + i, frozen_path)
         for i in range(n_envs)
     ]
+    # Joint variants keep the 2-agent pairing intact so the replay buffer
+    # stores joint transitions for the centralized critic.
     if use_subproc and n_envs > 1:
-        return SubprocPairVecEnv(fns)
-    return DummyPairVecEnv(fns)
+        return JointSubprocPairVecEnv(fns)
+    return JointDummyPairVecEnv(fns)
 
 
 def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           total_steps=5_000_000):
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_name = f"2v2_selfplay_SAC_{reward_type}_seed{seed}_{timestamp}"
+    run_name = f"2v2_selfplay_MASAC_{reward_type}_seed{seed}_{timestamp}"
     log_dir = os.path.join(LOG_DIR, run_name)
 
     wandb.init(
@@ -123,7 +147,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         name=run_name,
         sync_tensorboard=True,
         config={
-            "algo": "SAC",
+            "algo": "MASAC",
             "reward_type": reward_type,
             "seed": seed,
             "n_envs": n_envs,
@@ -138,48 +162,50 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         frozen_path=frozen_path, use_subproc=True,
     )
     print(
-        f"2v2 self-play | frozen={frozen_path} | seed={seed} | "
-        f"envs={n_envs} | slots={env.num_envs}"
+        f"2v2 MASAC self-play | frozen={frozen_path} | seed={seed} | "
+        f"envs={n_envs} | pairs={env.num_envs}"
     )
 
     init_load = init_path or frozen_path
-    # Build a fresh SAC with the desired auto-tuned ent_coef. If we have a
-    # checkpoint we transfer just the policy weights (actor + critic networks)
-    # so we keep prior learning but start with a fresh entropy optimizer.
-    # This is a workaround for SB3's inability to switch a model saved with
-    # fixed ent_coef to auto_X via custom_objects on load.
+    # batch_size halved vs the old IL setup (2048 -> 1024): each sample is now
+    # a joint pair (~2 transitions of information), so this keeps the effective
+    # transition count comparable.
     policy_kwargs = dict(net_arch=[512, 512, 512])
-    model = SAC(
-        policy="MlpPolicy", env=env, verbose=1, device="cuda",
+    model = MASAC(
+        policy=MASACPolicy, env=env, verbose=1, device="cuda",
         tensorboard_log=log_dir, seed=seed,
-        train_freq=1, gradient_steps=1, batch_size=2048,
+        train_freq=1, gradient_steps=1, batch_size=1024,
         buffer_size=1_000_000, learning_rate=3e-4,
         learning_starts=10000, ent_coef=0.2, target_entropy="auto",
         policy_kwargs=policy_kwargs, gamma=0.99,
     )
     if init_load and os.path.exists(init_load):
-        print(f"Transferring policy weights from {init_load}")
-        old_model = SAC.load(init_load, device="cpu")
+        print(f"Transferring actor weights from {init_load}")
+        # Only the decentralized actor transfers: it is single-agent (38 -> 6)
+        # with the same architecture as prior SAC checkpoints. The centralized
+        # critic has a different input dim (88 vs 44) and a different meaning,
+        # so it starts fresh. The init checkpoint may be an old stock-SAC run
+        # or a previous MASAC iteration — SAC.load reconstructs whichever
+        # policy_class the zip stored, and we only read its state_dict.
+        old_model = _load_any(init_load)
         new_state = model.policy.state_dict()
         old_state = old_model.policy.state_dict()
         transferred, skipped = [], []
         for k, v in old_state.items():
-            if k in new_state and new_state[k].shape == v.shape:
+            if (
+                k.startswith("actor.")
+                and k in new_state
+                and new_state[k].shape == v.shape
+            ):
                 new_state[k] = v
                 transferred.append(k)
             else:
-                old_shape = tuple(v.shape)
-                new_shape = (
-                    tuple(new_state[k].shape) if k in new_state else None
-                )
-                skipped.append((k, old_shape, new_shape))
+                skipped.append(k)
         model.policy.load_state_dict(new_state)
         print(
-            f"Partial transfer: {len(transferred)} params copied, "
-            f"{len(skipped)} skipped"
+            f"Actor transfer: {len(transferred)} params copied, "
+            f"{len(skipped)} skipped (critic + mismatches)"
         )
-        for k, os_, ns_ in skipped:
-            print(f"  skip {k}: old={os_} new={ns_}")
         del old_model
     else:
         print(f"No init checkpoint at {init_load}; training from scratch")

@@ -32,13 +32,12 @@ def main():
         slurm_additional_parameters={"gres": "gpu:1"},
     )
 
-    # v5 self-play (IBR iteration): 153210 as both init AND frozen blue.
-    # Each iteration the new champion plays against its frozen self.
+    # Self-play from the 154059 checkpoint: used as both init AND frozen blue.
     frozen_path = (
-        "models/2v2_selfplay_SAC_dense_seed822_20260513-153210_final.zip"
+        "models/2v2_selfplay_SAC_dense_seed822_20260512-154059_final.zip"
     )
     init_path = (
-        "models/2v2_selfplay_SAC_dense_seed822_20260513-153210_final.zip"
+        "models/2v2_selfplay_SAC_dense_seed822_20260512-154059_final.zip"
     )
     reward_type = "dense"
     n_pairs = 24

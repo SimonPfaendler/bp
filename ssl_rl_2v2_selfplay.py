@@ -593,12 +593,18 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
         # Yellow robot OOB: heavy penalty (matches 1v1 level 4-5 scale,
         # softened to -50 because 2v2 has more bodies that bump near edges).
+        # Blue robot OOB also ends the episode but without penalizing yellow
+        # — yellow didn't cause it (match_result stays 0 = no goal).
         if not in_grace:
             for r in yellows:
                 if abs(r.x) > max_x or abs(r.y) > max_y:
                     done = True
                     rewards -= 50.0
                     self.match_result = -1
+                    return rewards, done, truncated
+            for r in blues:
+                if abs(r.x) > max_x or abs(r.y) > max_y:
+                    done = True
                     return rewards, done, truncated
 
         # Timeout: penalty avoids "wait for episode to end" stalls.
@@ -621,11 +627,14 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # Time penalty: ramps with episode progress; heavier when ball
             # is in own half (push it out) than attack half (defending
             # close to opponent goal shouldn't be over-penalized).
+            # Halved from 0.02/0.04 — the previous magnitude made the whole
+            # reward landscape uniformly negative, so "do nothing" became
+            # optimal. A reachable positive path needs to exist.
             progress = self.current_step / self.max_steps
             if ball.x < 0:  # attack half
-                rewards -= 0.02 * (1.0 + 2.0 * progress)
+                rewards -= 0.01 * (1.0 + 2.0 * progress)
             else:  # own half
-                rewards -= 0.04 * (1.0 + 2.0 * progress)
+                rewards -= 0.02 * (1.0 + 2.0 * progress)
 
             # Per-agent distance potential: small constant gradient toward
             # the ball regardless of motion.
@@ -633,11 +642,14 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 rewards[i] += 0.05 * (1.0 - dists[i] / max_dist)
 
             # Per-agent stand-still penalty: kills "do nothing" strategies.
+            # Raised 0.05 → 0.15 so passivity over a full episode (~-300)
+            # is strictly worse than any single mistake (OOB -50, concede
+            # -50). Standing still must no longer be the safe option.
             for i, agent in enumerate(yellows):
                 speed = math.hypot(agent.v_x, agent.v_y)
                 has_ball = (dists[i] < 0.12) or agent.infrared
                 if speed < 0.1 and not has_ball:
-                    rewards[i] -= 0.05
+                    rewards[i] -= 0.15
 
             # Per-agent robot-to-ball delta (signed: penalize moving away).
             for i in range(2):

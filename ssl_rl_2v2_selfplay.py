@@ -609,10 +609,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                     done = True
                     return rewards, done, truncated
 
-        # Timeout: episode ends, no penalty.
+        # Timeout: truncation, not termination. Keep done=False so the vec
+        # env sets TimeLimit.truncated=True and SAC bootstraps off the
+        # terminal observation instead of treating step 250 as an absorbing
+        # zero-value state.
         if self.current_step >= self.max_steps:
             truncated = True
-            done = True
             self.match_result = -1
             return rewards, done, truncated
 

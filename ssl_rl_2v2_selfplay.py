@@ -562,7 +562,6 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         max_x = self.field.length / 2.0
         max_y = self.field.width / 2.0
         goal_half_width = self.field.goal_width / 2.0
-        max_dist = math.hypot(self.field.length, self.field.width)
 
         rewards = np.zeros(2, dtype=np.float32)
         done = False
@@ -570,36 +569,34 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
         in_grace = self.total_steps <= self.oob_grace_steps
 
-        # Goal: always terminates. Speed bonus + pass bonus on yellow goal.
+        # ---- Terminal events (thin: small, scoped magnitudes so the
+        # centralized critic's Q-values stay bounded) ----
+        # Goal: always terminates.
         if abs(ball.x) > max_x and abs(ball.y) <= goal_half_width:
             done = True
             if ball.x < 0:  # Yellow goal
-                rewards += 100.0
-                rewards += (self.max_steps - self.current_step) * 0.01
-                rewards += 50.0 * min(self.passes_in_episode, 2)
+                rewards += 10.0
                 self.match_result = 1
             else:  # Blue goal
-                rewards -= 50.0
+                rewards -= 10.0
                 self.match_result = -1
                 self.blue_goal_scored = True
             return rewards, done, truncated
 
-        # Ball OOB without goal: kills the OOB-exit reward hack.
+        # Ball OOB without goal.
         if (abs(ball.x) > max_x or abs(ball.y) > max_y) and not in_grace:
             done = True
-            rewards -= 5.0
+            rewards -= 2.0
             self.match_result = -1
             return rewards, done, truncated
 
-        # Yellow robot OOB: heavy penalty (matches 1v1 level 4-5 scale,
-        # softened to -50 because 2v2 has more bodies that bump near edges).
-        # Blue robot OOB also ends the episode but without penalizing yellow
-        # — yellow didn't cause it (match_result stays 0 = no goal).
+        # Yellow robot OOB ends the episode with a penalty; blue robot OOB
+        # ends it without penalizing yellow (yellow didn't cause it).
         if not in_grace:
             for r in yellows:
                 if abs(r.x) > max_x or abs(r.y) > max_y:
                     done = True
-                    rewards -= 50.0
+                    rewards -= 3.0
                     self.match_result = -1
                     return rewards, done, truncated
             for r in blues:
@@ -607,58 +604,38 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                     done = True
                     return rewards, done, truncated
 
-        # Timeout: penalty avoids "wait for episode to end" stalls.
+        # Timeout.
         if self.current_step >= self.max_steps:
             truncated = True
             done = True
-            rewards -= 10.0
+            rewards -= 1.0
             self.match_result = -1
             return rewards, done, truncated
 
-        # Per-step shaping
+        # ---- Thin shaping: two terms only, both pointing at the objective.
+        # Move the ball toward goal, and (minimally) get a body to the ball
+        # so it can be moved at all. Everything else (distance potential,
+        # stand-still, possession reward, ball-direction, dribble, pass
+        # bonus) is removed — with a centralized critic, cooperation should
+        # emerge from the team-Q, not from hand-crafted reward terms. ----
         if self.reward_type == "dense":
             dist_a = math.hypot(ya.x - ball.x, ya.y - ball.y)
             dist_b = math.hypot(yb.x - ball.x, yb.y - ball.y)
             dists = (dist_a, dist_b)
-
             if self.last_dist_to_ball is None:
                 self.last_dist_to_ball = [dist_a, dist_b]
 
-            # Time penalty: ramps with episode progress; heavier when ball
-            # is in own half (push it out) than attack half (defending
-            # close to opponent goal shouldn't be over-penalized).
-            # Halved from 0.02/0.04 — the previous magnitude made the whole
-            # reward landscape uniformly negative, so "do nothing" became
-            # optimal. A reachable positive path needs to exist.
-            progress = self.current_step / self.max_steps
-            if ball.x < 0:  # attack half
-                rewards -= 0.01 * (1.0 + 2.0 * progress)
-            else:  # own half
-                rewards -= 0.02 * (1.0 + 2.0 * progress)
+            # Flat timestep penalty — just enough to discourage stalling.
+            rewards -= 0.005
 
-            # Per-agent distance potential: small constant gradient toward
-            # the ball regardless of motion.
-            for i in range(2):
-                rewards[i] += 0.05 * (1.0 - dists[i] / max_dist)
-
-            # Per-agent stand-still penalty: kills "do nothing" strategies.
-            # Raised 0.05 → 0.15 so passivity over a full episode (~-300)
-            # is strictly worse than any single mistake (OOB -50, concede
-            # -50). Standing still must no longer be the safe option.
-            for i, agent in enumerate(yellows):
-                speed = math.hypot(agent.v_x, agent.v_y)
-                has_ball = (dists[i] < 0.12) or agent.infrared
-                if speed < 0.1 and not has_ball:
-                    rewards[i] -= 0.15
-
-            # Per-agent robot-to-ball delta (signed: penalize moving away).
+            # Per-agent ball-closing delta (minimal "get to the ball").
             for i in range(2):
                 delta = self.last_dist_to_ball[i] - dists[i]
-                rewards[i] += float(np.clip(delta * 5.0, -0.5, 0.5))
+                rewards[i] += float(np.clip(delta * 5.0, -0.3, 0.3))
             self.last_dist_to_ball = [dist_a, dist_b]
 
-            # Shared ball-to-goal delta (signed: penalize ball moving away
-            # from yellow attack goal).
+            # Shared ball-to-goal delta — the one shaping term aimed at the
+            # actual objective.
             ball_pos = np.array([ball.x, ball.y])
             ga = np.array([-max_x, goal_half_width])
             gb_pt = np.array([-max_x, -goal_half_width])
@@ -668,25 +645,19 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             )
             closest_goal_pt = ga + t * gv
             dist_ball_goal = float(np.linalg.norm(ball_pos - closest_goal_pt))
-
             if self.last_dist_ball_goal is not None:
                 delta_ball_goal = self.last_dist_ball_goal - dist_ball_goal
-                rewards += float(np.clip(delta_ball_goal * 10.0, -1.0, 1.5))
+                rewards += float(np.clip(delta_ball_goal * 10.0, -1.0, 1.0))
             self.last_dist_ball_goal = dist_ball_goal
 
-            # Shared possession
+            # Possession counter kept for the info-dict metric (no reward).
             if (dist_a < 0.12) or ya.infrared or (dist_b < 0.12) or yb.infrared:
                 self.team_possession_steps += 1
-                rewards += 0.01
 
-            # Ball direction: ball flying toward yellow attack goal (-x)
-            # earns extra; toward blue goal (+x) is penalized.
-            if ball.v_x < -0.5:
-                rewards += 0.02 * min(-ball.v_x, 3.0)
-            elif ball.v_x > 0.5:
-                rewards -= 0.02 * min(ball.v_x, 3.0)
-
-        # Pass detection (yellow-side carriers; any blue touch resets)
+        # ---- Pass detection: metric only, no reward. Kept so
+        # passes_per_episode / scored_after_pass stay observable; the +30
+        # pass bonus is removed so cooperation has to emerge from the
+        # centralized critic rather than from an explicit incentive. ----
         ya_has = (
             math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.20
         ) or ya.infrared
@@ -713,17 +684,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 and current_carrier != self.last_yellow_carrier
                 and not self.blue_touched_since_yellow
             ):
-                # Strict pass detection: require the ball to be at least 0.5m
-                # from the previous carrier at the moment of transfer. Filters
-                # touch-swap artefacts where two yellows are both close to a
-                # slow-rolling ball and the carrier flag flips back and forth
-                # — that's ping-pong, not a real pass.
+                # Strict pass detection: ball at least 0.5m from the previous
+                # carrier at transfer, filtering touch-swap ping-pong.
                 prev = yellows[self.last_yellow_carrier]
                 ball_to_prev = math.hypot(ball.x - prev.x, ball.y - prev.y)
                 if ball_to_prev > 0.5:
                     self.passes_in_episode += 1
-                    if self.reward_type == "dense":
-                        rewards += 30.0
             self.last_yellow_carrier = current_carrier
             self.blue_touched_since_yellow = False
 

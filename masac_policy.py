@@ -21,7 +21,10 @@ over the (2,38) obs) and `action_dim=12`, i.e. exactly Q(joint_obs, joint_act).
 import numpy as np
 import torch as th
 from gymnasium import spaces
+from torch import nn
 
+from stable_baselines3.common.policies import ContinuousCritic
+from stable_baselines3.common.preprocessing import get_action_dim
 from stable_baselines3.common.torch_layers import FlattenExtractor
 from stable_baselines3.common.type_aliases import PyTorchObs
 from stable_baselines3.sac.policies import (
@@ -56,14 +59,66 @@ class MASACActor(Actor):
         return mean_actions, log_std, {}
 
 
+class MASACCritic(ContinuousCritic):
+    """Centralized twin-Q critic with LayerNorm between layers.
+
+    Same interface as `ContinuousCritic` (joint obs (2,38) -> FlattenExtractor
+    -> 76; joint action 12; input 88), but each Q-network interleaves a
+    `LayerNorm` after every hidden linear. LayerNorm bounds the activations
+    and is the standard, well-established fix for the unbounded Q-value
+    growth that plain SAC critics fall into on this task.
+    """
+
+    def __init__(
+        self, observation_space, action_space, net_arch, features_extractor,
+        features_dim, activation_fn=nn.ReLU, normalize_images=True,
+        n_critics=2, share_features_extractor=True,
+    ):
+        super().__init__(
+            observation_space, action_space, net_arch, features_extractor,
+            features_dim, activation_fn, normalize_images, n_critics,
+            share_features_extractor,
+        )
+        # Rebuild the q-networks with LayerNorm; add_module overwrites the
+        # stock qf{idx} modules created by ContinuousCritic.__init__.
+        action_dim = get_action_dim(self.action_space)
+        self.q_networks = []
+        for idx in range(n_critics):
+            q_net = self._build_ln_qnet(
+                features_dim + action_dim, net_arch, activation_fn
+            )
+            self.add_module(f"qf{idx}", q_net)
+            self.q_networks.append(q_net)
+
+    @staticmethod
+    def _build_ln_qnet(in_dim, net_arch, activation_fn):
+        layers = []
+        last = in_dim
+        for hidden in net_arch:
+            layers += [
+                nn.Linear(last, hidden),
+                nn.LayerNorm(hidden),
+                activation_fn(),
+            ]
+            last = hidden
+        layers.append(nn.Linear(last, 1))
+        return nn.Sequential(*layers)
+
+
 class MASACPolicy(SACPolicy):
     """SAC policy with a parameter-shared actor and a centralized critic.
 
-    Only `make_actor` is overridden — the actor is built on single-agent
-    spaces. `make_critic` stays stock: `ContinuousCritic` on the joint spaces
-    gives `features_dim=76` (FlattenExtractor over (2,38)) and `action_dim=12`,
-    i.e. a centralized Q(joint_obs, joint_action).
+    `make_actor` builds the actor on single-agent spaces. `make_critic` builds
+    a `MASACCritic` (LayerNorm) on the joint spaces — `features_dim=76`
+    (FlattenExtractor over (2,38)) and `action_dim=12`, i.e. a centralized
+    Q(joint_obs, joint_action).
     """
+
+    def make_critic(self, features_extractor=None) -> MASACCritic:
+        critic_kwargs = self._update_features_extractor(
+            self.critic_kwargs, features_extractor
+        )
+        return MASACCritic(**critic_kwargs).to(self.device)
 
     def make_actor(self, features_extractor=None) -> MASACActor:
         single_obs_space = spaces.Box(

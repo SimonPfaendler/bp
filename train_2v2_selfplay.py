@@ -175,7 +175,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         train_freq=48, gradient_steps=96, batch_size=2048,
         buffer_size=500_000, learning_rate=3e-4,
         learning_starts=10000, ent_coef=0.1, target_entropy="auto",
-        critic_warmup_grad_steps=0, max_grad_norm=10.0,
+        critic_warmup_grad_steps=0, max_grad_norm=0.0,
         policy_kwargs=policy_kwargs, gamma=0.995,
     )
     if init_load and os.path.exists(init_load):

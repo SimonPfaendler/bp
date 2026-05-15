@@ -25,7 +25,7 @@ from rsoccer_gym.ssl.ssl_gym_base import SSLBaseEnv
 from stable_baselines3 import SAC
 
 
-SINGLE_OBS_DIM_BASE = 40  # 38 base features + cos(theta), sin(theta) at 38, 39
+SINGLE_OBS_DIM_BASE = 52  # world-frame layout, see _egocentric_obs docstring
 ROLE_INDEX_DIM = 2
 SINGLE_ACT_DIM = 6
 N_YELLOW = 2
@@ -258,56 +258,34 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self, self_robot, mate, opp_list,
         attack_goal_x, is_yellow, idx,
     ) -> np.ndarray:
+        """World-frame obs layout, modelled on the 1v1 env (which worked).
+
+        Everything position/velocity-wise is in WORLD frame so the policy's
+        world-frame action output naturally aligns with what it sees. The
+        only robot-frame quantities are the two relative angles (ball, goal)
+        kept as convenience features — they are mirror-anti-invariant
+        (negate under y-reflection).
+
+        Layout (52 base dims):
+            [ 0:5 ] BALL      pos(x,y), vel(x,y), dist_ball_goal
+            [ 5:18] SELF      pos, sin/cos θ, vel, v_theta, infrared,
+                              dist_to_ball, rel_angle_ball, rel_angle_goal,
+                              dribble_meter, must_release
+            [18:27] MATE      pos, sin/cos θ, vel, v_theta, infrared, dist
+            [27:37] OPP1      pos, sin/cos θ, vel, v_theta, infrared, dist,
+                              (self_dist − opp1_dist)
+            [37:46] OPP2      pos, sin/cos θ, vel, v_theta, infrared, dist
+            [46:50] PRED      ball_pred (world) + relative to self
+            [50:52] TEAM      team_has_ball, i_am_closer
+        """
         ball = self.frame.ball
         max_x = self.field.length / 2.0
         max_y = self.field.width / 2.0
         max_dist = math.hypot(self.field.length, self.field.width)
-
-        theta = math.radians(self_robot.theta)
-        cos_t, sin_t = math.cos(theta), math.sin(theta)
-
-        def to_local_pos(x, y):
-            dx, dy = x - self_robot.x, y - self_robot.y
-            return dx * cos_t + dy * sin_t, -dx * sin_t + dy * cos_t
-
-        def to_local_vec(vx, vy):
-            return vx * cos_t + vy * sin_t, -vx * sin_t + vy * cos_t
-
-        # Closest opponent only — keeps obs shape compatible with 2v1 IL.
-        opp = min(
-            opp_list,
-            key=lambda o: math.hypot(o.x - self_robot.x, o.y - self_robot.y),
-        )
-
-        own_vx, own_vy = to_local_vec(self_robot.v_x, self_robot.v_y)
-        own_w = self_robot.v_theta
-        own_ir = 1.0 if self_robot.infrared else 0.0
-        self_dist_ball = math.hypot(
-            self_robot.x - ball.x, self_robot.y - ball.y
-        )
-        self_has_ball = (self_dist_ball < 0.12) or self_robot.infrared
-        mate_dist_ball = math.hypot(mate.x - ball.x, mate.y - ball.y)
-        mate_has_ball = (mate_dist_ball < 0.12) or mate.infrared
-
-        ball_rx, ball_ry = to_local_pos(ball.x, ball.y)
-        ball_rvx, ball_rvy = to_local_vec(ball.v_x, ball.v_y)
-        ball_dist = math.hypot(ball_rx, ball_ry)
-        ball_bearing = math.atan2(ball_ry, ball_rx)
-
-        pred_x = np.clip(ball.x + ball.v_x * 0.5, -max_x, max_x)
-        pred_y = np.clip(ball.y + ball.v_y * 0.5, -max_y, max_y)
-        pred_rx, pred_ry = to_local_pos(pred_x, pred_y)
-
-        mate_rx, mate_ry = to_local_pos(mate.x, mate.y)
-        mate_rvx, mate_rvy = to_local_vec(mate.v_x, mate.v_y)
-        mate_dist = math.hypot(mate_rx, mate_ry)
-        d_theta = math.radians(mate.theta) - theta
-
-        opp_rx, opp_ry = to_local_pos(opp.x, opp.y)
-        opp_rvx, opp_rvy = to_local_vec(opp.v_x, opp.v_y)
-        opp_dist = math.hypot(opp_rx, opp_ry)
-
         gh = self.field.goal_width / 2.0
+
+        # Closest point on the attack goal mouth to the ball — for both the
+        # dist_ball_goal feature and the rel_angle_goal feature.
         ball_pos = np.array([ball.x, ball.y])
         ga = np.array([attack_goal_x, gh])
         gb = np.array([attack_goal_x, -gh])
@@ -315,31 +293,28 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         t = float(
             np.clip(np.dot(ball_pos - ga, gv) / np.dot(gv, gv), 0.0, 1.0)
         )
-        attack_pt = ga + t * gv
-        attack_rx, attack_ry = to_local_pos(attack_pt[0], attack_pt[1])
-        attack_dist = math.hypot(attack_rx, attack_ry)
+        closest_goal_pt = ga + t * gv
+        dist_ball_goal = float(np.linalg.norm(ball_pos - closest_goal_pt))
 
-        own_goal_x = -attack_goal_x
-        own_rx, own_ry = to_local_pos(own_goal_x, 0.0)
+        # Self
+        theta = math.radians(self_robot.theta)
+        sin_t, cos_t = math.sin(theta), math.cos(theta)
+        self_dist_ball = math.hypot(
+            self_robot.x - ball.x, self_robot.y - ball.y
+        )
+        self_has_ball = (self_dist_ball < 0.12) or self_robot.infrared
 
-        # Wall distances: the x-walls are absolute features in the world,
-        # so the slots the policy learned as "near attack wall" / "near own
-        # wall" must be team-aware. Swap the two x-features for blue so the
-        # semantic stays consistent across teams. y-walls are symmetric.
-        d_wall_attack_side_x = (self_robot.x - (-max_x)) / max_x
-        d_wall_own_side_x = (max_x - self_robot.x) / max_x
-        if not is_yellow:
-            d_wall_attack_side_x, d_wall_own_side_x = (
-                d_wall_own_side_x, d_wall_attack_side_x,
-            )
-        d_wall_neg_x = d_wall_attack_side_x
-        d_wall_pos_x = d_wall_own_side_x
-        d_wall_neg_y = (self_robot.y - (-max_y)) / max_y
-        d_wall_pos_y = (max_y - self_robot.y) / max_y
+        # Relative angle self → ball (in self's frame), in [-π, π].
+        ang_to_ball = math.atan2(ball.y - self_robot.y, ball.x - self_robot.x)
+        rel_angle_ball = (ang_to_ball - theta + math.pi) % (2 * math.pi) - math.pi
+        # Relative angle self → attack-goal point (in self's frame).
+        ang_to_goal = math.atan2(
+            closest_goal_pt[1] - self_robot.y,
+            closest_goal_pt[0] - self_robot.x,
+        )
+        rel_angle_goal = (ang_to_goal - theta + math.pi) % (2 * math.pi) - math.pi
 
-        team_has_ball = 1.0 if (self_has_ball or mate_has_ball) else 0.0
-        i_am_closer = 1.0 if self_dist_ball < mate_dist_ball else 0.0
-
+        # Dribble state for this team / agent.
         is_dribbling = (
             self.is_dribbling_y if is_yellow else self.is_dribbling_b
         )
@@ -349,7 +324,6 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         must_release = (
             self.must_release_y if is_yellow else self.must_release_b
         )
-
         if is_dribbling[idx] and dribble_start[idx] is not None:
             start = dribble_start[idx]
             cur_d = math.hypot(ball.x - start[0], ball.y - start[1])
@@ -360,69 +334,113 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             dribble_meter = 0.0
         must_release_flag = 1.0 if must_release[idx] else 0.0
 
+        # Mate
+        mate_theta = math.radians(mate.theta)
+        mate_dist_ball = math.hypot(mate.x - ball.x, mate.y - ball.y)
+        mate_has_ball = (mate_dist_ball < 0.12) or mate.infrared
+
+        # Opponents, sorted closest first.
+        opp_sorted = sorted(
+            opp_list,
+            key=lambda o: math.hypot(o.x - self_robot.x, o.y - self_robot.y),
+        )
+        opp1, opp2 = opp_sorted[0], opp_sorted[1]
+        opp1_theta = math.radians(opp1.theta)
+        opp2_theta = math.radians(opp2.theta)
+        opp1_dist_ball = math.hypot(opp1.x - ball.x, opp1.y - ball.y)
+        opp2_dist_ball = math.hypot(opp2.x - ball.x, opp2.y - ball.y)
+
+        # Ball prediction in world frame.
+        pred_x = float(np.clip(ball.x + ball.v_x * 0.5, -max_x, max_x))
+        pred_y = float(np.clip(ball.y + ball.v_y * 0.5, -max_y, max_y))
+
+        # Team flags
+        team_has_ball = 1.0 if (self_has_ball or mate_has_ball) else 0.0
+        i_am_closer = 1.0 if self_dist_ball < mate_dist_ball else 0.0
+
         obs = np.array(
             [
-                self.norm_v(own_vx),
-                self.norm_v(own_vy),
-                self.norm_w(own_w),
-                own_ir,
-                1.0 if self_has_ball else 0.0,
-                ball_rx / max_dist,
-                ball_ry / max_dist,
-                self.norm_v(ball_rvx),
-                self.norm_v(ball_rvy),
-                ball_dist / max_dist,
-                ball_bearing / math.pi,
-                pred_rx / max_dist,
-                pred_ry / max_dist,
-                mate_rx / max_dist,
-                mate_ry / max_dist,
-                self.norm_v(mate_rvx),
-                self.norm_v(mate_rvy),
-                mate_dist / max_dist,
-                math.sin(d_theta),
-                math.cos(d_theta),
-                opp_rx / max_dist,
-                opp_ry / max_dist,
-                self.norm_v(opp_rvx),
-                self.norm_v(opp_rvy),
-                opp_dist / max_dist,
-                attack_rx / max_dist,
-                attack_ry / max_dist,
-                attack_dist / max_dist,
-                own_rx / max_dist,
-                own_ry / max_dist,
-                d_wall_neg_x,
-                d_wall_pos_x,
-                d_wall_neg_y,
-                d_wall_pos_y,
-                team_has_ball,
-                i_am_closer,
-                dribble_meter,
-                must_release_flag,
-                # World-frame heading — bridges the local-frame obs to the
-                # world-frame action interpretation in convert_actions(). With
-                # only local obs the policy had to infer its own theta from
-                # wall + attack-goal references, which it often failed to do.
-                cos_t,  # slot 38
-                sin_t,  # slot 39
+                # BALL (5)
+                self.norm_pos(ball.x),                  # 0
+                self.norm_pos(ball.y),                  # 1
+                self.norm_v(ball.v_x),                  # 2
+                self.norm_v(ball.v_y),                  # 3
+                dist_ball_goal / max_dist,              # 4
+                # SELF (13)
+                self.norm_pos(self_robot.x),            # 5
+                self.norm_pos(self_robot.y),            # 6
+                sin_t,                                  # 7
+                cos_t,                                  # 8
+                self.norm_v(self_robot.v_x),            # 9
+                self.norm_v(self_robot.v_y),            # 10
+                self.norm_w(self_robot.v_theta),        # 11
+                1.0 if self_robot.infrared else 0.0,    # 12
+                self_dist_ball / max_dist,              # 13
+                rel_angle_ball / math.pi,               # 14
+                rel_angle_goal / math.pi,               # 15
+                dribble_meter,                          # 16
+                must_release_flag,                      # 17
+                # MATE (9)
+                self.norm_pos(mate.x),                  # 18
+                self.norm_pos(mate.y),                  # 19
+                math.sin(mate_theta),                   # 20
+                math.cos(mate_theta),                   # 21
+                self.norm_v(mate.v_x),                  # 22
+                self.norm_v(mate.v_y),                  # 23
+                self.norm_w(mate.v_theta),              # 24
+                1.0 if mate.infrared else 0.0,          # 25
+                mate_dist_ball / max_dist,              # 26
+                # OPP1 (closest) (10)
+                self.norm_pos(opp1.x),                  # 27
+                self.norm_pos(opp1.y),                  # 28
+                math.sin(opp1_theta),                   # 29
+                math.cos(opp1_theta),                   # 30
+                self.norm_v(opp1.v_x),                  # 31
+                self.norm_v(opp1.v_y),                  # 32
+                self.norm_w(opp1.v_theta),              # 33
+                1.0 if opp1.infrared else 0.0,          # 34
+                opp1_dist_ball / max_dist,              # 35
+                (self_dist_ball - opp1_dist_ball) / max_dist,  # 36
+                # OPP2 (farther) (9)
+                self.norm_pos(opp2.x),                  # 37
+                self.norm_pos(opp2.y),                  # 38
+                math.sin(opp2_theta),                   # 39
+                math.cos(opp2_theta),                   # 40
+                self.norm_v(opp2.v_x),                  # 41
+                self.norm_v(opp2.v_y),                  # 42
+                self.norm_w(opp2.v_theta),              # 43
+                1.0 if opp2.infrared else 0.0,          # 44
+                opp2_dist_ball / max_dist,              # 45
+                # PREDICTION (4)
+                self.norm_pos(pred_x),                  # 46
+                self.norm_pos(pred_y),                  # 47
+                self.norm_pos(pred_x - self_robot.x),   # 48
+                self.norm_pos(pred_y - self_robot.y),   # 49
+                # TEAM (2)
+                team_has_ball,                          # 50
+                i_am_closer,                            # 51
             ],
             dtype=np.float32,
         )
         obs = np.clip(obs, -self.NORM_BOUNDS, self.NORM_BOUNDS)
+
         if not is_yellow:
-            # Mirror over y-axis: negate all egocentric-y components plus the
-            # robot's own local side-velocity (slot 1) and angular velocity
-            # (slot 2). Slot 38 (cos_t) negates because reflecting theta over
-            # y-axis maps θ → π−θ, so cos flips sign; slot 39 (sin_t) is
-            # invariant. Together with the x-wall swap and the action mirror
-            # in _compute_blue_action this presents the world to the
-            # yellow-trained policy as if blue were yellow.
-            for slot in (1, 2, 6, 8, 10, 12, 14, 16, 18, 21, 23, 26, 29, 38):
+            # Mirror over y-axis (x → −x). All world-x positions/velocities
+            # negate; cos(θ) negates and sin(θ) stays; v_θ negates (angular
+            # velocity reverses under reflection); rel_angle_* negate (they
+            # flip under left↔right reflection); scalars/distances/flags stay.
+            for slot in (
+                0, 2,                # ball: x, v_x
+                5, 8, 9, 11,         # self: x, cos, v_x, v_theta
+                14, 15,              # self: rel_angle_ball, rel_angle_goal
+                18, 21, 22, 24,      # mate: x, cos, v_x, v_theta
+                27, 30, 31, 33,      # opp1: x, cos, v_x, v_theta
+                37, 40, 41, 43,      # opp2: x, cos, v_x, v_theta
+                46, 48,              # pred: x, dx
+            ):
                 obs[slot] = -obs[slot]
+
         if self.role_index:
-            # Append after mirror — role-index is position-independent
-            # agent identity, no reflection needed.
             role = np.zeros(ROLE_INDEX_DIM, dtype=np.float32)
             role[idx] = 1.0
             obs = np.concatenate([obs, role]).astype(np.float32)

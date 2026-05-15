@@ -30,7 +30,12 @@ from stable_baselines3.common.callbacks import (
 
 from masac import MASAC
 from masac_policy import MASACPolicy
-from pair_vec_env import JointDummyPairVecEnv, JointSubprocPairVecEnv
+from pair_vec_env import (
+    DummyPairVecEnv,
+    JointDummyPairVecEnv,
+    JointSubprocPairVecEnv,
+    SubprocPairVecEnv,
+)
 from ssl_rl_2v2_selfplay import SSL2v2SelfPlayEnv
 
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -124,22 +129,31 @@ class StatsCallback(BaseCallback):
         return True
 
 
-def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc):
+def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path)
         for i in range(n_envs)
     ]
-    # Joint variants keep the 2-agent pairing intact so the replay buffer
-    # stores joint transitions for the centralized critic.
+    if algo == "masac":
+        # Joint variants keep the 2-agent pairing intact so the replay buffer
+        # stores joint transitions for the centralized critic.
+        if use_subproc and n_envs > 1:
+            return JointSubprocPairVecEnv(fns)
+        return JointDummyPairVecEnv(fns)
+    # Independent SAC: unstack each pair into 2N SB3 slots. Each slot is one
+    # agent, sees its own (52,) obs, outputs its own (6,) action. Parameter
+    # sharing happens automatically via the single shared policy.
     if use_subproc and n_envs > 1:
-        return JointSubprocPairVecEnv(fns)
-    return JointDummyPairVecEnv(fns)
+        return SubprocPairVecEnv(fns)
+    return DummyPairVecEnv(fns)
 
 
 def train(reward_type, seed, n_envs, frozen_path, init_path=None,
-          total_steps=5_000_000):
+          total_steps=5_000_000, algo="masac"):
+    assert algo in ("masac", "sac"), algo
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_name = f"2v2_selfplay_MASAC_{reward_type}_seed{seed}_{timestamp}"
+    algo_tag = algo.upper()
+    run_name = f"2v2_selfplay_{algo_tag}_{reward_type}_seed{seed}_{timestamp}"
     log_dir = os.path.join(LOG_DIR, run_name)
 
     wandb.init(
@@ -147,7 +161,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         name=run_name,
         sync_tensorboard=True,
         config={
-            "algo": "MASAC",
+            "algo": algo_tag,
             "reward_type": reward_type,
             "seed": seed,
             "n_envs": n_envs,
@@ -159,25 +173,41 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
 
     env = build_vec_env(
         n_envs=n_envs, reward_type=reward_type, seed=seed,
-        frozen_path=frozen_path, use_subproc=True,
+        frozen_path=frozen_path, use_subproc=True, algo=algo,
     )
     print(
-        f"2v2 MASAC self-play | frozen={frozen_path} | seed={seed} | "
-        f"envs={n_envs} | pairs={env.num_envs}"
+        f"2v2 {algo_tag} self-play | frozen={frozen_path} | seed={seed} | "
+        f"envs={n_envs} | vec_slots={env.num_envs}"
     )
 
     init_load = init_path or frozen_path
 
     policy_kwargs = dict(net_arch=[512, 512, 512])
-    model = MASAC(
-        policy=MASACPolicy, env=env, verbose=1, device="cuda",
-        tensorboard_log=log_dir, seed=seed,
-        train_freq=1, gradient_steps=1, batch_size=2048,
-        buffer_size=200_000, learning_rate=3e-4,
-        learning_starts=10000, ent_coef=0.1, target_entropy="auto",
-        critic_warmup_grad_steps=0, max_grad_norm=0.0,
-        policy_kwargs=policy_kwargs, gamma=0.995,
-    )
+    if algo == "masac":
+        model = MASAC(
+            policy=MASACPolicy, env=env, verbose=1, device="cuda",
+            tensorboard_log=log_dir, seed=seed,
+            train_freq=1, gradient_steps=1, batch_size=2048,
+            buffer_size=200_000, learning_rate=3e-4,
+            learning_starts=10000, ent_coef=0.1, target_entropy="auto",
+            critic_warmup_grad_steps=0, max_grad_norm=0.0,
+            policy_kwargs=policy_kwargs, gamma=0.995,
+        )
+    else:
+        # Independent SAC diagnostic: stock SB3 SAC over per-agent (52,)
+        # slots — the warmup setup, but with the current world-frame obs
+        # and current reward / kick logic. If this scores against static
+        # Blue and MASAC does not, the issue is in the custom MASAC stack,
+        # not in env/reward/kick.
+        from stable_baselines3 import SAC
+        model = SAC(
+            policy="MlpPolicy", env=env, verbose=1, device="cuda",
+            tensorboard_log=log_dir, seed=seed,
+            train_freq=1, gradient_steps=1, batch_size=2048,
+            buffer_size=200_000, learning_rate=3e-4,
+            learning_starts=10000, ent_coef=0.1, target_entropy="auto",
+            policy_kwargs=policy_kwargs, gamma=0.995,
+        )
     if init_load and os.path.exists(init_load):
         print(f"Transferring actor weights from {init_load}")
         old_model = _load_any(init_load)
@@ -238,10 +268,14 @@ if __name__ == "__main__":
     parser.add_argument("--n_pairs", type=int,
                         default=max(1, slurm_cpus // 2))
     parser.add_argument("--total_steps", type=int, default=5_000_000)
+    parser.add_argument("--algo", default="masac", choices=["masac", "sac"],
+                        help="masac: custom CTDE (default). "
+                             "sac: stock Independent SAC diagnostic.")
     args = parser.parse_args()
 
     train(
         reward_type=args.reward_type, seed=args.seed,
         n_envs=args.n_pairs, frozen_path=args.frozen_path,
         init_path=args.init_path, total_steps=args.total_steps,
+        algo=args.algo,
     )

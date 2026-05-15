@@ -5,7 +5,7 @@ import submitit
 
 def run_experiment(
     reward_type, seed, n_pairs, frozen_path=None, init_path=None,
-    total_steps=5_000_000,
+    total_steps=5_000_000, algo="masac",
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -13,7 +13,8 @@ def run_experiment(
         f"python train_2v2_selfplay.py "
         f"{frozen_flag}{init_flag}"
         f"--reward_type {reward_type} --seed {seed} "
-        f"--n_pairs {n_pairs} --total_steps {total_steps}"
+        f"--n_pairs {n_pairs} --total_steps {total_steps} "
+        f"--algo {algo}"
     )
     os.system(cmd)
 
@@ -40,15 +41,16 @@ def main():
     n_pairs = 24
     seeds = [822]
     total_steps = 4_000_000
+    algo = "masac"  # "sac" for the Independent-SAC diagnostic
 
     jobs = []
     for seed in seeds:
         job = executor.submit(
             run_experiment, reward_type, seed, n_pairs,
-            frozen_path, init_path, total_steps,
+            frozen_path, init_path, total_steps, algo,
         )
         jobs.append(job)
-    print(f"Submitted {len(jobs)} 2v2 self-play job(s)")
+    print(f"Submitted {len(jobs)} 2v2 self-play job(s) [algo={algo}]")
 
 
 if __name__ == "__main__":

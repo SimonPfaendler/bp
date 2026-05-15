@@ -604,6 +604,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
         max_x = self.field.length / 2.0
         max_y = self.field.width / 2.0
+        max_dist = math.hypot(self.field.length, self.field.width)
         goal_half_width = self.field.goal_width / 2.0
 
         rewards = np.zeros(2, dtype=np.float32)
@@ -611,90 +612,108 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         truncated = False
 
         in_grace = self.total_steps <= self.oob_grace_steps
+        progress = self.current_step / self.max_steps
+
+        # Time penalty (per step, halved while ball is in defensive half so
+        # defense isn't punished). Applied first so terminals also pay it.
+        if self.reward_type == "dense":
+            if ball.x < 0:
+                rewards -= 0.02 * (1.0 + 2.0 * progress)
+            else:
+                rewards -= 0.04 * (1.0 + 2.0 * progress)
 
         if abs(ball.x) > max_x and abs(ball.y) <= goal_half_width:
             done = True
-            if ball.x < 0:  # Yellow goal
-                if self.passes_in_episode > 0:
-                    rewards += 150.0
-                else:
-                    rewards += 100.0
+            if ball.x < 0:  # Yellow scored
+                rewards += 100.0
+                rewards += (self.max_steps - self.current_step) * 0.01
                 self.match_result = 1
-            else:  # Blue goal
+            else:  # Blue scored
                 rewards -= 50.0
                 self.match_result = -1
                 self.blue_goal_scored = True
             return rewards, done, truncated
 
-        # Ball OOB / robot OOB: episode ends, no penalty.
+        # Ball OOB without a goal: small penalty.
         if (abs(ball.x) > max_x or abs(ball.y) > max_y) and not in_grace:
             done = True
+            rewards -= 5.0
             self.match_result = -1
             return rewards, done, truncated
+        # Yellow robot OOB: heavy penalty (deters escape). Blue OOB ends
+        # the episode without yellow penalty.
         if not in_grace:
-            for r in (*yellows, *blues):
+            for r in yellows:
+                if abs(r.x) > max_x or abs(r.y) > max_y:
+                    done = True
+                    rewards -= 20.0
+                    self.match_result = -1
+                    return rewards, done, truncated
+            for r in blues:
                 if abs(r.x) > max_x or abs(r.y) > max_y:
                     done = True
                     return rewards, done, truncated
 
-        # Timeout: truncation, not termination. Keep done=False so the vec
-        # env sets TimeLimit.truncated=True and SAC bootstraps off the
-        # terminal observation instead of treating step 250 as an absorbing
-        # zero-value state.
         if self.current_step >= self.max_steps:
             truncated = True
+            rewards -= 10.0
             self.match_result = -1
             return rewards, done, truncated
 
-        # ---- Shaped reward — non-negative
         if self.reward_type == "dense":
             dist_a = math.hypot(ya.x - ball.x, ya.y - ball.y)
             dist_b = math.hypot(yb.x - ball.x, yb.y - ball.y)
             dists = (dist_a, dist_b)
+            ya_has = (dist_a < 0.12) or ya.infrared
+            yb_has = (dist_b < 0.12) or yb.infrared
 
-            # 1) Per-agent ball-closing positive part only.
+            # Absolute potential: constant gradient toward the ball even
+            # when the agent isn't moving.
+            rewards[0] += 0.05 * (1.0 - dist_a / max_dist)
+            rewards[1] += 0.05 * (1.0 - dist_b / max_dist)
+
+            # Standing-still penalty (per agent, only without the ball).
+            if math.hypot(ya.v_x, ya.v_y) < 0.1 and not ya_has:
+                rewards[0] -= 0.05
+            if math.hypot(yb.v_x, yb.v_y) < 0.1 and not yb_has:
+                rewards[1] -= 0.05
+
+            # Robot→Ball signed delta — per agent.
             if self.last_dist_to_ball is None:
                 self.last_dist_to_ball = [dist_a, dist_b]
             for i in range(2):
                 delta = self.last_dist_to_ball[i] - dists[i]
-                rewards[i] += float(np.clip(delta * 5.0, 0.0, 0.5))
+                rewards[i] += float(np.clip(delta * 5.0, -0.5, 0.5))
             self.last_dist_to_ball = [dist_a, dist_b]
 
-            # 2) Shared max( ball→agent_i (pass shaping), ball→goal-mouth ).
-            ball_now = (ball.x, ball.y)
-            dist_ball_goal = self._dist_ball_to_goal(*ball_now)
+            # Ball→Goal signed delta — shared.
+            dist_ball_goal = self._dist_ball_to_goal(ball.x, ball.y)
             if self.last_dist_ball_goal is not None:
                 goal_delta = self.last_dist_ball_goal - dist_ball_goal
-            else:
-                goal_delta = 0.0
+                rewards += float(np.clip(goal_delta * 10.0, -1.0, 1.5))
             self.last_dist_ball_goal = dist_ball_goal
 
-            if self.last_ball_pos is None:
-                pass_delta = 0.0
-            else:
-                prev_bx, prev_by = self.last_ball_pos
-                pass_delta = max(
-                    math.hypot(prev_bx - ya.x, prev_by - ya.y) - dist_a,
-                    math.hypot(prev_bx - yb.x, prev_by - yb.y) - dist_b,
-                )
-            self.last_ball_pos = ball_now
+            # Ball direction toward attack goal (-x) — shared.
+            if ball.v_x < -0.5:
+                rewards += 0.02 * min(-ball.v_x, 3.0)
+            elif ball.v_x > 0.5:
+                rewards -= 0.02 * min(ball.v_x, 3.0)
 
-            shared = sum([pass_delta, goal_delta])
-            rewards += float(np.clip(shared * 10.0, 0.0, 1.5))
-
-            # Possession counter kept for the info-dict metric (no reward).
-            if (
-                math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.12 or ya.infrared
-                or math.hypot(yb.x - ball.x, yb.y - ball.y) < 0.12
-                or yb.infrared
-            ):
+            # Possession — per agent.
+            if ya_has:
+                rewards[0] += 0.01
+            if yb_has:
+                rewards[1] += 0.01
+            if ya_has or yb_has:
                 self.team_possession_steps += 1
 
-        # ---- Pass detection: +30 shared bonus
-        ya_has = (
+            self.last_ball_pos = (ball.x, ball.y)
+
+        # Pass detection: +30 shared event bonus.
+        ya_has_pass = (
             math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.20
         ) or ya.infrared
-        yb_has = (
+        yb_has_pass = (
             math.hypot(yb.x - ball.x, yb.y - ball.y) < 0.20
         ) or yb.infrared
         blue_has = any(
@@ -707,9 +726,9 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             self.last_yellow_carrier = None
 
         current_carrier = None
-        if ya_has and not yb_has:
+        if ya_has_pass and not yb_has_pass:
             current_carrier = 0
-        elif yb_has and not ya_has:
+        elif yb_has_pass and not ya_has_pass:
             current_carrier = 1
         if current_carrier is not None:
             if (
@@ -717,11 +736,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 and current_carrier != self.last_yellow_carrier
                 and not self.blue_touched_since_yellow
             ):
-                # Strict pass detection: ball at least 0.5m from the previous
                 prev = yellows[self.last_yellow_carrier]
                 ball_to_prev = math.hypot(ball.x - prev.x, ball.y - prev.y)
                 if ball_to_prev > 0.5:
-                    rewards += 30.0    # Discrete pass-event bonus (shared).
+                    rewards += 30.0
                     self.passes_in_episode += 1
             self.last_yellow_carrier = current_carrier
             self.blue_touched_since_yellow = False

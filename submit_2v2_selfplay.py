@@ -37,7 +37,7 @@ def main():
     frozen_path = None
     init_path = None
     reward_type = "dense"
-    n_pairs = 24
+    n_pairs = 48
     seeds = [822]
     total_steps = 2_000_000
 

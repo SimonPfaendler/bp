@@ -241,7 +241,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             train_freq=1, gradient_steps=1, batch_size=1024,
             buffer_size=200_000, learning_rate=1e-4,
             learning_starts=10000, ent_coef=0.05, target_entropy="auto",
-            critic_warmup_grad_steps=0, max_grad_norm=10.0,
+            critic_warmup_grad_steps=0, max_grad_norm=0.0,
             policy_kwargs=policy_kwargs, gamma=0.995,
         )
     else:

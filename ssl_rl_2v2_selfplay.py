@@ -99,7 +99,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
         self.current_step = 0
         self.total_steps = 0
-        self.max_steps = 250
+        self.max_steps = 1000
 
         self.last_dist_ball_goal = None
         self.last_dist_to_ball = None

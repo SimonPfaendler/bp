@@ -82,6 +82,57 @@ def _load_any(path):
         return MASAC.load(path, device="cpu")
 
 
+class CurriculumCallback(BaseCallback):
+    """Rolling-window curriculum: start at Level 1 (easy scoring chance),
+    flip to Level 5 (chaos) once rolling success_rate clears `threshold`.
+
+    Works with both VecEnv variants — env_method dispatches to all envs.
+    """
+
+    def __init__(
+        self, start_level=1, target_level=5,
+        threshold=0.9, window=300, verbose=1,
+    ):
+        super().__init__(verbose)
+        self.start_level = int(start_level)
+        self.target_level = int(target_level)
+        self.threshold = float(threshold)
+        self.window = int(window)
+        self.success_buffer = deque(maxlen=self.window)
+        self.current_level = self.start_level
+
+    def _on_training_start(self) -> None:
+        self.training_env.env_method(
+            "set_curriculum_level", self.start_level
+        )
+        if self.verbose:
+            print(f"[Curriculum] starting at level={self.start_level}")
+
+    def _on_step(self) -> bool:
+        dones = self.locals.get("dones", [])
+        infos = self.locals.get("infos", [])
+        for i, done in enumerate(dones):
+            if done and "is_success" in infos[i]:
+                self.success_buffer.append(float(infos[i]["is_success"]))
+        if (
+            self.current_level < self.target_level
+            and len(self.success_buffer) >= self.window
+        ):
+            sr = float(np.mean(self.success_buffer))
+            if sr >= self.threshold:
+                self.current_level = self.target_level
+                self.training_env.env_method(
+                    "set_curriculum_level", self.current_level
+                )
+                self.success_buffer.clear()
+                print(
+                    f"[Curriculum] success_rate={sr:.2f} >= "
+                    f"{self.threshold} → level={self.current_level}"
+                )
+        self.logger.record("curriculum/level", self.current_level)
+        return True
+
+
 class StatsCallback(BaseCallback):
     def __init__(self, verbose=0):
         super().__init__(verbose)
@@ -235,6 +286,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
 
     callbacks = CallbackList([
         StatsCallback(),
+        CurriculumCallback(start_level=1, target_level=5, threshold=0.9),
         CheckpointCallback(
             save_freq=20000, save_path=MODEL_DIR,
             name_prefix=run_name, save_replay_buffer=True,

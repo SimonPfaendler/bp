@@ -731,8 +731,54 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
     # ---------- initial positions ----------
 
     def _get_initial_positions_frame(self) -> Frame:
+        """Curriculum-aware spawn.
+
+        Level 1: easy scoring chance. Ball near the yellow attack goal
+        (x ≈ -max_x + 1..2.5), both yellows behind the ball facing the goal,
+        both blues parked on yellow's home half — clear shot, no static
+        obstacle in the way. This is the 1v1 Level-1 trick adapted to 2v2.
+        Level 5: chaotic spawn (original setup) — ball anywhere, yellows on
+        their own side, blues between yellows and the attack goal.
+        Switch happens externally via set_curriculum_level once the rolling
+        success_rate clears the curriculum-callback threshold.
+        """
         pos = Frame()
         rng = self.np_random
+        max_x = self.field.length / 2.0
+        level = int(getattr(self, "curriculum_level", 5))
+
+        if level <= 1:
+            # LEVEL 1 — gestellte Torchance.
+            bx = float(rng.uniform(-max_x + 1.0, -max_x + 2.5))
+            by = float(rng.uniform(-0.6, 0.6))
+            pos.ball = Ball(x=bx, y=by)
+            # Yellow shooter: close behind ball, roughly facing the goal.
+            pos.robots_yellow[0] = Robot(
+                x=bx + float(rng.uniform(0.4, 1.0)),
+                y=by + float(rng.uniform(-0.5, 0.5)),
+                theta=float(rng.uniform(120.0, 240.0)),
+            )
+            # Yellow supporter: further behind, wider — gives the network a
+            # mate-position signal even on easy-shot reps.
+            pos.robots_yellow[1] = Robot(
+                x=bx + float(rng.uniform(1.0, 2.5)),
+                y=by + float(rng.uniform(-1.5, 1.5)),
+                theta=float(rng.uniform(120.0, 240.0)),
+            )
+            # Blues parked far from the goal mouth.
+            pos.robots_blue[0] = Robot(
+                x=float(rng.uniform(1.0, max_x - 0.5)),
+                y=float(rng.uniform(-2.0, 2.0)),
+                theta=float(rng.uniform(-180, 180)),
+            )
+            pos.robots_blue[1] = Robot(
+                x=float(rng.uniform(1.0, max_x - 0.5)),
+                y=float(rng.uniform(-2.0, 2.0)),
+                theta=float(rng.uniform(-180, 180)),
+            )
+            return pos
+
+        # LEVEL 5 — chaos (original setup).
         pos.ball = Ball(
             x=float(rng.uniform(-3, 3)),
             y=float(rng.uniform(-2, 2)),

@@ -583,17 +583,16 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
         in_grace = self.total_steps <= self.oob_grace_steps
 
-        # ---- Terminal events. Paper-faithful (Ocana et al. 2019): G = +20
-        # on a goal, no OOB / timeout penalty — episodes just end. The -20
-        # concede term is our self-play addition (the paper's offensive
-        # free-kick task cannot concede). ----
         if abs(ball.x) > max_x and abs(ball.y) <= goal_half_width:
             done = True
             if ball.x < 0:  # Yellow goal
-                rewards += 20.0
+                if self.passes_in_episode > 0:
+                    rewards += 150.0
+                else:
+                    rewards += 100.0
                 self.match_result = 1
             else:  # Blue goal
-                rewards -= 20.0
+                rewards -= 50.0
                 self.match_result = -1
                 self.blue_goal_scored = True
             return rewards, done, truncated
@@ -618,23 +617,13 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             self.match_result = -1
             return rewards, done, truncated
 
-        # ---- Shaped reward — non-negative, scaled variant of the Ocana et
-        # al. 2019 JAL formulation (Eq. 16-19), ported from the 2v1 env:
-        #   per-agent : clip(D^B_Aᵢ · 5, 0, 0.5)   ball-closing
-        #   shared    : clip(max(D^Aᵢ_B, D^G_B) · 10, 0, 1.5)
-        # The paper's raw signed deltas telescope to ~0 over an episode; the
-        # non-negative clip + scaling is what keeps the critic non-flat. ----
+        # ---- Shaped reward — non-negative
         if self.reward_type == "dense":
-            # Per-step shaping ported from the (working) 2v1 env: strictly
-            # non-negative and scaled. Stalling earns exactly 0, so SAC cannot
-            # find a passive equilibrium that ties an active strategy. The
-            # paper-faithful raw signed deltas telescoped to ~0 over an
-            # episode, leaving the critic flat and the actor without gradient.
             dist_a = math.hypot(ya.x - ball.x, ya.y - ball.y)
             dist_b = math.hypot(yb.x - ball.x, yb.y - ball.y)
             dists = (dist_a, dist_b)
 
-            # 1) Per-agent ball-closing (D^B_Aᵢ), positive part only.
+            # 1) Per-agent ball-closing positive part only.
             if self.last_dist_to_ball is None:
                 self.last_dist_to_ball = [dist_a, dist_b]
             for i in range(2):
@@ -661,7 +650,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 )
             self.last_ball_pos = ball_now
 
-            shared = max(pass_delta, goal_delta)
+            shared = sum([pass_delta, goal_delta])
             rewards += float(np.clip(shared * 10.0, 0.0, 1.5))
 
             # Possession counter kept for the info-dict metric (no reward).
@@ -672,11 +661,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             ):
                 self.team_possession_steps += 1
 
-        # ---- Pass detection: +30 shared bonus on a clean carrier handoff
-        # (ball ≥ 0.5 m from the previous carrier, no blue touch in between),
-        # plus the passes_per_episode / scored_after_pass metrics. The
-        # centralized critic alone did not produce cooperation, so the
-        # explicit incentive from the 2v1 env is restored. ----
+        # ---- Pass detection: +30 shared bonus
         ya_has = (
             math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.20
         ) or ya.infrared
@@ -704,7 +689,6 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 and not self.blue_touched_since_yellow
             ):
                 # Strict pass detection: ball at least 0.5m from the previous
-                # carrier at transfer, filtering touch-swap ping-pong.
                 prev = yellows[self.last_yellow_carrier]
                 ball_to_prev = math.hypot(ball.x - prev.x, ball.y - prev.y)
                 if ball_to_prev > 0.5:

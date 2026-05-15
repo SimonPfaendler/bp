@@ -508,7 +508,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         raw_kick = float(action[3])
         kick_trigger = float(action[4])
         dribble_trigger = float(action[5])
-        kick = max(0.0, raw_kick) * 6.0 if kick_trigger > 0.0 else 0.0
+        if kick_trigger > 0.0:
+            kick = 3.0 + ((raw_kick + 1.0) / 2.0) * 3.0
+        else:
+            kick = 0.0
         dribble = dribble_trigger > 0.0
         if must_release:
             kick = 0.01

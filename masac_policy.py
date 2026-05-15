@@ -106,11 +106,9 @@ class MASACCritic(ContinuousCritic):
 
 
 class MASACPolicy(SACPolicy):
-    """SAC policy with a parameter-shared actor and a centralized critic.
-
-    `make_actor` builds the actor on single-agent spaces. `make_critic` stays
-    stock — `MASACCritic` (LayerNorm) is kept above for re-enabling if
-    Q-divergence resurfaces.
+    """SAC policy with a parameter-shared actor and a LayerNorm centralized
+    critic. The LayerNorm bounds the activations and is the well-established
+    fix for Q-divergence under the joint critic.
     """
 
     def make_actor(self, features_extractor=None) -> MASACActor:
@@ -129,6 +127,12 @@ class MASACPolicy(SACPolicy):
         actor_kwargs["features_extractor"] = fe
         actor_kwargs["features_dim"] = fe.features_dim  # 38
         return MASACActor(**actor_kwargs).to(self.device)
+
+    def make_critic(self, features_extractor=None) -> MASACCritic:
+        critic_kwargs = self._update_features_extractor(
+            self.critic_kwargs, features_extractor
+        )
+        return MASACCritic(**critic_kwargs).to(self.device)
 
 
 MlpPolicy = MASACPolicy

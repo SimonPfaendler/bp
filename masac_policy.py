@@ -35,7 +35,7 @@ from stable_baselines3.sac.policies import (
 )
 
 N_AGENTS = 2
-SINGLE_OBS_DIM = 38
+SINGLE_OBS_DIM = 40  # 38 base features + cos(theta), sin(theta)
 SINGLE_ACT_DIM = 6
 
 
@@ -108,12 +108,17 @@ class MASACCritic(ContinuousCritic):
 class MASACPolicy(SACPolicy):
     """SAC policy with a parameter-shared actor and a centralized critic.
 
-    `make_actor` builds the actor on single-agent spaces. `make_critic` stays
-    stock: `ContinuousCritic` on the joint spaces gives `features_dim=76`
-    (FlattenExtractor over (2,38)) and `action_dim=12`, i.e. a centralized
-    Q(joint_obs, joint_action). `MASACCritic` (with LayerNorm) is kept above
-    for reference / re-enabling if Q-divergence resurfaces.
+    `make_actor` builds the actor on single-agent spaces. `make_critic` builds
+    a `MASACCritic` with LayerNorm — required to keep Q-values bounded once
+    rewards/episodes get large (max_steps=1000 with the clipped reward saw
+    actor_loss diverge to -1e4 without it).
     """
+
+    def make_critic(self, features_extractor=None) -> MASACCritic:
+        critic_kwargs = self._update_features_extractor(
+            self.critic_kwargs, features_extractor
+        )
+        return MASACCritic(**critic_kwargs).to(self.device)
 
     def make_actor(self, features_extractor=None) -> MASACActor:
         single_obs_space = spaces.Box(

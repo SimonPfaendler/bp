@@ -25,7 +25,7 @@ from rsoccer_gym.ssl.ssl_gym_base import SSLBaseEnv
 from stable_baselines3 import SAC
 
 
-SINGLE_OBS_DIM_BASE = 38  # 2v1-IL compatible obs without role-index
+SINGLE_OBS_DIM_BASE = 40  # 38 base features + cos(theta), sin(theta) at 38, 39
 ROLE_INDEX_DIM = 2
 SINGLE_ACT_DIM = 6
 N_YELLOW = 2
@@ -400,17 +400,25 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 i_am_closer,
                 dribble_meter,
                 must_release_flag,
+                # World-frame heading — bridges the local-frame obs to the
+                # world-frame action interpretation in convert_actions(). With
+                # only local obs the policy had to infer its own theta from
+                # wall + attack-goal references, which it often failed to do.
+                cos_t,  # slot 38
+                sin_t,  # slot 39
             ],
             dtype=np.float32,
         )
         obs = np.clip(obs, -self.NORM_BOUNDS, self.NORM_BOUNDS)
         if not is_yellow:
-            # Mirror over y-axis: negate all egocentric-y components, plus
-            # the robot's own local side-velocity (slot 1) and angular
-            # velocity (slot 2). Together with the x-wall swap and the action
-            # mirror in _compute_blue_action, this presents the world to the
+            # Mirror over y-axis: negate all egocentric-y components plus the
+            # robot's own local side-velocity (slot 1) and angular velocity
+            # (slot 2). Slot 38 (cos_t) negates because reflecting theta over
+            # y-axis maps θ → π−θ, so cos flips sign; slot 39 (sin_t) is
+            # invariant. Together with the x-wall swap and the action mirror
+            # in _compute_blue_action this presents the world to the
             # yellow-trained policy as if blue were yellow.
-            for slot in (1, 2, 6, 8, 10, 12, 14, 16, 18, 21, 23, 26, 29):
+            for slot in (1, 2, 6, 8, 10, 12, 14, 16, 18, 21, 23, 26, 29, 38):
                 obs[slot] = -obs[slot]
         if self.role_index:
             # Append after mirror — role-index is position-independent

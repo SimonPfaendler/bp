@@ -167,27 +167,19 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     )
 
     init_load = init_path or frozen_path
-    # batch_size halved vs the old IL setup (2048 -> 1024): each sample is now
-    # a joint pair (~2 transitions of information), so this keeps the effective
-    # transition count comparable.
+
     policy_kwargs = dict(net_arch=[512, 512, 512])
     model = MASAC(
         policy=MASACPolicy, env=env, verbose=1, device="cuda",
         tensorboard_log=log_dir, seed=seed,
-        train_freq=48, gradient_steps=96, batch_size=4000,
+        train_freq=48, gradient_steps=96, batch_size=2048,
         buffer_size=500_000, learning_rate=3e-4,
         learning_starts=10000, ent_coef=0.1, target_entropy="auto",
-        critic_warmup_grad_steps=0, max_grad_norm=0.0,
-        policy_kwargs=policy_kwargs, gamma=0.99,
+        critic_warmup_grad_steps=0, max_grad_norm=10.0,
+        policy_kwargs=policy_kwargs, gamma=0.995,
     )
     if init_load and os.path.exists(init_load):
         print(f"Transferring actor weights from {init_load}")
-        # Only the decentralized actor transfers: it is single-agent (38 -> 6)
-        # with the same architecture as prior SAC checkpoints. The centralized
-        # critic has a different input dim (88 vs 44) and a different meaning,
-        # so it starts fresh. The init checkpoint may be an old stock-SAC run
-        # or a previous MASAC iteration — SAC.load reconstructs whichever
-        # policy_class the zip stored, and we only read its state_dict.
         old_model = _load_any(init_load)
         new_state = model.policy.state_dict()
         old_state = old_model.policy.state_dict()

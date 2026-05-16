@@ -42,8 +42,12 @@ def run_experiment(
     num_env_steps, curriculum_level, frozen_path, exp_name,
 ):
     """Invoke HARL train.py with the ssl_2v2 env via CLI overrides."""
+    # HARL's update_args matches CLI args by *leaf* key only — dot-notation
+    # like --env_args.curriculum_level is silently ignored. Pass the leaf
+    # names directly (curriculum_level / frozen_path are unique leaves
+    # inside env_args, so no ambiguity).
     frozen_flag = (
-        f"--env_args.frozen_path {frozen_path} " if frozen_path else ""
+        f"--frozen_path {frozen_path} " if frozen_path else ""
     )
     # PYTHONUNBUFFERED=1 + python -u: submitit redirects stdout/stderr to
     # files (no tty), which makes CPython block-buffer prints. Without this
@@ -68,7 +72,7 @@ def run_experiment(
         f"--n_rollout_threads {n_rollout_threads} "
         f"--n_eval_rollout_threads {n_eval_rollout_threads} "
         f"--num_env_steps {num_env_steps} "
-        f"--env_args.curriculum_level {curriculum_level} "
+        f"--curriculum_level {curriculum_level} "
         f"{frozen_flag}"
     )
     os.system(cmd)
@@ -98,7 +102,7 @@ def main():
     num_env_steps = 4_000_000
     curriculum_level = 5
     frozen_path = None
-    exp_name = "ssl2v2_hasac_lvl5_static_tuned"
+    exp_name = "ssl2v2_hasac_lvl5_static_defaults"
 
     jobs = []
     for seed in seeds:

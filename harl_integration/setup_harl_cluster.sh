@@ -83,10 +83,13 @@ $PIP install --quiet torch==2.10.0 --index-url https://download.pytorch.org/whl/
 # HARL editable + its declared deps (tensorboard, sacred, setproctitle, …).
 $PIP install --quiet -e "$HARL_DIR"
 # rSoccer from upstream — PyPI ships an unrelated 1.4 fork that's API-incompatible.
+# rc-robosim builds a pybind11 C++ extension. CMake 4.x dropped pre-3.5 policies;
+# pybind11 in this rSoccer release still declares cmake_minimum_required(2.x),
+# so we force the legacy policy via env var.
 if [[ ! -d "$RSOCCER_DIR" ]]; then
     git clone https://github.com/robocin/rSoccer.git "$RSOCCER_DIR"
 fi
-$PIP install --quiet "$RSOCCER_DIR"
+CMAKE_POLICY_VERSION_MINIMUM=3.5 $PIP install --quiet "$RSOCCER_DIR"
 $PIP install --quiet pygame stable-baselines3
 
 echo "=== 4/5  apply ssl_2v2 integration ==="

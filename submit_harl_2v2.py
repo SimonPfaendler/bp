@@ -1,20 +1,21 @@
 """Submit HARL (HASAC / MAPPO continuous) 2v2 SSL training to SLURM.
 
-HARL is installed in /home/simon/dev/venv_harl (separate from venv_rl) and
-clonable-runs out of /home/simon/dev/HARL. Env wrapper imports the SSL env
-from /home/simon/dev/bp via BP_DIR env var.
-
-Usage:
-    python submit_harl_2v2.py            # submits the configured run
+Defaults: bp/, HARL/, venv_harl/ all siblings in the same workspace dir.
+Override via env vars BP_DIR / HARL_DIR / VENV_PY if your layout differs:
+  BP_DIR=/pfs/.../bp HARL_DIR=/pfs/.../HARL VENV_PY=/pfs/.../venv_harl/bin/python \\
+    python submit_harl_2v2.py
 """
 import os
 
 import submitit
 
 
-HARL_DIR = "/home/simon/dev/HARL"
-BP_DIR = "/home/simon/dev/bp"
-VENV_PY = "/home/simon/dev/venv_harl/bin/python"
+BP_DIR = os.environ.get(
+    "BP_DIR", os.path.dirname(os.path.abspath(__file__))
+)
+WORKSPACE = os.path.dirname(BP_DIR)
+HARL_DIR = os.environ.get("HARL_DIR", f"{WORKSPACE}/HARL")
+VENV_PY = os.environ.get("VENV_PY", f"{WORKSPACE}/venv_harl/bin/python")
 
 
 def run_experiment(

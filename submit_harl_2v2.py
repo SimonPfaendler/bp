@@ -38,8 +38,8 @@ VENV_PY = _find_venv_py()
 
 
 def run_experiment(
-    algo, seed, n_rollout_threads, num_env_steps,
-    curriculum_level, frozen_path, exp_name,
+    algo, seed, n_rollout_threads, n_eval_rollout_threads,
+    num_env_steps, curriculum_level, frozen_path, exp_name,
 ):
     """Invoke HARL train.py with the ssl_2v2 env via CLI overrides."""
     frozen_flag = (
@@ -51,6 +51,7 @@ def run_experiment(
         f"--algo {algo} --env ssl_2v2 --exp_name {exp_name} "
         f"--seed {seed} "
         f"--n_rollout_threads {n_rollout_threads} "
+        f"--n_eval_rollout_threads {n_eval_rollout_threads} "
         f"--num_env_steps {num_env_steps} "
         f"--env_args.curriculum_level {curriculum_level} "
         f"{frozen_flag}"
@@ -72,21 +73,24 @@ def main():
         slurm_additional_parameters={"gres": "gpu:1"},
     )
 
-    # First serious run: HASAC + parameter sharing on Level 1 + static blue
-    # (no frozen opponent). 4M env steps, 24 parallel rollout envs.
+    # Diagnostic run: small env counts to confirm HARL's SubprocVecEnv
+    # initializes cleanly with rsim before scaling up. If this finishes the
+    # first eval, bump n_rollout_threads to 16-24 for the real run.
     algo = "hasac"
     seeds = [822]
-    n_rollout_threads = 24
+    n_rollout_threads = 4
+    n_eval_rollout_threads = 2
     num_env_steps = 4_000_000
     curriculum_level = 1
     frozen_path = None
-    exp_name = "ssl2v2_hasac_lvl1_static"
+    exp_name = "ssl2v2_hasac_lvl1_static_smalltest"
 
     jobs = []
     for seed in seeds:
         job = executor.submit(
             run_experiment, algo, seed, n_rollout_threads,
-            num_env_steps, curriculum_level, frozen_path, exp_name,
+            n_eval_rollout_threads, num_env_steps,
+            curriculum_level, frozen_path, exp_name,
         )
         jobs.append(job)
     print(f"Submitted {len(jobs)} HARL job(s) [algo={algo}, exp={exp_name}]")

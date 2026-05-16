@@ -148,12 +148,16 @@ fi
 echo "=== 4/5  apply ssl_2v2 integration ==="
 rsync -a "$INTEG/new_files/" "$HARL_DIR/"
 cd "$HARL_DIR"
-if ! grep -q '"ssl_2v2"' examples/train.py; then
-    git apply "$INTEG/patches/harl.patch"
-    echo "patches applied"
-else
-    echo "patches already present, skipping"
-fi
+# Always reset the patched upstream files and re-apply, so updates to the
+# patch file (e.g. new bug fixes) actually land on re-run.
+git checkout --quiet -- \
+    examples/train.py \
+    harl/envs/__init__.py \
+    harl/utils/envs_tools.py \
+    harl/utils/configs_tools.py \
+    harl/runners/off_policy_base_runner.py
+git apply "$INTEG/patches/harl.patch"
+echo "patches applied"
 
 # ============================================================
 echo "=== 5/5  wrapper smoke ==="

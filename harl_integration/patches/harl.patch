@@ -1,8 +1,20 @@
 diff --git a/examples/train.py b/examples/train.py
-index 3d5a170..9ed0640 100644
+index 3d5a170..b798da0 100644
 --- a/examples/train.py
 +++ b/examples/train.py
-@@ -40,8 +40,9 @@ def main():
+@@ -1,6 +1,11 @@
+ """Train an algorithm."""
+ import argparse
+ import json
++import multiprocessing as _mp
++# rsim (rc-robosim / ODE) has non-fork-safe global state; HARL's
++# ShareSubprocVecEnv defaults to fork on Linux and hangs the children.
++# Force spawn so each rollout/eval worker initialises rsim from scratch.
++_mp.set_start_method("spawn", force=True)
+ from harl.utils.configs_tools import get_defaults_yaml_args, update_args
+ 
+ 
+@@ -40,8 +45,9 @@ def main():
              "dexhands",
              "smacv2",
              "lag",

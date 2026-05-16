@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # One-shot HARL setup. Idempotent — skips already-done steps.
 #
-# Defaults: everything lives as siblings of the bp/ checkout that contains
-# this script, and Python is auto-detected (miniforge3 in or next to bp,
-# else system python3.10/3). Override any of these via env vars:
 #   PY            python interpreter (must be 3.10+)
 #   BP_DIR        path to bp/ checkout
 #   HARL_DIR      where HARL clone goes
@@ -27,7 +24,7 @@ HARL_DIR="${HARL_DIR:-$WORKSPACE/HARL}"
 VENV_DIR="${VENV_DIR:-$WORKSPACE/venv_harl}"
 RSOCCER_DIR="${RSOCCER_DIR:-$WORKSPACE/rSoccer}"
 
-# Auto-detect Python: miniforge3 inside or next to bp/, then system options.
+# Auto-detect Python:.
 if [[ -z "${PY:-}" ]]; then
     for candidate in \
         "$BP_DIR/miniforge3/bin/python" \
@@ -78,18 +75,43 @@ fi
 PIP="$VENV_DIR/bin/pip"
 
 echo "=== 3/5  dependencies ==="
-# Torch first (large; cu12 nvidia libs ~2GB + torch wheel ~750MB).
+
 $PIP install --quiet torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128
 # HARL editable + its declared deps (tensorboard, sacred, setproctitle, …).
 $PIP install --quiet -e "$HARL_DIR"
-# rSoccer from upstream — PyPI ships an unrelated 1.4 fork that's API-incompatible.
-# rc-robosim builds a pybind11 C++ extension. CMake 4.x dropped pre-3.5 policies;
-# pybind11 in this rSoccer release still declares cmake_minimum_required(2.x),
-# so we force the legacy policy via env var.
 if [[ ! -d "$RSOCCER_DIR" ]]; then
     git clone https://github.com/robocin/rSoccer.git "$RSOCCER_DIR"
 fi
-CMAKE_POLICY_VERSION_MINIMUM=3.5 $PIP install --quiet "$RSOCCER_DIR"
+
+
+PY_PREFIX="$("$PY" -c 'import sys; print(sys.prefix)')"
+CONDA_BIN=""
+for c in \
+    "$PY_PREFIX/bin/conda" \
+    "$BP_DIR/miniforge3/bin/conda" \
+    "$WORKSPACE/miniforge3/bin/conda" \
+    "$HOME/miniforge3/bin/conda" \
+    "$(command -v conda || true)"; do
+    if [[ -n "$c" && -x "$c" ]]; then
+        CONDA_BIN="$c"; break
+    fi
+done
+if [[ -z "$CONDA_BIN" ]]; then
+    echo "ERROR: conda not found. Install ODE manually (apt: libode-dev, or conda-forge: ode) and re-run."
+    exit 1
+fi
+CONDA_PREFIX_DIR="$("$CONDA_BIN" info --base)"
+if [[ ! -f "$CONDA_PREFIX_DIR/include/ode/ode.h" ]]; then
+    echo "Installing ode via conda-forge into $CONDA_PREFIX_DIR ..."
+    "$CONDA_BIN" install -y -c conda-forge ode >/dev/null
+fi
+echo "ODE found at $CONDA_PREFIX_DIR/include/ode/"
+
+CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+    CMAKE_PREFIX_PATH="$CONDA_PREFIX_DIR" \
+    CPATH="$CONDA_PREFIX_DIR/include" \
+    LIBRARY_PATH="$CONDA_PREFIX_DIR/lib" \
+    $PIP install --quiet "$RSOCCER_DIR"
 $PIP install --quiet pygame stable-baselines3
 
 echo "=== 4/5  apply ssl_2v2 integration ==="

@@ -49,9 +49,20 @@ def run_experiment(
     # files (no tty), which makes CPython block-buffer prints. Without this
     # the job looks hung for minutes while warmup output sits in the kernel
     # buffer; with it, every print() lands in the log file immediately.
+    #
+    # --load_config pulls tuned_configs/ssl_2v2/<algo>.json which sets the
+    # important non-default knobs: share_param=True (parameter-shared actor
+    # over both homogeneous yellows), auto_alpha=True + alpha=0.2 (adaptive
+    # entropy, breaks the alpha=0.001 mode-collapse from yaml defaults),
+    # hidden_sizes=[512,512,512], gamma=0.99, batch=1024, use_valuenorm=True
+    # (normalises reward targets — important given our +100/-50 outcomes),
+    # use_huber_loss=True (robust critic loss for those goal/concede spikes).
+    # CLI flags after --load_config still override (see train.py update_args).
+    tuned_cfg = f"{HARL_DIR}/tuned_configs/ssl_2v2/{algo}.json"
     cmd = (
         f"cd {HARL_DIR} && "
         f"PYTHONUNBUFFERED=1 BP_DIR={BP_DIR} {VENV_PY} -u examples/train.py "
+        f"--load_config {tuned_cfg} "
         f"--algo {algo} --env ssl_2v2 --exp_name {exp_name} "
         f"--seed {seed} "
         f"--n_rollout_threads {n_rollout_threads} "
@@ -70,15 +81,16 @@ def main():
     executor = submitit.AutoExecutor(folder=log_folder)
     executor.update_parameters(
         slurm_job_name="harl2v2",
-        slurm_time="04:00:00",
-        slurm_partition="gpu_h100",   # may need adjusting per cluster
+        slurm_time="00:30:00",
+        slurm_partition="dev_gpu_h100",   # may need adjusting per cluster
         slurm_cpus_per_task=48,
         slurm_mem="193300mb",
         slurm_additional_parameters={"gres": "gpu:1"},
     )
 
-    # First serious run: HASAC + parameter sharing on Level 1 + static blue
-    # (no frozen opponent). 4M env steps, 24 parallel rollout envs.
+    # HASAC with tuned config (share_param + auto_alpha + valuenorm + huber).
+    # Run-name distinguishes it from the earlier yaml-default run so the
+    # results dir doesn't collide.
     algo = "hasac"
     seeds = [822]
     n_rollout_threads = 24
@@ -86,7 +98,7 @@ def main():
     num_env_steps = 4_000_000
     curriculum_level = 1
     frozen_path = None
-    exp_name = "ssl2v2_hasac_lvl1_static"
+    exp_name = "ssl2v2_hasac_lvl1_static_tuned"
 
     jobs = []
     for seed in seeds:

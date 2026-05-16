@@ -2,35 +2,35 @@
     "main_args": {
         "algo": "hasac",
         "env": "ssl_2v2",
-        "exp_name": "ssl2v2_hasac_lvl1",
+        "exp_name": "ssl2v2_hasac",
         "load_config": ""
     },
     "algo_args": {
         "seed": {
             "seed_specify": true,
-            "seed": 822
+            "seed": 1
         },
         "device": {
             "cuda": true,
-            "cuda_deterministic": false,
+            "cuda_deterministic": true,
             "torch_threads": 4
         },
         "train": {
-            "n_rollout_threads": 24,
-            "num_env_steps": 4000000,
+            "n_rollout_threads": 20,
+            "num_env_steps": 20000000,
             "warmup_steps": 10000,
             "train_interval": 50,
             "update_per_train": 1,
             "log_interval": null,
-            "eval_interval": 8000,
-            "use_valuenorm": false,
+            "eval_interval": 10000,
+            "use_valuenorm": true,
             "use_linear_lr_decay": false,
             "use_proper_time_limits": true,
             "model_dir": null
         },
         "eval": {
             "use_eval": true,
-            "n_eval_rollout_threads": 8,
+            "n_eval_rollout_threads": 20,
             "eval_episodes": 40
         },
         "render": {
@@ -38,28 +38,28 @@
             "render_episodes": 10
         },
         "model": {
-            "hidden_sizes": [512, 512, 512],
+            "hidden_sizes": [256, 256],
             "activation_func": "relu",
             "use_feature_normalization": true,
             "final_activation_func": "tanh",
             "initialization_method": "orthogonal_",
             "gain": 0.01,
-            "lr": 0.0003,
-            "critic_lr": 0.0003
+            "lr": 0.0005,
+            "critic_lr": 0.0005
         },
         "algo": {
             "auto_alpha": false,
-            "alpha": 0.05,
+            "alpha": 0.001,
             "alpha_lr": 0.0003,
             "gamma": 0.99,
             "buffer_size": 1000000,
-            "batch_size": 1024,
+            "batch_size": 1000,
             "polyak": 0.005,
-            "n_step": 1,
+            "n_step": 20,
             "use_huber_loss": true,
             "use_policy_active_masks": true,
             "huber_delta": 10.0,
-            "share_param": true,
+            "share_param": false,
             "fixed_order": false
         },
         "logger": {
@@ -71,6 +71,6 @@
         "frozen_path": null,
         "role_index": false,
         "oob_grace_steps": 0,
-        "curriculum_level": 5
+        "curriculum_level": 1
     }
 }

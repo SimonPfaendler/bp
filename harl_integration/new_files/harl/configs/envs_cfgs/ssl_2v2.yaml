@@ -1,0 +1,10 @@
+# SSL 2v2 self-play env config.
+# Maps directly to SSL2v2SelfPlayEnv kwargs via the HARL wrapper in
+# harl/envs/ssl_2v2/ssl_2v2_env.py.
+
+reward_type: dense        # "dense" (shaped) or "sparse"
+frozen_path: ~            # Path to frozen blue-side checkpoint. ~ = static blue.
+role_index: False         # Append agent-id one-hot to obs (breaks slot symmetry).
+oob_grace_steps: 0        # Skip robot-OOB termination for N early steps.
+curriculum_level: 1       # 1 = easy scoring spawn, 5 = chaos. Stays fixed
+                          # for now (curriculum scheduling is a follow-up).

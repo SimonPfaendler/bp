@@ -10,7 +10,9 @@ import os
 import sys
 
 import numpy as np
-from gym.spaces import Box
+# rSoccer uses gymnasium internally; HARL's runtime path for --env ssl_2v2
+# never loads any HARL env that requires old gym, so gymnasium suffices.
+from gymnasium.spaces import Box
 
 # Make the bp project importable. The env code (rsoccer wiring, reward shaping,
 # curriculum, kick logic) all stays in bp/ as the single source of truth — this

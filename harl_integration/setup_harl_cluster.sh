@@ -115,7 +115,10 @@ echo "PY=$PY ($("$PY" --version 2>&1))"
 echo "=== 3/5  dependencies ==="
 if [[ "$USE_CLONE" -eq 1 ]]; then
     # Cloned env already has torch + rsoccer + pygame + sb3 from rl_env.
-    # Only HARL editable is missing; pip pulls absl-py, setproctitle, tensorboardX, etc.
+    # HARL editable pulls absl-py / setproctitle / tensorboardX. We do NOT
+    # install old `gym` — our ssl_2v2 wrapper uses gymnasium (which rl_env
+    # already has), and HARL's gym-dependent envs (mamujoco/football/gym/
+    # smacv2) are loaded lazily only if --env points at them.
     $PIP install --quiet -e "$HARL_DIR"
 else
     # Fresh venv: pull torch (cu128) + HARL + rsoccer (built from git) + extras.

@@ -15,7 +15,26 @@ BP_DIR = os.environ.get(
 )
 WORKSPACE = os.path.dirname(BP_DIR)
 HARL_DIR = os.environ.get("HARL_DIR", f"{WORKSPACE}/HARL")
-VENV_PY = os.environ.get("VENV_PY", f"{WORKSPACE}/venv_harl/bin/python")
+
+
+def _find_venv_py():
+    if "VENV_PY" in os.environ:
+        return os.environ["VENV_PY"]
+    candidates = [
+        f"{WORKSPACE}/venv_harl/bin/python",
+        f"{BP_DIR}/miniforge3/envs/harl_env/bin/python",
+        f"{WORKSPACE}/miniforge3/envs/harl_env/bin/python",
+        os.path.expanduser("~/miniforge3/envs/harl_env/bin/python"),
+    ]
+    for p in candidates:
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    raise SystemExit(
+        f"No HARL python found. Set VENV_PY=... explicitly. Tried: {candidates}"
+    )
+
+
+VENV_PY = _find_venv_py()
 
 
 def run_experiment(

@@ -100,9 +100,9 @@ def main():
     n_rollout_threads = 24
     n_eval_rollout_threads = 8
     num_env_steps = 4_000_000
-    curriculum_level = 5
+    curriculum_level = 1
     frozen_path = None
-    exp_name = "ssl2v2_hasac_lvl5_static_defaults"
+    exp_name = "ssl2v2_hasac_lvl1_static_shareparam"
 
     jobs = []
     for seed in seeds:

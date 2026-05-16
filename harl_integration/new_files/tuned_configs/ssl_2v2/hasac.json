@@ -59,7 +59,7 @@
             "use_huber_loss": true,
             "use_policy_active_masks": true,
             "huber_delta": 10.0,
-            "share_param": false,
+            "share_param": true,
             "fixed_order": false
         },
         "logger": {

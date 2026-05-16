@@ -45,9 +45,13 @@ def run_experiment(
     frozen_flag = (
         f"--env_args.frozen_path {frozen_path} " if frozen_path else ""
     )
+    # PYTHONUNBUFFERED=1 + python -u: submitit redirects stdout/stderr to
+    # files (no tty), which makes CPython block-buffer prints. Without this
+    # the job looks hung for minutes while warmup output sits in the kernel
+    # buffer; with it, every print() lands in the log file immediately.
     cmd = (
         f"cd {HARL_DIR} && "
-        f"BP_DIR={BP_DIR} {VENV_PY} examples/train.py "
+        f"PYTHONUNBUFFERED=1 BP_DIR={BP_DIR} {VENV_PY} -u examples/train.py "
         f"--algo {algo} --env ssl_2v2 --exp_name {exp_name} "
         f"--seed {seed} "
         f"--n_rollout_threads {n_rollout_threads} "
@@ -73,17 +77,16 @@ def main():
         slurm_additional_parameters={"gres": "gpu:1"},
     )
 
-    # Diagnostic run: small env counts to confirm HARL's SubprocVecEnv
-    # initializes cleanly with rsim before scaling up. If this finishes the
-    # first eval, bump n_rollout_threads to 16-24 for the real run.
+    # First serious run: HASAC + parameter sharing on Level 1 + static blue
+    # (no frozen opponent). 4M env steps, 24 parallel rollout envs.
     algo = "hasac"
     seeds = [822]
-    n_rollout_threads = 4
-    n_eval_rollout_threads = 2
+    n_rollout_threads = 24
+    n_eval_rollout_threads = 8
     num_env_steps = 4_000_000
     curriculum_level = 1
     frozen_path = None
-    exp_name = "ssl2v2_hasac_lvl1_static_smalltest"
+    exp_name = "ssl2v2_hasac_lvl1_static"
 
     jobs = []
     for seed in seeds:

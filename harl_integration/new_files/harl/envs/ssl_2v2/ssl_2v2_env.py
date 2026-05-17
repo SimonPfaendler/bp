@@ -40,18 +40,31 @@ class SSL2v2Env:
 
     def __init__(self, args):
         self.args = copy.deepcopy(args)
+        # `curriculum_level` (legacy name) and `curriculum_start_level` both
+        # accepted as the starting spawn level. The env then auto-promotes
+        # itself to `curriculum_target_level` once rolling success rate over
+        # the last `curriculum_window` episodes clears `curriculum_threshold`.
+        start_level = (
+            self.args.get("curriculum_start_level")
+            or self.args.get("curriculum_level")
+        )
         env_kwargs = {
             "reward_type": self.args.get("reward_type", "dense"),
             "frozen_path": self.args.get("frozen_path", None),
             "role_index": self.args.get("role_index", False),
             "oob_grace_steps": self.args.get("oob_grace_steps", 0),
+            "curriculum_start_level": start_level,
+            "curriculum_target_level": self.args.get(
+                "curriculum_target_level", 5
+            ),
+            "curriculum_threshold": self.args.get(
+                "curriculum_threshold", 0.9
+            ),
+            "curriculum_window": self.args.get(
+                "curriculum_window", 200
+            ),
         }
         self.env = SSL2v2SelfPlayEnv(**env_kwargs)
-
-        # Optional curriculum start level (Level 1 = easy scoring spawn).
-        level = self.args.get("curriculum_level", None)
-        if level is not None:
-            self.env.set_curriculum_level(int(level))
 
         self.n_agents = N_AGENTS
 

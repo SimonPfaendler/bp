@@ -71,6 +71,9 @@
         "frozen_path": null,
         "role_index": false,
         "oob_grace_steps": 0,
-        "curriculum_level": 1
+        "curriculum_level": 1,
+        "curriculum_target_level": 5,
+        "curriculum_threshold": 0.9,
+        "curriculum_window": 200
     }
 }

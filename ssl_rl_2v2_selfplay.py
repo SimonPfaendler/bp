@@ -47,6 +47,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
     def __init__(
         self, render_mode=None, reward_type="dense", frozen_path=None,
         role_index=False, oob_grace_steps=0,
+        curriculum_start_level=None,
+        curriculum_target_level=5,
+        curriculum_threshold=0.9,
+        curriculum_window=200,
     ):
         super().__init__(
             field_type=1,
@@ -55,6 +59,16 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             time_step=0.025,
             render_mode=render_mode,
         )
+        # Curriculum auto-promotion: each env subprocess tracks its own
+        # rolling is_success buffer and bumps itself from start_level to
+        # target_level when the rolling mean clears `threshold`. With 24
+        # parallel envs they all flip independently but at roughly the same
+        # wall time, so the joint training distribution shifts cleanly.
+        from collections import deque as _deque
+        self.curriculum_target_level = int(curriculum_target_level)
+        self.curriculum_threshold = float(curriculum_threshold)
+        self._success_buffer = _deque(maxlen=int(curriculum_window))
+        self._curriculum_promoted = False
         self.reward_type = reward_type
         self.frozen_path = frozen_path
         self.frozen_model = None  # lazy-load on first step (subproc-safe)
@@ -128,8 +142,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.ep_length = 0
         self.ep_start_time = time.time()
 
-        # Self-play: no curriculum (kept as attribute for callback compat).
-        self.curriculum_level = 5
+        # Curriculum level the env spawns at. If curriculum_start_level was
+        # passed, honour it; otherwise default to the chaotic full-task spawn.
+        self.curriculum_level = (
+            int(curriculum_start_level)
+            if curriculum_start_level is not None else 5
+        )
 
     # ---------- frozen model ----------
 
@@ -205,6 +223,27 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             info["scored_after_pass"] = 1.0 if (
                 self.match_result == 1 and self.passes_in_episode > 0
             ) else 0.0
+            # Curriculum auto-promotion: track is_success in a rolling buffer
+            # and bump level once the rolling mean clears the threshold.
+            # Each env subprocess runs this independently — close enough since
+            # all 24 see the same shared policy improving.
+            self._success_buffer.append(info["is_success"])
+            if (
+                not self._curriculum_promoted
+                and self.curriculum_level < self.curriculum_target_level
+                and len(self._success_buffer) >= self._success_buffer.maxlen
+            ):
+                sr = sum(self._success_buffer) / len(self._success_buffer)
+                if sr >= self.curriculum_threshold:
+                    print(
+                        f"[env] curriculum: SR={sr:.2f} >= "
+                        f"{self.curriculum_threshold} -> "
+                        f"L{self.curriculum_level} -> L{self.curriculum_target_level}"
+                    )
+                    self.set_curriculum_level(self.curriculum_target_level)
+                    self._success_buffer.clear()
+                    self._curriculum_promoted = True
+            info["curriculum_level"] = self.curriculum_level
             info["episode"] = {
                 "r": self.ep_reward,
                 "l": self.ep_length,

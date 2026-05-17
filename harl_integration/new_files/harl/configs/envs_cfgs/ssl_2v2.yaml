@@ -2,9 +2,19 @@
 # Maps directly to SSL2v2SelfPlayEnv kwargs via the HARL wrapper in
 # harl/envs/ssl_2v2/ssl_2v2_env.py.
 
-reward_type: dense        # "dense" (shaped) or "sparse"
-frozen_path: ~            # Path to frozen blue-side checkpoint. ~ = static blue.
-role_index: False         # Append agent-id one-hot to obs (breaks slot symmetry).
-oob_grace_steps: 0        # Skip robot-OOB termination for N early steps.
-curriculum_level: 1       # 1 = easy scoring spawn, 5 = chaos. Stays fixed
-                          # for now (curriculum scheduling is a follow-up).
+reward_type: dense                  # "dense" (shaped) or "sparse"
+frozen_path: ~                      # Path to frozen blue-side checkpoint. ~ = static blue.
+role_index: False                   # Append agent-id one-hot to obs (breaks slot symmetry).
+oob_grace_steps: 0                  # Skip robot-OOB termination for N early steps.
+
+# --- Curriculum auto-promotion ---
+# Start at `curriculum_level`/`curriculum_start_level` (Level 1 = easy scoring
+# spawn) and auto-bump to `curriculum_target_level` once the rolling mean of
+# is_success over the last `curriculum_window` episodes clears
+# `curriculum_threshold`. Each of the 24 env subprocesses tracks its own
+# buffer, so the joint distribution shifts cleanly once the shared policy is
+# good enough on the easy spawn.
+curriculum_level: 1
+curriculum_target_level: 5
+curriculum_threshold: 0.9
+curriculum_window: 200

@@ -44,11 +44,19 @@ index ed64439..2255471 100644
 +    "ssl_2v2": SSL2v2Logger,
  }
 diff --git a/harl/runners/off_policy_base_runner.py b/harl/runners/off_policy_base_runner.py
-index 5b292cc..6d97585 100644
+index 5b292cc..133efb8 100644
 --- a/harl/runners/off_policy_base_runner.py
 +++ b/harl/runners/off_policy_base_runner.py
-@@ -528,7 +528,7 @@ class OffPolicyBaseRunner:
+@@ -526,9 +526,15 @@ class OffPolicyBaseRunner:
+             eval_battles_won = 0
+         if "football" in self.args["env"]:
              eval_score_cnt = 0
++        if "ssl_2v2" in self.args["env"]:
++            eval_yellow_goals = 0
++            eval_blue_goals = 0
++            eval_passes_sum = 0
++            eval_scored_after_pass = 0
++            eval_curriculum_levels = []
          episode_lens = []
          one_episode_len = np.zeros(
 -            self.algo_args["eval"]["n_eval_rollout_threads"], dtype=np.int
@@ -56,6 +64,92 @@ index 5b292cc..6d97585 100644
          )
  
          eval_obs, eval_share_obs, eval_available_actions = self.eval_envs.reset()
+@@ -565,6 +571,18 @@ class OffPolicyBaseRunner:
+                     if "football" in self.args["env"]:
+                         if eval_infos[eval_i][0]["score_reward"] > 0:
+                             eval_score_cnt += 1
++                    if "ssl_2v2" in self.args["env"]:
++                        info0 = eval_infos[eval_i][0]
++                        if info0.get("is_success", 0) > 0:
++                            eval_yellow_goals += 1
++                        if info0.get("blue_goal", 0) > 0:
++                            eval_blue_goals += 1
++                        eval_passes_sum += int(info0.get("passes", 0))
++                        if info0.get("scored_after_pass", 0) > 0:
++                            eval_scored_after_pass += 1
++                        eval_curriculum_levels.append(
++                            info0.get("curriculum_level", -1)
++                        )
+                     eval_episode_rewards[eval_i].append(
+                         np.sum(one_episode_rewards[eval_i], axis=0)
+                     )
+@@ -591,6 +609,22 @@ class OffPolicyBaseRunner:
+                             eval_score_cnt / eval_episode, eval_avg_rew, eval_avg_len
+                         )
+                     )
++                elif "ssl_2v2" in self.args["env"]:
++                    eval_success_rate = eval_yellow_goals / eval_episode
++                    eval_blue_rate = eval_blue_goals / eval_episode
++                    eval_passes_per_ep = eval_passes_sum / eval_episode
++                    eval_scored_after_pass_rate = eval_scored_after_pass / eval_episode
++                    eval_curriculum_avg = (
++                        float(np.mean(eval_curriculum_levels))
++                        if eval_curriculum_levels else -1
++                    )
++                    print(
++                        f"Eval success_rate={eval_success_rate:.3f} "
++                        f"blue_goal_rate={eval_blue_rate:.3f} "
++                        f"passes/ep={eval_passes_per_ep:.2f} "
++                        f"avg_reward={eval_avg_rew:.2f} avg_len={eval_avg_len:.1f} "
++                        f"curriculum_level={eval_curriculum_avg:.1f}"
++                    )
+                 else:
+                     print(
+                         f"Eval average episode reward is {eval_avg_rew}, eval average episode length is {eval_avg_len}.\n"
+@@ -625,6 +659,19 @@ class OffPolicyBaseRunner:
+                         )
+                         + "\n"
+                     )
++                elif "ssl_2v2" in self.args["env"]:
++                    self.log_file.write(
++                        ",".join(map(str, [
++                            step,
++                            eval_avg_rew,
++                            eval_avg_len,
++                            eval_success_rate,
++                            eval_blue_rate,
++                            eval_passes_per_ep,
++                            eval_scored_after_pass_rate,
++                            eval_curriculum_avg,
++                        ])) + "\n"
++                    )
+                 else:
+                     self.log_file.write(
+                         ",".join(map(str, [step, eval_avg_rew, eval_avg_len])) + "\n"
+@@ -636,6 +683,23 @@ class OffPolicyBaseRunner:
+                 self.writter.add_scalar(
+                     "eval_average_episode_length", eval_avg_len, step
+                 )
++                if "ssl_2v2" in self.args["env"]:
++                    self.writter.add_scalar(
++                        "eval/success_rate", eval_success_rate, step
++                    )
++                    self.writter.add_scalar(
++                        "eval/blue_goal_rate", eval_blue_rate, step
++                    )
++                    self.writter.add_scalar(
++                        "eval/passes_per_episode", eval_passes_per_ep, step
++                    )
++                    self.writter.add_scalar(
++                        "eval/scored_after_pass_rate",
++                        eval_scored_after_pass_rate, step
++                    )
++                    self.writter.add_scalar(
++                        "eval/curriculum_level", eval_curriculum_avg, step
++                    )
+                 break
+ 
+     @torch.no_grad()
 diff --git a/harl/utils/configs_tools.py b/harl/utils/configs_tools.py
 index 1aa6de0..d613838 100644
 --- a/harl/utils/configs_tools.py

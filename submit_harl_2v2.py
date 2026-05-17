@@ -74,9 +74,14 @@ def run_experiment(
     # use_huber_loss=True (robust critic loss for those goal/concede spikes).
     # CLI flags after --load_config still override (see train.py update_args).
     tuned_cfg = f"{HARL_DIR}/tuned_configs/ssl_2v2/{algo}.json"
+    wandb_env = ""
+    for var in ("WANDB_API_KEY", "WANDB_PROJECT", "WANDB_RUN_NAME",
+                "WANDB_MODE", "WANDB_ENTITY"):
+        if var in os.environ:
+            wandb_env += f"{var}={os.environ[var]} "
     cmd = (
         f"cd {HARL_DIR} && "
-        f"PYTHONUNBUFFERED=1 BP_DIR={BP_DIR} {VENV_PY} -u examples/train.py "
+        f"PYTHONUNBUFFERED=1 BP_DIR={BP_DIR} {wandb_env}{VENV_PY} -u examples/train.py "
         f"--load_config {tuned_cfg} "
         f"--algo {algo} --env ssl_2v2 --exp_name {exp_name} "
         f"--seed {seed} "

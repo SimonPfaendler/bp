@@ -40,6 +40,7 @@ VENV_PY = _find_venv_py()
 def run_experiment(
     algo, seed, n_rollout_threads, n_eval_rollout_threads,
     num_env_steps, curriculum_level, frozen_path, exp_name,
+    model_dir=None, warmup_steps=None,
 ):
     """Invoke HARL train.py with the ssl_2v2 env via CLI overrides."""
     # HARL's update_args matches CLI args by *leaf* key only — dot-notation
@@ -48,6 +49,16 @@ def run_experiment(
     # inside env_args, so no ambiguity).
     frozen_flag = (
         f"--frozen_path {frozen_path} " if frozen_path else ""
+    )
+    # When chaining 30-min runs, --model_dir restores actor + critic +
+    # value_normalizer from a previous run's models/ folder. The replay
+    # buffer doesn't get saved, so we still need a small warmup to fill
+    # the buffer to batch_size before training updates kick in.
+    model_dir_flag = (
+        f"--model_dir {model_dir} " if model_dir else ""
+    )
+    warmup_flag = (
+        f"--warmup_steps {warmup_steps} " if warmup_steps is not None else ""
     )
     # PYTHONUNBUFFERED=1 + python -u: submitit redirects stdout/stderr to
     # files (no tty), which makes CPython block-buffer prints. Without this
@@ -74,7 +85,7 @@ def run_experiment(
         f"--num_env_steps {num_env_steps} "
         f"--update_per_train 2 "
         f"--curriculum_level {curriculum_level} "
-        f"{frozen_flag}"
+        f"{warmup_flag}{model_dir_flag}{frozen_flag}"
     )
     os.system(cmd)
 
@@ -107,6 +118,22 @@ def main():
     curriculum_level = 1
     frozen_path = None
     exp_name = "ssl2v2_hasac_lvl1_static_shareparam"
+    # Chain-from-checkpoint: when MODEL_DIR is set, the run loads actor+
+    # critic+value_norm from that path (must be a HARL run's models/ dir),
+    # forces curriculum_level=5 (since the loaded policy is already
+    # L1-competent — no need to redo curriculum), and shrinks warmup to
+    # just refill the replay buffer to batch_size.
+    model_dir = os.environ.get("MODEL_DIR")
+    warmup_steps = None
+    if model_dir:
+        curriculum_level = 5
+        warmup_steps = 1500
+        # Tag the chained run with the source so checkpoint chain stays readable.
+        src = os.path.basename(os.path.dirname(model_dir.rstrip("/")))
+        exp_name = f"ssl2v2_hasac_l5_continue_from_{src}"
+        print(f"Chaining from MODEL_DIR={model_dir}")
+        print(f"  curriculum_level forced to 5, warmup_steps={warmup_steps}")
+        print(f"  exp_name={exp_name}")
 
     jobs = []
     for seed in seeds:
@@ -114,6 +141,7 @@ def main():
             run_experiment, algo, seed, n_rollout_threads,
             n_eval_rollout_threads, num_env_steps,
             curriculum_level, frozen_path, exp_name,
+            model_dir, warmup_steps,
         )
         jobs.append(job)
     print(f"Submitted {len(jobs)} HARL job(s) [algo={algo}, exp={exp_name}]")

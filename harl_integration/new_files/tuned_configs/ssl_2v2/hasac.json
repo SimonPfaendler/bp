@@ -16,11 +16,11 @@
             "torch_threads": 4
         },
         "train": {
-            "n_rollout_threads": 20,
+            "n_rollout_threads": 36,
             "num_env_steps": 20000000,
             "warmup_steps": 10000,
             "train_interval": 50,
-            "update_per_train": 1,
+            "update_per_train": 2,
             "log_interval": null,
             "eval_interval": 7000,
             "use_valuenorm": true,

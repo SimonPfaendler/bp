@@ -44,10 +44,21 @@ class SSL2v2Env:
         # accepted as the starting spawn level. The env then auto-promotes
         # itself to `curriculum_target_level` once rolling success rate over
         # the last `curriculum_window` episodes clears `curriculum_threshold`.
-        start_level = (
-            self.args.get("curriculum_start_level")
-            or self.args.get("curriculum_level")
-        )
+        #
+        # Eval-mode override: when the HARL runner sets `eval_mode=True` in
+        # env_args, the eval envs spawn directly at `curriculum_target_level`
+        # so eval always measures real-task performance regardless of where
+        # training-side curriculum currently is. Without this, eval envs
+        # would need ~200 episodes of training-equivalent success rate
+        # before they self-promote, which lags training by many evals.
+        target_level = self.args.get("curriculum_target_level", 5)
+        if self.args.get("eval_mode"):
+            start_level = target_level
+        else:
+            start_level = (
+                self.args.get("curriculum_start_level")
+                or self.args.get("curriculum_level")
+            )
         env_kwargs = {
             "reward_type": self.args.get("reward_type", "dense"),
             "frozen_path": self.args.get("frozen_path", None),

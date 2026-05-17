@@ -72,6 +72,7 @@ def run_experiment(
         f"--n_rollout_threads {n_rollout_threads} "
         f"--n_eval_rollout_threads {n_eval_rollout_threads} "
         f"--num_env_steps {num_env_steps} "
+        f"--update_per_train 2 "
         f"--curriculum_level {curriculum_level} "
         f"{frozen_flag}"
     )
@@ -97,7 +98,10 @@ def main():
     # results dir doesn't collide.
     algo = "hasac"
     seeds = [822]
-    n_rollout_threads = 24
+    # 36 train + 8 eval = 44 + main + torch ≈ 48 cores (matches SLURM alloc).
+    # update_per_train=2 compensates for the larger n_rollout_threads keeping
+    # the env-steps-per-gradient-update ratio similar to the 24-thread config.
+    n_rollout_threads = 36
     n_eval_rollout_threads = 8
     num_env_steps = 4_000_000
     curriculum_level = 1

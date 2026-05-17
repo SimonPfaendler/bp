@@ -166,7 +166,7 @@ index 1aa6de0..d613838 100644
  
  
 diff --git a/harl/utils/envs_tools.py b/harl/utils/envs_tools.py
-index 3633f35..a5365f6 100644
+index 3633f35..90a73de 100644
 --- a/harl/utils/envs_tools.py
 +++ b/harl/utils/envs_tools.py
 @@ -93,6 +93,10 @@ def make_train_env(env_name, seed, n_threads, env_args):
@@ -180,18 +180,23 @@ index 3633f35..a5365f6 100644
              else:
                  print("Can not support the " + env_name + "environment.")
                  raise NotImplementedError
-@@ -146,6 +150,10 @@ def make_eval_env(env_name, seed, n_threads, env_args):
+@@ -146,6 +150,15 @@ def make_eval_env(env_name, seed, n_threads, env_args):
                  from harl.envs.lag.lag_env import LAGEnv
  
                  env = LAGEnv(env_args)
 +            elif env_name == "ssl_2v2":
 +                from harl.envs.ssl_2v2.ssl_2v2_env import SSL2v2Env
 +
-+                env = SSL2v2Env(env_args)
++                # Eval envs always start at curriculum_target_level so eval
++                # measures real-task performance regardless of training-side
++                # curriculum state. The wrapper honors `eval_mode` to override
++                # `curriculum_start_level`.
++                eval_env_args = {**env_args, "eval_mode": True}
++                env = SSL2v2Env(eval_env_args)
              else:
                  print("Can not support the " + env_name + "environment.")
                  raise NotImplementedError
-@@ -219,6 +227,11 @@ def make_render_env(env_name, seed, env_args):
+@@ -219,6 +232,11 @@ def make_render_env(env_name, seed, env_args):
  
          env = LAGEnv(env_args)
          env.seed(seed * 60000)
@@ -203,7 +208,7 @@ index 3633f35..a5365f6 100644
      else:
          print("Can not support the " + env_name + "environment.")
          raise NotImplementedError
-@@ -257,3 +270,5 @@ def get_num_agents(env, env_args, envs):
+@@ -257,3 +275,5 @@ def get_num_agents(env, env_args, envs):
          return envs.n_agents
      elif env == "lag":
          return envs.n_agents

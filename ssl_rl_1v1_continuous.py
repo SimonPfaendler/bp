@@ -142,6 +142,14 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.min_release_distance = 0.1
         self.last_yellow_had_ball = False
 
+        # Blue-side dribble enforcement (Symmetrie zu Yellow) + Scrum-Breaker.
+        self.is_dribbling_b = False
+        self.dribble_start_pos_b = None
+        self.must_release_b = False
+        self.scrum_steps = 0
+        self.scrum_break_threshold = 40   # ~1s bei time_step=0.025
+        self.scrum_ball_speed_max = 0.2   # darunter gilt der Ball als statisch
+
         # Self-play: blue is controlled by a frozen SAC sampled from a pool.
         # Lazy-loaded per subproc so the env stays picklable for SubprocVecEnv.
         self.blue_mode = blue_mode
@@ -168,6 +176,10 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.has_touched_ball = False
         self.must_release = False
         self.last_yellow_had_ball = False
+        self.is_dribbling_b = False
+        self.dribble_start_pos_b = None
+        self.must_release_b = False
+        self.scrum_steps = 0
 
         roll = self.np_random.random()
         if roll < 0.6:
@@ -214,9 +226,13 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
 
         ball_pos = np.array([self.frame.ball.x, self.frame.ball.y])
         yellow_robot = self.frame.robots_yellow[0]
+        blue_robot = self.frame.robots_blue[0]
         robot_pos = np.array([yellow_robot.x, yellow_robot.y])
+        blue_pos = np.array([blue_robot.x, blue_robot.y])
         dist_robot_ball = np.linalg.norm(robot_pos - ball_pos)
+        dist_blue_ball = np.linalg.norm(blue_pos - ball_pos)
         has_contact = (dist_robot_ball < self.robot_ball_contact) or yellow_robot.infrared
+        has_contact_b = (dist_blue_ball < self.robot_ball_contact) or blue_robot.infrared
 
 
         if self.must_release and dist_robot_ball >= self.min_release_distance:
@@ -238,8 +254,41 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 self.is_dribbling = False
                 self.dribble_start_pos = None
 
+        # Symmetrische Blue-Side Dribble-Enforcement (Mirror der Yellow-Logik).
+        if self.must_release_b and dist_blue_ball >= self.min_release_distance:
+            self.must_release_b = False
+            self.dribble_start_pos_b = None
+            self.is_dribbling_b = False
 
-        
+        if has_contact_b:
+            if not self.is_dribbling_b:
+                self.is_dribbling_b = True
+                self.dribble_start_pos_b = ball_pos.copy()
+            else:
+                ddb = np.linalg.norm(ball_pos - self.dribble_start_pos_b)
+                if ddb > self.max_dribble_dist:
+                    self.must_release_b = True
+                    self.is_dribbling_b = False
+        else:
+            if not self.must_release_b:
+                self.is_dribbling_b = False
+                self.dribble_start_pos_b = None
+
+        # Scrum-Breaker: beide gleichzeitig in Kontakt + Ball quasi statisch.
+        ball_speed = math.hypot(self.frame.ball.v_x, self.frame.ball.v_y)
+        if has_contact and has_contact_b and ball_speed < self.scrum_ball_speed_max:
+            self.scrum_steps += 1
+            if self.scrum_steps > self.scrum_break_threshold:
+                self.must_release = True
+                self.must_release_b = True
+                self.is_dribbling = False
+                self.is_dribbling_b = False
+                self.scrum_steps = 0
+        else:
+            self.scrum_steps = 0
+
+
+
         done = terminated or truncated
         if done:
             info["is_success"] = 1.0 if self.match_result == 1 else 0.0
@@ -562,6 +611,9 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 bv_x, bv_y, bv_theta = self.convert_actions(
                     [bv_x_global, bv_y_global, bv_theta_global], b_angle_rad
                 )
+                if self.must_release_b:
+                    blue_kick = 0.01
+                    blue_dribble = False
         elif level <= 2:
             # LEVEL 1 & 2: Blue steht still
             bv_x, bv_y, bv_theta = 0.0, 0.0, 0.0
@@ -702,10 +754,15 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 reward += np.clip(delta_ball_goal * 10.0, -1.0, 1.5)
             self.last_dist_ball_goal = dist_ball_to_goal
 
-            # Ballpossession
+            # Ballpossession: nur belohnen wenn der Ball sich bewegt,
+            # statisches Halten bestrafen (Scrum-Disincentive).
+            ball_speed = math.hypot(ball.v_x, ball.v_y)
             if yellow_has_ball:
-                reward += 0.01
-                self.yellow_possession_steps += 1
+                if ball_speed > 0.3:
+                    reward += 0.02
+                    self.yellow_possession_steps += 1
+                else:
+                    reward -= 0.02
 
             # Interception Bonus
             #if yellow_has_ball and not self.last_yellow_had_ball:

@@ -276,7 +276,10 @@ def test(sb3_algo, action_type, reward_type, path_to_model, test_level=4,
         env.render()
         time.sleep(0.025)
         summe += reward
-        print(f"Reward: {reward:.2f}, Gesamt: {summe:.2f}, Action: {action}", end="\r")
+        mr = "MR" if env.must_release else "  "
+        dr = "DR" if env.is_dribbling else "  "
+        ir = "IR" if env.frame.robots_yellow[0].infrared else "  "
+        print(f"R:{reward:+.2f} G:{summe:+.1f} [{ir} {dr} {mr}] Act:{action}", end="\r")
 
         if done:
             print("\nEpisode done")

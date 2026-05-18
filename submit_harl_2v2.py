@@ -122,10 +122,12 @@ def main():
     num_env_steps = 4_000_000
     curriculum_level = 5
     frozen_path = (
-        "/pfs/work9/workspace/scratch/fr_sp329-ssl_rl_project/bp/models/"
-        "2v2_selfplay_SAC_dense_seed822_20260512-154059_final.zip"
+        "/pfs/work9/workspace/scratch/fr_sp329-ssl_rl_project/HARL/results/"
+        "ssl_2v2/ssl2v2_lvl5_vs_static_blue/hasac/"
+        "ssl2v2_hasac_l5_continue_from_seed-00822-2026-05-18-10-41-07/"
+        "seed-00822-2026-05-18-12-06-40/models"
     )
-    exp_name = "ssl2v2_hasac_lvl5_h512_vs_sac0512"
+    exp_name = "ssl2v2_hasac_lvl5_h512_vs_hasac_chain"
     # Chain-from-checkpoint: when MODEL_DIR is set, the run loads actor+
     # critic+value_norm from that path (must be a HARL run's models/ dir),
     # forces curriculum_level=5 (since the loaded policy is already

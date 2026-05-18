@@ -14,7 +14,9 @@ the opp-slot of the obs vector. The second opponent is reflected only
 indirectly via the ball / teammate features.
 """
 
+import json
 import math
+import os
 import time
 from typing import Tuple
 
@@ -72,6 +74,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.reward_type = reward_type
         self.frozen_path = frozen_path
         self.frozen_model = None  # lazy-load on first step (subproc-safe)
+        self.frozen_type = None  # "sb3" or "harl", set on lazy-load
         # Frozen-model input dim (filled on lazy-load). If older than current
         # obs (e.g. v3 trained without role-index), we strip role-index dims
         # before predict so the same policy class can act as blue.
@@ -152,11 +155,46 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
     # ---------- frozen model ----------
 
     def _maybe_load_frozen(self):
-        if self.frozen_model is None and self.frozen_path:
-            self.frozen_model = SAC.load(self.frozen_path, device="cpu")
+        if self.frozen_model is not None or not self.frozen_path:
+            return
+        p = self.frozen_path
+        if p.endswith(".zip"):
+            # SB3 SAC checkpoint (legacy 2v1 / early 2v2 runs).
+            self.frozen_type = "sb3"
+            self.frozen_model = SAC.load(p, device="cpu")
             self.frozen_obs_dim = int(
                 self.frozen_model.policy.observation_space.shape[-1]
             )
+            return
+        if not os.path.isdir(p):
+            raise ValueError(
+                f"frozen_path '{p}' is neither a .zip nor an existing directory"
+            )
+        # HARL HASAC checkpoint — path is either the seed-dir or its models/.
+        if os.path.basename(p.rstrip("/")) == "models":
+            models_dir = p
+            run_dir = os.path.dirname(p.rstrip("/"))
+        else:
+            run_dir = p
+            models_dir = os.path.join(p, "models")
+        with open(os.path.join(run_dir, "config.json")) as f:
+            cfg = json.load(f)
+        from harl.algorithms.actors.hasac import HASAC
+        algo_args = cfg["algo_args"]
+        single_obs = Box(
+            low=-np.inf, high=np.inf,
+            shape=(self.single_obs_dim,), dtype=np.float32,
+        )
+        single_act = Box(
+            low=-1.0, high=1.0, shape=(SINGLE_ACT_DIM,), dtype=np.float32,
+        )
+        actor_args = {**algo_args["model"], **algo_args["algo"]}
+        actor = HASAC(actor_args, single_obs, single_act, device="cpu")
+        actor.restore(models_dir, 0)
+        actor.turn_off_grad()
+        self.frozen_type = "harl"
+        self.frozen_model = actor
+        self.frozen_obs_dim = self.single_obs_dim
 
     # ---------- gym API ----------
 
@@ -582,7 +620,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             and self.frozen_obs_dim < blue_obs.shape[-1]
         ):
             blue_obs = blue_obs[..., : self.frozen_obs_dim]
-        action, _ = self.frozen_model.predict(blue_obs, deterministic=True)
+        if self.frozen_type == "harl":
+            # HASAC actor expects (B, obs_dim), returns torch tensor (B, act_dim).
+            out = self.frozen_model.get_actions(blue_obs, stochastic=False)
+            action = out.cpu().numpy() if hasattr(out, "cpu") else np.asarray(out)
+        else:
+            action, _ = self.frozen_model.predict(blue_obs, deterministic=True)
         action = np.asarray(action, dtype=np.float32).copy()
         # Action is in world frame (v_x = world x velocity). Policy learned
         # "attack = -x". Mirror over y-axis for blue: negate world-x velocity

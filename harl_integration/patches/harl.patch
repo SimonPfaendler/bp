@@ -69,10 +69,56 @@ index ed64439..2255471 100644
 +    "ssl_2v2": SSL2v2Logger,
  }
 diff --git a/harl/runners/off_policy_base_runner.py b/harl/runners/off_policy_base_runner.py
-index 5b292cc..133efb8 100644
+index 5b292cc..51916cc 100644
 --- a/harl/runners/off_policy_base_runner.py
 +++ b/harl/runners/off_policy_base_runner.py
-@@ -526,9 +526,15 @@ class OffPolicyBaseRunner:
+@@ -1,5 +1,6 @@
+ """Base runner for off-policy algorithms."""
+ import os
++import shutil
+ import time
+ import torch
+ import numpy as np
+@@ -61,6 +62,13 @@ class OffPolicyBaseRunner:
+             self.log_file = open(
+                 os.path.join(self.run_dir, "progress.txt"), "w", encoding="utf-8"
+             )
++            # Best-checkpoint tracking: ssl_2v2 runs oscillate, so models/ ends
++            # up holding the last (possibly noisy) snapshot. best_models/ keeps
++            # the highest-eval-success_rate snapshot seen during the run.
++            self.best_save_dir = os.path.join(self.run_dir, "best_models")
++            os.makedirs(self.best_save_dir, exist_ok=True)
++            self.best_eval_success_rate = -1.0
++            self.last_eval_success_rate = -1.0
+         setproctitle.setproctitle(
+             str(args["algo"]) + "-" + str(args["env"]) + "-" + str(args["exp_name"])
+         )
+@@ -303,6 +311,24 @@ class OffPolicyBaseRunner:
+                         self.log_file.flush()
+                         self.done_episodes_rewards = []
+                 self.save()
++                # Mirror save into best_models/ if this eval is a new SR peak.
++                # ssl_2v2 only — other envs leave last_eval_success_rate=-1.0
++                # so the condition is permanently false.
++                if (
++                    "ssl_2v2" in self.args["env"]
++                    and self.last_eval_success_rate > self.best_eval_success_rate
++                ):
++                    self.best_eval_success_rate = self.last_eval_success_rate
++                    for fname in os.listdir(self.save_dir):
++                        src = os.path.join(self.save_dir, fname)
++                        if os.path.isfile(src):
++                            shutil.copy2(
++                                src, os.path.join(self.best_save_dir, fname)
++                            )
++                    print(
++                        f"[best-ckpt] new peak SR={self.best_eval_success_rate:.3f}"
++                        f" -> {self.best_save_dir}"
++                    )
+ 
+     def warmup(self):
+         """Warmup the replay buffer with random actions"""
+@@ -526,9 +552,15 @@ class OffPolicyBaseRunner:
              eval_battles_won = 0
          if "football" in self.args["env"]:
              eval_score_cnt = 0
@@ -89,7 +135,7 @@ index 5b292cc..133efb8 100644
          )
  
          eval_obs, eval_share_obs, eval_available_actions = self.eval_envs.reset()
-@@ -565,6 +571,18 @@ class OffPolicyBaseRunner:
+@@ -565,6 +597,18 @@ class OffPolicyBaseRunner:
                      if "football" in self.args["env"]:
                          if eval_infos[eval_i][0]["score_reward"] > 0:
                              eval_score_cnt += 1
@@ -108,12 +154,13 @@ index 5b292cc..133efb8 100644
                      eval_episode_rewards[eval_i].append(
                          np.sum(one_episode_rewards[eval_i], axis=0)
                      )
-@@ -591,6 +609,22 @@ class OffPolicyBaseRunner:
+@@ -591,6 +635,23 @@ class OffPolicyBaseRunner:
                              eval_score_cnt / eval_episode, eval_avg_rew, eval_avg_len
                          )
                      )
 +                elif "ssl_2v2" in self.args["env"]:
 +                    eval_success_rate = eval_yellow_goals / eval_episode
++                    self.last_eval_success_rate = eval_success_rate
 +                    eval_blue_rate = eval_blue_goals / eval_episode
 +                    eval_passes_per_ep = eval_passes_sum / eval_episode
 +                    eval_scored_after_pass_rate = eval_scored_after_pass / eval_episode
@@ -131,7 +178,7 @@ index 5b292cc..133efb8 100644
                  else:
                      print(
                          f"Eval average episode reward is {eval_avg_rew}, eval average episode length is {eval_avg_len}.\n"
-@@ -625,6 +659,19 @@ class OffPolicyBaseRunner:
+@@ -625,6 +686,19 @@ class OffPolicyBaseRunner:
                          )
                          + "\n"
                      )
@@ -151,7 +198,7 @@ index 5b292cc..133efb8 100644
                  else:
                      self.log_file.write(
                          ",".join(map(str, [step, eval_avg_rew, eval_avg_len])) + "\n"
-@@ -636,6 +683,23 @@ class OffPolicyBaseRunner:
+@@ -636,6 +710,23 @@ class OffPolicyBaseRunner:
                  self.writter.add_scalar(
                      "eval_average_episode_length", eval_avg_len, step
                  )

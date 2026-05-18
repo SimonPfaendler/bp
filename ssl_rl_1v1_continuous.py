@@ -1,5 +1,6 @@
 import gymnasium as gym
 import numpy as np
+import os
 import random
 import math
 from gymnasium.spaces import Box
@@ -72,7 +73,8 @@ def blue_attacker_heuristic(env, robot):
     return move_to_ball(robot, ball, speed=2.0)
 
 class SSL1v1ContinuousEnv(SSLBaseEnv):
-    def __init__(self, render_mode=None, action_type="skills", reward_type="dense"):
+    def __init__(self, render_mode=None, action_type="skills", reward_type="dense",
+                 blue_mode="heuristic", opponent_pool_dir=None, seed_opponent_path=None):
         super().__init__(field_type=1, n_robots_blue=1, n_robots_yellow=1, time_step=0.025, render_mode=render_mode)
         """
         1v1 Continuous Robot Soccer Environment.
@@ -140,7 +142,15 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.min_release_distance = 0.1
         self.last_yellow_had_ball = False
 
-
+        # Self-play: blue is controlled by a frozen SAC sampled from a pool.
+        # Lazy-loaded per subproc so the env stays picklable for SubprocVecEnv.
+        self.blue_mode = blue_mode
+        self.opponent_pool_dir = opponent_pool_dir
+        self.seed_opponent_path = seed_opponent_path
+        self._opponent_model = None
+        self._opponent_path = None
+        if self.blue_mode == "selfplay" and self.action_type != "low_level":
+            raise ValueError("blue_mode='selfplay' requires action_type='low_level'")
 
 
     def reset(self, seed=None, **kwargs):
@@ -165,7 +175,34 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         else:
             self.blue_personality = "aggressive"
 
+        if self.blue_mode == "selfplay":
+            self._sample_opponent()
+
         return super().reset(seed=seed, **kwargs)
+
+    def _sample_opponent(self):
+        """Pick a frozen opponent .zip from the pool dir, else fall back to seed."""
+        pool = []
+        if self.opponent_pool_dir and os.path.isdir(self.opponent_pool_dir):
+            pool = sorted(
+                os.path.join(self.opponent_pool_dir, f)
+                for f in os.listdir(self.opponent_pool_dir)
+                if f.endswith(".zip") and not f.endswith(".tmp.zip")
+            )
+        if not pool and self.seed_opponent_path:
+            pool = [self.seed_opponent_path]
+        if not pool:
+            return
+        chosen = pool[int(self.np_random.integers(0, len(pool)))]
+        if chosen == self._opponent_path and self._opponent_model is not None:
+            return
+        try:
+            from stable_baselines3 import SAC
+            self._opponent_model = SAC.load(chosen, device="cpu")
+            self._opponent_path = chosen
+        except Exception as e:
+            # Mid-write or corrupt file — keep previous opponent if any.
+            print(f"[selfplay] failed loading {chosen}: {e}")
 
     
     
@@ -317,6 +354,84 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         return np.array(obs, dtype=np.float32)
 
     
+    def _blue_obs(self):
+        """Yellow's 32-dim low_level obs, recomputed from blue's POV and
+        y-mirrored so blue's policy sees itself as 'yellow attacking the -x goal'."""
+        ball = self.frame.ball
+        blue = self.frame.robots_blue[0]
+        yellow = self.frame.robots_yellow[0]
+
+        max_x = self.field.length / 2.0
+        max_y = self.field.width / 2.0
+        max_dist = math.hypot(self.field.length, self.field.width)
+
+        future_time = 0.5
+        pred_x = np.clip(ball.x + ball.v_x * future_time, -max_x, max_x)
+        pred_y = np.clip(ball.y + ball.v_y * future_time, -max_y, max_y)
+
+        # Blue attacks the +x goal.
+        goal_half_width = self.field.goal_width / 2.0
+        ball_pos = np.array([ball.x, ball.y])
+        goal_a = np.array([+max_x, goal_half_width])
+        goal_b = np.array([+max_x, -goal_half_width])
+        goal_vec = goal_b - goal_a
+        t = np.clip(np.dot(ball_pos - goal_a, goal_vec) / np.dot(goal_vec, goal_vec), 0.0, 1.0)
+        closest_goal_point = goal_a + t * goal_vec
+        dist_ball_to_goal = np.linalg.norm(ball_pos - closest_goal_point)
+
+        blue_theta_rad = math.radians(blue.theta)
+        ang_to_ball = math.atan2(ball.y - blue.y, ball.x - blue.x)
+        rel_angle_ball = (ang_to_ball - blue_theta_rad + math.pi) % (2 * math.pi) - math.pi
+        ang_to_goal = math.atan2(closest_goal_point[1] - blue.y, closest_goal_point[0] - blue.x)
+        rel_angle_goal = (ang_to_goal - blue_theta_rad + math.pi) % (2 * math.pi) - math.pi
+
+        dist_blue_ball = math.hypot(blue.x - ball.x, blue.y - ball.y)
+        dist_yellow_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
+
+        obs = np.array([
+            # BALL
+            self.norm_pos(ball.x), self.norm_pos(ball.y),
+            self.norm_v(ball.v_x), self.norm_v(ball.v_y),
+            dist_ball_to_goal / max_dist,
+            # SELF (blue)
+            self.norm_pos(blue.x), self.norm_pos(blue.y),
+            np.sin(blue_theta_rad), np.cos(blue_theta_rad),
+            self.norm_v(blue.v_x), self.norm_v(blue.v_y), self.norm_w(blue.v_theta),
+            1.0 if blue.infrared else 0.0,
+            dist_blue_ball / max_dist,
+            rel_angle_ball / math.pi,
+            rel_angle_goal / math.pi,
+            0.0,  # dribble_meter (not tracked for blue in 1v1)
+            0.0,  # must_release_flag (idem)
+            # OPP (yellow)
+            self.norm_pos(yellow.x), self.norm_pos(yellow.y),
+            np.sin(np.deg2rad(yellow.theta)), np.cos(np.deg2rad(yellow.theta)),
+            self.norm_v(yellow.v_x), self.norm_v(yellow.v_y), self.norm_w(yellow.v_theta),
+            dist_yellow_ball / max_dist,
+            1.0 if yellow.infrared else 0.0,
+            (dist_blue_ball - dist_yellow_ball) / max_dist,
+            # PREDICTION (rel to self)
+            self.norm_pos(pred_x), self.norm_pos(pred_y),
+            self.norm_pos(pred_x - blue.x), self.norm_pos(pred_y - blue.y),
+        ], dtype=np.float32)
+
+        # Mirror over y-axis: negate every world-x quantity, cos(θ), v_θ, rel_angles.
+        for slot in (0, 2, 5, 8, 9, 11, 14, 15, 18, 21, 22, 24, 27, 29):
+            obs[slot] = -obs[slot]
+        return obs
+
+    def _compute_blue_action_selfplay(self):
+        """Run frozen opponent and un-mirror its world-frame action."""
+        if self._opponent_model is None:
+            return None
+        obs = self._blue_obs()
+        action, _ = self._opponent_model.predict(obs, deterministic=True)
+        action = np.asarray(action, dtype=np.float32).copy()
+        # Un-mirror: negate world-x velocity and world v_theta.
+        action[0] = -action[0]
+        action[2] = -action[2]
+        return action
+
     def _get_commands(self, actions):
         ball = self.frame.ball
         yellow = self.frame.robots_yellow[0]
@@ -419,10 +534,33 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                              v_x=v_x_local, v_y=v_y_local, v_theta=v_theta_clipped,
                              kick_v_x=kick, dribbler=dribble)
 
-        # Blue Heuristic
+        # Blue Heuristic / Self-play
         level = getattr(self, 'curriculum_level', 1)
 
-        if level <= 2:
+        if self.blue_mode == "selfplay":
+            blue_action = self._compute_blue_action_selfplay()
+            if blue_action is None:
+                # No opponent loaded yet — stand still rather than crash.
+                bv_x, bv_y, bv_theta = 0.0, 0.0, 0.0
+                blue_kick = 0.0
+                blue_dribble = False
+            else:
+                bv_x_global = float(blue_action[0])
+                bv_y_global = float(blue_action[1])
+                bv_theta_global = float(blue_action[2])
+                raw_kick_power = float(blue_action[3])
+                kick_trigger = float(blue_action[4])
+                dribbler_trigger = float(blue_action[5])
+                if kick_trigger > 0.0:
+                    blue_kick = 3.0 + ((raw_kick_power + 1.0) / 2.0) * 3.0
+                else:
+                    blue_kick = 0.0
+                blue_dribble = dribbler_trigger > 0.0
+                b_angle_rad = np.deg2rad(blue_robot_data.theta)
+                bv_x, bv_y, bv_theta = self.convert_actions(
+                    [bv_x_global, bv_y_global, bv_theta_global], b_angle_rad
+                )
+        elif level <= 2:
             # LEVEL 1 & 2: Blue steht still
             bv_x, bv_y, bv_theta = 0.0, 0.0, 0.0
             blue_kick = 0.0

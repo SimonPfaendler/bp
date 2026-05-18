@@ -3,6 +3,7 @@ import torch
 from stable_baselines3 import PPO, SAC, TD3, A2C, DDPG
 from sb3_contrib import CrossQ
 import os
+import shutil
 import argparse
 import time
 from stable_baselines3.common.noise import NormalActionNoise
@@ -79,7 +80,34 @@ class CurriculumCallback(BaseCallback):
 
         return True
 
-def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=1):
+class PoolSnapshotCallback(BaseCallback):
+    """Snapshot the live policy into the opponent pool every `save_freq` steps.
+
+    Atomic write: save to .tmp.zip then rename so env workers (which scan the
+    dir on reset) never see a half-written file.
+    """
+    def __init__(self, save_freq, pool_dir, name_prefix, verbose=0):
+        super().__init__(verbose)
+        self.save_freq = save_freq
+        self.pool_dir = pool_dir
+        self.name_prefix = name_prefix
+        os.makedirs(pool_dir, exist_ok=True)
+        self.next_save_step = save_freq
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps >= self.next_save_step:
+            tmp = os.path.join(self.pool_dir, f"{self.name_prefix}_{self.num_timesteps}.tmp.zip")
+            final = os.path.join(self.pool_dir, f"{self.name_prefix}_{self.num_timesteps}.zip")
+            self.model.save(tmp)
+            os.replace(tmp, final)
+            if self.verbose:
+                print(f"[pool] snapshot -> {final}")
+            self.next_save_step += self.save_freq
+        return True
+
+
+def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=1,
+          selfplay=False, opponent_path=None, pool_snapshot_freq=200_000):
 
     log_freq = 10
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -99,6 +127,23 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=
         }
     )
     env_kwargs = dict(action_type=action_type, reward_type=reward_type)
+
+    pool_dir = None
+    if selfplay:
+        if not opponent_path or not os.path.isfile(opponent_path):
+            raise ValueError(f"--selfplay requires --opponent <path>, got {opponent_path!r}")
+        pool_dir = os.path.join(model_dir, f"pool_{run_name}")
+        os.makedirs(pool_dir, exist_ok=True)
+        # Seed the pool so v0 is sampled alongside future snapshots.
+        seed_dst = os.path.join(pool_dir, f"v0_{os.path.basename(opponent_path)}")
+        if not os.path.isfile(seed_dst):
+            shutil.copyfile(opponent_path, seed_dst)
+        env_kwargs.update(
+            blue_mode="selfplay",
+            opponent_pool_dir=pool_dir,
+            seed_opponent_path=opponent_path,
+        )
+        print(f"Self-play enabled. Pool dir: {pool_dir} (seeded with v0)")
 
 
     env = make_vec_env(
@@ -169,7 +214,15 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=
     )
 
     
-    callback_list = CallbackList([curriculum_callback, checkpoint_callback])
+    callbacks = [curriculum_callback, checkpoint_callback]
+    if selfplay:
+        callbacks.append(PoolSnapshotCallback(
+            save_freq=pool_snapshot_freq,
+            pool_dir=pool_dir,
+            name_prefix=run_name,
+            verbose=1,
+        ))
+    callback_list = CallbackList(callbacks)
     
     
     model.learn(
@@ -182,8 +235,18 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=
     model.save(final_save_path)
     print(f"Training done: {final_save_path}")
 
-def test(sb3_algo, action_type, reward_type, path_to_model, test_level=4):
-    env = SSL1v1ContinuousEnv(action_type=action_type, reward_type=reward_type, render_mode="human")
+def test(sb3_algo, action_type, reward_type, path_to_model, test_level=4,
+         selfplay=False, opponent_path=None, opponent_pool_dir=None):
+    env_kwargs = dict(action_type=action_type, reward_type=reward_type, render_mode="human")
+    if selfplay:
+        if not opponent_path and not opponent_pool_dir:
+            raise ValueError("--selfplay needs --opponent <path> and/or --opponent_pool_dir <dir>")
+        env_kwargs.update(
+            blue_mode="selfplay",
+            opponent_pool_dir=opponent_pool_dir,
+            seed_opponent_path=opponent_path,
+        )
+    env = SSL1v1ContinuousEnv(**env_kwargs)
     if hasattr(env, 'set_curriculum_level'):
         env.set_curriculum_level(test_level)
     algo_class = CrossQ if sb3_algo == 'CrossQ' else globals()[sb3_algo]
@@ -191,6 +254,8 @@ def test(sb3_algo, action_type, reward_type, path_to_model, test_level=4):
     obs, info = env.reset()
 
     print(f"Test Model: {path_to_model}")
+    if selfplay:
+        print(f"Blue opponent: {env._opponent_path}")
     summe = 0.0
 
     while True:
@@ -205,6 +270,8 @@ def test(sb3_algo, action_type, reward_type, path_to_model, test_level=4):
 
         if done:
             print("\nEpisode done")
+            if selfplay:
+                print(f"Next opponent: {env._opponent_path}")
             summe = 0.0
             obs, info = env.reset()
 
@@ -219,17 +286,37 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0, help='Zufalls-Seed für das Training')
     parser.add_argument('--start_level', type=int, default=1, choices=[1, 2, 3, 4, 5],
                         help='Curriculum-Level beim Start (1-5). Nützlich beim Weitertrainieren.')
+    parser.add_argument('--selfplay', action='store_true',
+                        help='Enable 1v1 self-play; blue is a frozen SAC sampled from the pool.')
+    parser.add_argument('--opponent', type=str, default=None,
+                        help='Seed opponent .zip (also used as the v0 entry in the pool).')
+    parser.add_argument('--pool_snapshot_freq', type=int, default=200_000,
+                        help='Snapshot the live policy into the opponent pool every N steps.')
+    parser.add_argument('--opponent_pool_dir', type=str, default=None,
+                        help='Directory of frozen .zip opponents (test mode: sampled each episode).')
+    parser.add_argument('--test_level', type=int, default=5, choices=[1, 2, 3, 4, 5],
+                        help='Curriculum level used by --test (default 5).')
     args = parser.parse_args()
 
     if args.train:
         path = ""  # Path to model for continued training
+        if args.selfplay and not path:
+            # Common case: warm-start training from the seed opponent.
+            path = args.opponent or ""
         train(args.sb3_algo, args.action_type, args.reward_type, args.seed,
               load_path=path if os.path.isfile(path) else None,
-              start_level=args.start_level)
+              start_level=args.start_level,
+              selfplay=args.selfplay,
+              opponent_path=args.opponent,
+              pool_snapshot_freq=args.pool_snapshot_freq)
 
 
     if args.test:
         if os.path.isfile(args.test):
-            test(args.sb3_algo, args.action_type, args.reward_type, path_to_model=args.test)
+            test(args.sb3_algo, args.action_type, args.reward_type, path_to_model=args.test,
+                 test_level=args.test_level,
+                 selfplay=args.selfplay,
+                 opponent_path=args.opponent,
+                 opponent_pool_dir=args.opponent_pool_dir)
         else:
             print(f'Datei {args.test} wurde nicht gefunden.')

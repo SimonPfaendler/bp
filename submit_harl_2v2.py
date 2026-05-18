@@ -122,7 +122,7 @@ def main():
     num_env_steps = 4_000_000
     curriculum_level = 1
     frozen_path = None
-    exp_name = "ssl2v2_hasac_lvl1_static_shareparam"
+    exp_name = "ssl2v2_hasac_lvl1_paperdefaults_autoalpha"
     # Chain-from-checkpoint: when MODEL_DIR is set, the run loads actor+
     # critic+value_norm from that path (must be a HARL run's models/ dir),
     # forces curriculum_level=5 (since the loaded policy is already

@@ -23,7 +23,7 @@
             "update_per_train": 2,
             "log_interval": null,
             "eval_interval": 7000,
-            "use_valuenorm": true,
+            "use_valuenorm": false,
             "use_linear_lr_decay": true,
             "use_proper_time_limits": true,
             "model_dir": null
@@ -48,15 +48,15 @@
             "critic_lr": 0.0005
         },
         "algo": {
-            "auto_alpha": false,
-            "alpha": 0.001,
+            "auto_alpha": true,
+            "alpha": 0.2,
             "alpha_lr": 0.0003,
             "gamma": 0.99,
             "buffer_size": 1000000,
             "batch_size": 1000,
             "polyak": 0.005,
-            "n_step": 5,
-            "use_huber_loss": true,
+            "n_step": 10,
+            "use_huber_loss": false,
             "use_policy_active_masks": true,
             "huber_delta": 10.0,
             "share_param": true,

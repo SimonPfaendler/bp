@@ -40,7 +40,7 @@ VENV_PY = _find_venv_py()
 def run_experiment(
     algo, seed, n_rollout_threads, n_eval_rollout_threads,
     num_env_steps, curriculum_level, frozen_path, exp_name,
-    model_dir=None, warmup_steps=None,
+    model_dir=None, warmup_steps=None, blue_heuristic=None,
 ):
     """Invoke HARL train.py with the ssl_2v2 env via CLI overrides."""
     # HARL's update_args matches CLI args by *leaf* key only — dot-notation
@@ -49,6 +49,9 @@ def run_experiment(
     # inside env_args, so no ambiguity).
     frozen_flag = (
         f"--frozen_path {frozen_path} " if frozen_path else ""
+    )
+    heuristic_flag = (
+        f"--blue_heuristic {blue_heuristic} " if blue_heuristic else ""
     )
     # When chaining 30-min runs, --model_dir restores actor + critic +
     # value_normalizer from a previous run's models/ folder. The replay
@@ -90,7 +93,7 @@ def run_experiment(
         f"--num_env_steps {num_env_steps} "
         f"--update_per_train 1 "
         f"--curriculum_level {curriculum_level} "
-        f"{warmup_flag}{model_dir_flag}{frozen_flag}"
+        f"{warmup_flag}{model_dir_flag}{frozen_flag}{heuristic_flag}"
     )
     os.system(cmd)
 
@@ -122,7 +125,8 @@ def main():
     num_env_steps = 4_000_000
     curriculum_level = 1
     frozen_path = None
-    exp_name = "ssl2v2_hasac_lvl1_h512_paperdefaults"
+    blue_heuristic = "attacker"   # blue uses the hand-coded attacker
+    exp_name = "ssl2v2_hasac_lvl1_h256_vs_heuristic"
     # Chain-from-checkpoint: when MODEL_DIR is set, the run loads actor+
     # critic+value_norm from that path (must be a HARL run's models/ dir),
     # forces curriculum_level=5 (since the loaded policy is already
@@ -146,7 +150,7 @@ def main():
             run_experiment, algo, seed, n_rollout_threads,
             n_eval_rollout_threads, num_env_steps,
             curriculum_level, frozen_path, exp_name,
-            model_dir, warmup_steps,
+            model_dir, warmup_steps, blue_heuristic,
         )
         jobs.append(job)
     print(f"Submitted {len(jobs)} HARL job(s) [algo={algo}, exp={exp_name}]")

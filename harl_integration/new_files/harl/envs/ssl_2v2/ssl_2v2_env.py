@@ -74,6 +74,7 @@ class SSL2v2Env:
             "curriculum_window": self.args.get(
                 "curriculum_window", 200
             ),
+            "blue_heuristic": self.args.get("blue_heuristic", None),
         }
         self.env = SSL2v2SelfPlayEnv(**env_kwargs)
 

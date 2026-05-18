@@ -26,6 +26,96 @@ from rsoccer_gym.Entities import Ball, Frame, Robot
 from rsoccer_gym.ssl.ssl_gym_base import SSLBaseEnv
 from stable_baselines3 import SAC
 
+from skills import (
+    move_to_ball,
+    move_to_point,
+    shoot_at_goal_center,
+    turn_to_point,
+)
+
+
+def blue_attacker_heuristic_2v2(env, robot, yellows) -> np.ndarray:
+    """Aggressive blue: drive to ball; on infrared contact shoot at the
+    yellow goal. No defensive fallback. Returns 5-dim skill output
+    [v_x, v_y, v_theta, kick, dribble].
+    """
+    if robot.infrared:
+        return shoot_at_goal_center(env, robot, team_color="blue")
+    return move_to_ball(robot, env.frame.ball, speed=2.0)
+
+
+def blue_defender_heuristic_2v2(env, robot, yellows) -> np.ndarray:
+    """Defensive blue: same structure as the 1v1 blue_attacker_heuristic.
+    Shoot on infrared, fall back to the goal-ball defensive line when the
+    closest yellow is closer to the ball, intercept fast moving balls,
+    otherwise chase ball.
+    """
+    ball = env.frame.ball
+    defend_goal_x = -env.field.length / 2.0
+
+    if robot.infrared:
+        return shoot_at_goal_center(env, robot, team_color="blue")
+
+    dist_blue_ball = math.hypot(robot.x - ball.x, robot.y - ball.y)
+    closest_yellow = min(
+        yellows, key=lambda y: math.hypot(y.x - ball.x, y.y - ball.y)
+    )
+    dist_yellow_ball = math.hypot(
+        closest_yellow.x - ball.x, closest_yellow.y - ball.y
+    )
+    if dist_yellow_ball < dist_blue_ball:
+        goal = np.array([defend_goal_x, 0.0])
+        ball_pos = np.array([ball.x, ball.y])
+        bg = goal - ball_pos
+        bg_len = np.linalg.norm(bg)
+        if bg_len > 0.01:
+            stand = goal - (bg / bg_len) * min(1.0, bg_len * 0.4)
+        else:
+            stand = np.array([defend_goal_x + 0.3, 0.0])
+        v_x, v_y = move_to_point(robot, stand, speed=2.0)
+        v_theta = turn_to_point(robot, np.array([ball.x, ball.y]))
+        return np.array([v_x, v_y, v_theta, 0.0, 0.0])
+
+    ball_speed = math.hypot(ball.v_x, ball.v_y)
+    if ball_speed > 0.3:
+        dx, dy = ball.x - robot.x, ball.y - robot.y
+        s = 1.2
+        a = ball_speed * ball_speed - s * s
+        b = 2.0 * (dx * ball.v_x + dy * ball.v_y)
+        c = dx * dx + dy * dy
+        t = None
+        if abs(a) < 1e-6:
+            if abs(b) > 1e-6:
+                cand = -c / b
+                if cand > 0.0:
+                    t = cand
+        else:
+            disc = b * b - 4.0 * a * c
+            if disc >= 0.0:
+                sq = math.sqrt(max(disc, 0.0))
+                roots = [
+                    r for r in (
+                        (-b - sq) / (2.0 * a),
+                        (-b + sq) / (2.0 * a),
+                    ) if r > 0.0
+                ]
+                if roots:
+                    t = min(roots)
+        if t is not None and t < 2.0:
+            target = np.array(
+                [ball.x + ball.v_x * t, ball.y + ball.v_y * t]
+            )
+            dx, dy = target[0] - robot.x, target[1] - robot.y
+            dist = math.hypot(dx, dy)
+            if dist > 1e-3:
+                v_x, v_y = (dx / dist) * s, (dy / dist) * s
+            else:
+                v_x, v_y = 0.0, 0.0
+            v_theta = turn_to_point(robot, target)
+            return np.array([v_x, v_y, v_theta, 0.0, 1.0])
+
+    return move_to_ball(robot, ball, speed=2.0)
+
 
 SINGLE_OBS_DIM_BASE = 52  # world-frame layout, see _egocentric_obs docstring
 ROLE_INDEX_DIM = 2
@@ -53,6 +143,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         curriculum_target_level=5,
         curriculum_threshold=0.9,
         curriculum_window=200,
+        blue_heuristic=None,
     ):
         super().__init__(
             field_type=1,
@@ -75,6 +166,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.frozen_path = frozen_path
         self.frozen_model = None  # lazy-load on first step (subproc-safe)
         self.frozen_type = None  # "sb3" or "harl", set on lazy-load
+        # Blue heuristic mode: when set (e.g. "attacker"), blue ignores
+        # frozen_path and is controlled by the hand-coded heuristic at the
+        # _build_commands stage. Mutually exclusive with frozen_path.
+        self.blue_heuristic = blue_heuristic
         # Frozen-model input dim (filled on lazy-load). If older than current
         # obs (e.g. v3 trained without role-index), we strip role-index dims
         # before predict so the same policy class can act as blue.
@@ -644,15 +739,50 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             self.frame.robots_yellow[1], yellow_action[1],
             self.must_release_y[1], yellow=True,
         ))
-        cmds.append(self._robot_command(
-            self.frame.robots_blue[0], blue_action[0],
-            self.must_release_b[0], yellow=False,
-        ))
-        cmds.append(self._robot_command(
-            self.frame.robots_blue[1], blue_action[1],
-            self.must_release_b[1], yellow=False,
-        ))
+        if self.blue_heuristic == "attacker":
+            # Blue 0 = aggressive (just chase + shoot), Blue 1 = defensive
+            # (chase if closer to ball, else fall back to defensive line).
+            cmds.append(self._blue_heuristic_command(
+                self.frame.robots_blue[0], personality="aggressive",
+            ))
+            cmds.append(self._blue_heuristic_command(
+                self.frame.robots_blue[1], personality="defensive",
+            ))
+        else:
+            cmds.append(self._robot_command(
+                self.frame.robots_blue[0], blue_action[0],
+                self.must_release_b[0], yellow=False,
+            ))
+            cmds.append(self._robot_command(
+                self.frame.robots_blue[1], blue_action[1],
+                self.must_release_b[1], yellow=False,
+            ))
         return cmds
+
+    def _blue_heuristic_command(self, robot, personality="aggressive") -> Robot:
+        """Build a blue Robot command from a hand-coded heuristic skill
+        output. Bypasses _robot_command's raw_kick/trigger encoding —
+        skills return kick magnitude directly. Same shape as 2v1's
+        _blue_command pattern.
+        """
+        yellows = (
+            self.frame.robots_yellow[0], self.frame.robots_yellow[1],
+        )
+        if personality == "defensive":
+            cmd = blue_defender_heuristic_2v2(self, robot, yellows)
+        else:
+            cmd = blue_attacker_heuristic_2v2(self, robot, yellows)
+        angle_rad = math.radians(robot.theta)
+        bv_x, bv_y, bv_w = self.convert_actions(
+            [float(cmd[0]), float(cmd[1]), float(cmd[2])], angle_rad
+        )
+        kick = float(cmd[3])
+        dribble = bool(cmd[4] > 0)
+        return Robot(
+            yellow=False, id=robot.id,
+            v_x=bv_x, v_y=bv_y, v_theta=bv_w,
+            kick_v_x=kick, dribbler=dribble,
+        )
 
     def _get_commands(self, action):
         return self._build_commands(

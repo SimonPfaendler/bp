@@ -38,7 +38,7 @@
             "render_episodes": 10
         },
         "model": {
-            "hidden_sizes": [512, 512, 512],
+            "hidden_sizes": [256, 256],
             "activation_func": "relu",
             "use_feature_normalization": true,
             "final_activation_func": "tanh",
@@ -74,6 +74,7 @@
         "curriculum_level": 1,
         "curriculum_target_level": 5,
         "curriculum_threshold": 0.9,
-        "curriculum_window": 200
+        "curriculum_window": 200,
+        "blue_heuristic": null
     }
 }

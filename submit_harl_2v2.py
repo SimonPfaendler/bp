@@ -88,7 +88,7 @@ def run_experiment(
         f"--n_rollout_threads {n_rollout_threads} "
         f"--n_eval_rollout_threads {n_eval_rollout_threads} "
         f"--num_env_steps {num_env_steps} "
-        f"--update_per_train 2 "
+        f"--update_per_train 1 "
         f"--curriculum_level {curriculum_level} "
         f"{warmup_flag}{model_dir_flag}{frozen_flag}"
     )

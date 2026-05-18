@@ -94,6 +94,13 @@ class PoolSnapshotCallback(BaseCallback):
         os.makedirs(pool_dir, exist_ok=True)
         self.next_save_step = save_freq
 
+    def _on_training_start(self) -> None:
+        # Warm-start from a checkpoint keeps num_timesteps != 0; without this,
+        # the callback fires hundreds of times in a row to "catch up".
+        self.next_save_step = (
+            (self.num_timesteps // self.save_freq) + 1
+        ) * self.save_freq
+
     def _on_step(self) -> bool:
         if self.num_timesteps >= self.next_save_step:
             tmp = os.path.join(self.pool_dir, f"{self.name_prefix}_{self.num_timesteps}.tmp.zip")
@@ -162,6 +169,9 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=
         new_ent_coef = 0.05
         model = algo_class.load(load_path, env=env, device='auto', tensorboard_log=current_log_dir,
                                 custom_objects={'learning_rate': 0.0003, 'ent_coef': new_ent_coef})
+        # SAC.load ignoriert seed=; ohne dies starten alle Seeds mit identischem
+        # internem RNG (Action-Noise) und nur die Env-Seeds unterscheiden sich.
+        model.set_random_seed(seed)
         if sb3_algo == 'SAC' and hasattr(model, 'ent_coef_tensor'):
             model.ent_coef_tensor = torch.tensor(float(new_ent_coef), device=model.device)
             print(f"Overwrote ent_coef_tensor -> {new_ent_coef}")

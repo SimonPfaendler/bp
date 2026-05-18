@@ -416,7 +416,9 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         ], dtype=np.float32)
 
         # Mirror over y-axis: negate every world-x quantity, cos(θ), v_θ, rel_angles.
-        for slot in (0, 2, 5, 8, 9, 11, 14, 15, 18, 21, 22, 24, 27, 29):
+        # Layout: BALL[0:5], SELF[5:18], OPP[18:28], PRED[28:32]. Scalar distances
+        # and distance-diffs (4, 13, 25, 27) stay; flags stay; sin(θ) stays.
+        for slot in (0, 2, 5, 8, 9, 11, 14, 15, 18, 21, 22, 24, 28, 30):
             obs[slot] = -obs[slot]
         return obs
 

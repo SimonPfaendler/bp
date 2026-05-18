@@ -120,9 +120,12 @@ def main():
     n_rollout_threads = 36
     n_eval_rollout_threads = 8
     num_env_steps = 4_000_000
-    curriculum_level = 1
-    frozen_path = None
-    exp_name = "ssl2v2_hasac_lvl1_paperdefaults_autoalpha"
+    curriculum_level = 5
+    frozen_path = (
+        "/pfs/work9/workspace/scratch/fr_sp329-ssl_rl_project/bp/models/"
+        "2v2_selfplay_SAC_dense_seed822_20260512-154059_final.zip"
+    )
+    exp_name = "ssl2v2_hasac_lvl5_h512_vs_sac0512"
     # Chain-from-checkpoint: when MODEL_DIR is set, the run loads actor+
     # critic+value_norm from that path (must be a HARL run's models/ dir),
     # forces curriculum_level=5 (since the loaded policy is already

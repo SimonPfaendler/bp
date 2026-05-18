@@ -18,7 +18,7 @@
         "train": {
             "n_rollout_threads": 36,
             "num_env_steps": 20000000,
-            "warmup_steps": 10000,
+            "warmup_steps": 20000,
             "train_interval": 50,
             "update_per_train": 1,
             "log_interval": null,
@@ -38,7 +38,7 @@
             "render_episodes": 10
         },
         "model": {
-            "hidden_sizes": [256, 256],
+            "hidden_sizes": [512, 512, 512],
             "activation_func": "relu",
             "use_feature_normalization": true,
             "final_activation_func": "tanh",
@@ -71,7 +71,7 @@
         "frozen_path": null,
         "role_index": false,
         "oob_grace_steps": 0,
-        "curriculum_level": 1,
+        "curriculum_level": 5,
         "curriculum_target_level": 5,
         "curriculum_threshold": 0.9,
         "curriculum_window": 200

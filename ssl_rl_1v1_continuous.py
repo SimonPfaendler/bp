@@ -72,9 +72,13 @@ def blue_attacker_heuristic(env, robot):
 
     return move_to_ball(robot, ball, speed=2.0)
 
+HEURISTIC_SENTINEL = "__heuristic__"
+
+
 class SSL1v1ContinuousEnv(SSLBaseEnv):
     def __init__(self, render_mode=None, action_type="skills", reward_type="dense",
-                 blue_mode="heuristic", opponent_pool_dir=None, seed_opponent_path=None):
+                 blue_mode="heuristic", opponent_pool_dir=None, seed_opponent_path=None,
+                 anchor_heuristic_prob=0.0, anchor_v0_prob=0.0):
         super().__init__(field_type=1, n_robots_blue=1, n_robots_yellow=1, time_step=0.025, render_mode=render_mode)
         """
         1v1 Continuous Robot Soccer Environment.
@@ -155,6 +159,13 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         self.blue_mode = blue_mode
         self.opponent_pool_dir = opponent_pool_dir
         self.seed_opponent_path = seed_opponent_path
+        self.anchor_heuristic_prob = float(anchor_heuristic_prob)
+        self.anchor_v0_prob = float(anchor_v0_prob)
+        if self.anchor_heuristic_prob + self.anchor_v0_prob > 1.0 + 1e-9:
+            raise ValueError(
+                f"anchor_heuristic_prob + anchor_v0_prob must be <= 1, got "
+                f"{self.anchor_heuristic_prob} + {self.anchor_v0_prob}"
+            )
         self._opponent_model = None
         self._opponent_path = None
         if self.blue_mode == "selfplay" and self.action_type != "low_level":
@@ -193,7 +204,26 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         return super().reset(seed=seed, **kwargs)
 
     def _sample_opponent(self):
-        """Pick a frozen opponent .zip from the pool dir, else fall back to seed."""
+        """Anchored self-play sampling: roll for heuristic anchor, then v0 anchor,
+        else uniform pool sample. Anchor probs default to 0 -> backward-compat
+        with plain pool-sampling self-play."""
+        roll = float(self.np_random.random())
+
+        # Anchor 1: heuristic. No model load — _get_commands routes to heuristic.
+        if self.anchor_heuristic_prob > 0.0 and roll < self.anchor_heuristic_prob:
+            self._opponent_path = HEURISTIC_SENTINEL
+            self._opponent_model = None
+            return
+
+        # Anchor 2: frozen v0 champion (= seed_opponent_path).
+        if (self.anchor_v0_prob > 0.0
+                and self.seed_opponent_path
+                and os.path.isfile(self.seed_opponent_path)
+                and roll < self.anchor_heuristic_prob + self.anchor_v0_prob):
+            self._load_opponent(self.seed_opponent_path)
+            return
+
+        # Default: uniform sample from pool, fall back to seed.
         pool = []
         if self.opponent_pool_dir and os.path.isdir(self.opponent_pool_dir):
             pool = sorted(
@@ -206,15 +236,18 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         if not pool:
             return
         chosen = pool[int(self.np_random.integers(0, len(pool)))]
-        if chosen == self._opponent_path and self._opponent_model is not None:
+        self._load_opponent(chosen)
+
+    def _load_opponent(self, path):
+        if path == self._opponent_path and self._opponent_model is not None:
             return
         try:
             from stable_baselines3 import SAC
-            self._opponent_model = SAC.load(chosen, device="cpu")
-            self._opponent_path = chosen
+            self._opponent_model = SAC.load(path, device="cpu")
+            self._opponent_path = path
         except Exception as e:
             # Mid-write or corrupt file — keep previous opponent if any.
-            print(f"[selfplay] failed loading {chosen}: {e}")
+            print(f"[selfplay] failed loading {path}: {e}")
 
     
     
@@ -294,6 +327,25 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             info["is_success"] = 1.0 if self.match_result == 1 else 0.0
             info["match_result"] = self.match_result
             info["possession_ratio"] = self.yellow_possession_steps / max(1, self.current_step)
+
+            ball = self.frame.ball
+            yellow = self.frame.robots_yellow[0]
+            max_x = self.field.length / 2.0
+            max_y = self.field.width / 2.0
+            goal_hw = self.field.goal_width / 2.0
+            if self.match_result == 1:
+                event = "yellow_goal"
+            elif ball.x > max_x and abs(ball.y) <= goal_hw:
+                event = "blue_goal"
+            elif abs(yellow.x) > max_x or abs(yellow.y) > max_y:
+                event = "robot_oob"
+            elif abs(ball.x) > max_x or abs(ball.y) > max_y:
+                event = "ball_oob"
+            elif truncated or self.current_step >= self.max_steps:
+                event = "timeout"
+            else:
+                event = "other"
+            info["terminal_event"] = event
 
         return obs, reward, terminated, truncated, info
 
@@ -471,6 +523,26 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             obs[slot] = -obs[slot]
         return obs
 
+    def _heuristic_blue_motion(self):
+        """Run the L5 heuristic + personality and convert to local velocities.
+        Returns (bv_x, bv_y, bv_theta, blue_kick, blue_dribble)."""
+        ball = self.frame.ball
+        blue_robot_data = self.frame.robots_blue[0]
+        if self.blue_personality == "aggressive":
+            if blue_robot_data.infrared is True:
+                b_cmd = shoot_at_goal_center(self, blue_robot_data, team_color="blue")
+            else:
+                b_cmd = move_to_ball(blue_robot_data, ball, speed=1.5)
+        else:
+            b_cmd = blue_attacker_heuristic(self, blue_robot_data)
+        b_angle_rad = np.deg2rad(blue_robot_data.theta)
+        bv_x, bv_y, bv_theta = self.convert_actions(
+            [b_cmd[0], b_cmd[1], b_cmd[2]], b_angle_rad
+        )
+        blue_kick = b_cmd[3]
+        blue_dribble = b_cmd[4] > 0
+        return bv_x, bv_y, bv_theta, blue_kick, blue_dribble
+
     def _compute_blue_action_selfplay(self):
         """Run frozen opponent and un-mirror its world-frame action."""
         if self._opponent_model is None:
@@ -589,31 +661,38 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         level = getattr(self, 'curriculum_level', 1)
 
         if self.blue_mode == "selfplay":
-            blue_action = self._compute_blue_action_selfplay()
-            if blue_action is None:
-                # No opponent loaded yet — stand still rather than crash.
-                bv_x, bv_y, bv_theta = 0.0, 0.0, 0.0
-                blue_kick = 0.0
-                blue_dribble = False
-            else:
-                bv_x_global = float(blue_action[0])
-                bv_y_global = float(blue_action[1])
-                bv_theta_global = float(blue_action[2])
-                raw_kick_power = float(blue_action[3])
-                kick_trigger = float(blue_action[4])
-                dribbler_trigger = float(blue_action[5])
-                if kick_trigger > 0.0:
-                    blue_kick = 3.0 + ((raw_kick_power + 1.0) / 2.0) * 3.0
-                else:
-                    blue_kick = 0.0
-                blue_dribble = dribbler_trigger > 0.0
-                b_angle_rad = np.deg2rad(blue_robot_data.theta)
-                bv_x, bv_y, bv_theta = self.convert_actions(
-                    [bv_x_global, bv_y_global, bv_theta_global], b_angle_rad
-                )
+            if self._opponent_path == HEURISTIC_SENTINEL:
+                # Heuristic anchor: same blue motion as curriculum L4/L5.
+                bv_x, bv_y, bv_theta, blue_kick, blue_dribble = self._heuristic_blue_motion()
                 if self.must_release_b:
                     blue_kick = 0.01
                     blue_dribble = False
+            else:
+                blue_action = self._compute_blue_action_selfplay()
+                if blue_action is None:
+                    # No opponent loaded yet — stand still rather than crash.
+                    bv_x, bv_y, bv_theta = 0.0, 0.0, 0.0
+                    blue_kick = 0.0
+                    blue_dribble = False
+                else:
+                    bv_x_global = float(blue_action[0])
+                    bv_y_global = float(blue_action[1])
+                    bv_theta_global = float(blue_action[2])
+                    raw_kick_power = float(blue_action[3])
+                    kick_trigger = float(blue_action[4])
+                    dribbler_trigger = float(blue_action[5])
+                    if kick_trigger > 0.0:
+                        blue_kick = 3.0 + ((raw_kick_power + 1.0) / 2.0) * 3.0
+                    else:
+                        blue_kick = 0.0
+                    blue_dribble = dribbler_trigger > 0.0
+                    b_angle_rad = np.deg2rad(blue_robot_data.theta)
+                    bv_x, bv_y, bv_theta = self.convert_actions(
+                        [bv_x_global, bv_y_global, bv_theta_global], b_angle_rad
+                    )
+                    if self.must_release_b:
+                        blue_kick = 0.01
+                        blue_dribble = False
         elif level <= 2:
             # LEVEL 1 & 2: Blue steht still
             bv_x, bv_y, bv_theta = 0.0, 0.0, 0.0
@@ -628,17 +707,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             blue_dribble = False
         else:
             # LEVEL 4 & 5: Full Heuristic mit Personality
-            if self.blue_personality == "aggressive":
-                if blue_robot_data.infrared is True:
-                    b_cmd = shoot_at_goal_center(self, blue_robot_data, team_color="blue")
-                else:
-                    b_cmd = move_to_ball(blue_robot_data, ball, speed=1.5)
-            else:
-                b_cmd = blue_attacker_heuristic(self, blue_robot_data)
-            b_angle_rad = np.deg2rad(blue_robot_data.theta)
-            bv_x, bv_y, bv_theta = self.convert_actions([b_cmd[0], b_cmd[1], b_cmd[2]], b_angle_rad)
-            blue_kick = b_cmd[3]
-            blue_dribble = True if b_cmd[4] > 0 else False
+            bv_x, bv_y, bv_theta, blue_kick, blue_dribble = self._heuristic_blue_motion()
 
         
         robot_blue = Robot(

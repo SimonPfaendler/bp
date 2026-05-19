@@ -114,7 +114,8 @@ class PoolSnapshotCallback(BaseCallback):
 
 
 def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=1,
-          selfplay=False, opponent_path=None, pool_snapshot_freq=200_000):
+          selfplay=False, opponent_path=None, pool_snapshot_freq=200_000,
+          anchor_heuristic_prob=0.0, anchor_v0_prob=0.0):
 
     log_freq = 10
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -149,8 +150,11 @@ def train(sb3_algo, action_type, reward_type, seed, load_path=None, start_level=
             blue_mode="selfplay",
             opponent_pool_dir=pool_dir,
             seed_opponent_path=opponent_path,
+            anchor_heuristic_prob=anchor_heuristic_prob,
+            anchor_v0_prob=anchor_v0_prob,
         )
-        print(f"Self-play enabled. Pool dir: {pool_dir} (seeded with v0)")
+        print(f"Self-play enabled. Pool dir: {pool_dir} (seeded with v0). "
+              f"Anchors: heuristic={anchor_heuristic_prob}, v0={anchor_v0_prob}")
 
 
     env = make_vec_env(
@@ -305,6 +309,10 @@ if __name__ == '__main__':
                         help='Seed opponent .zip (also used as the v0 entry in the pool).')
     parser.add_argument('--pool_snapshot_freq', type=int, default=200_000,
                         help='Snapshot the live policy into the opponent pool every N steps.')
+    parser.add_argument('--anchor_heuristic_prob', type=float, default=0.0,
+                        help='Self-play anchor: per-episode prob of using the L5 heuristic as blue.')
+    parser.add_argument('--anchor_v0_prob', type=float, default=0.0,
+                        help='Self-play anchor: per-episode prob of using the frozen v0/seed model as blue.')
     parser.add_argument('--opponent_pool_dir', type=str, default=None,
                         help='Directory of frozen .zip opponents (test mode: sampled each episode).')
     parser.add_argument('--test_level', type=int, default=5, choices=[1, 2, 3, 4, 5],
@@ -321,7 +329,9 @@ if __name__ == '__main__':
               start_level=args.start_level,
               selfplay=args.selfplay,
               opponent_path=args.opponent,
-              pool_snapshot_freq=args.pool_snapshot_freq)
+              pool_snapshot_freq=args.pool_snapshot_freq,
+              anchor_heuristic_prob=args.anchor_heuristic_prob,
+              anchor_v0_prob=args.anchor_v0_prob)
 
 
     if args.test:

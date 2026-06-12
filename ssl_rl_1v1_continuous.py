@@ -489,6 +489,12 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
         dist_blue_ball = math.hypot(blue.x - ball.x, blue.y - ball.y)
         dist_yellow_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
 
+        # Mirror of yellow's dribble bookkeeping so blue sees its own state.
+        dribble_meter_b = 0.0
+        if self.is_dribbling_b and self.dribble_start_pos_b is not None:
+            current_dribble_dist_b = np.linalg.norm(ball_pos - self.dribble_start_pos_b)
+            dribble_meter_b = float(np.clip(current_dribble_dist_b / self.max_dribble_dist, 0.0, 1.0))
+
         obs = np.array([
             # BALL
             self.norm_pos(ball.x), self.norm_pos(ball.y),
@@ -502,8 +508,8 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
             dist_blue_ball / max_dist,
             rel_angle_ball / math.pi,
             rel_angle_goal / math.pi,
-            0.0,  # dribble_meter (not tracked for blue in 1v1)
-            0.0,  # must_release_flag (idem)
+            dribble_meter_b,
+            1.0 if self.must_release_b else 0.0,
             # OPP (yellow)
             self.norm_pos(yellow.x), self.norm_pos(yellow.y),
             np.sin(np.deg2rad(yellow.theta)), np.cos(np.deg2rad(yellow.theta)),
@@ -943,7 +949,7 @@ class SSL1v1ContinuousEnv(SSLBaseEnv):
                 blue_x = self.np_random.uniform(-1.0, 2.0)
                 blue_y = self.np_random.uniform(-2.0, 2.0)
                 pos_frame.robots_blue[0] = Robot(x=blue_x, y=blue_y, theta=0)
-                pos_frame.ball = Ball(x=blue_x+0.15, y=blue_y)
+                pos_frame.ball = Ball(x=blue_x + 0.5, y=blue_y)
                 pos_frame.robots_yellow[0] = Robot(
                     x=blue_x + self.np_random.uniform(0.5, 1.5),
                     y=blue_y + self.np_random.uniform(-0.2, 0.2),

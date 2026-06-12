@@ -313,6 +313,8 @@ if __name__ == '__main__':
                         help='Self-play anchor: per-episode prob of using the L5 heuristic as blue.')
     parser.add_argument('--anchor_v0_prob', type=float, default=0.0,
                         help='Self-play anchor: per-episode prob of using the frozen v0/seed model as blue.')
+    parser.add_argument('--load_path', type=str, default=None,
+                        help='Warm-start from an existing .zip (e.g. BC-pretrained model).')
     parser.add_argument('--opponent_pool_dir', type=str, default=None,
                         help='Directory of frozen .zip opponents (test mode: sampled each episode).')
     parser.add_argument('--test_level', type=int, default=5, choices=[1, 2, 3, 4, 5],
@@ -320,7 +322,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.train:
-        path = ""  # Path to model for continued training
+        path = args.load_path or ""
         if args.selfplay and not path:
             # Common case: warm-start training from the seed opponent.
             path = args.opponent or ""

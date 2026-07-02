@@ -284,6 +284,26 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     else:
         print(f"No init checkpoint at {init_load}; training from scratch")
 
+    # Optional: load matching replay buffer to skip cold-start.
+    if init_load and os.path.exists(init_load):
+        buf_path = init_load.replace(".zip", "").replace("_steps", "") + "_replay_buffer"
+        # Try both naming schemes (matches CheckpointCallback + final save).
+        candidates = [
+            init_load.replace(".zip", ".pkl").replace("_steps", "_replay_buffer_") + "steps.pkl",
+            init_load.replace("_steps.zip", "").replace("_", "_", 1) + "_replay_buffer.pkl",
+        ]
+        # Simple explicit match for _NNNN_steps.zip -> _replay_buffer_NNNN_steps.pkl
+        import re
+        m = re.match(r"^(.*)_(\d+)_steps\.zip$", init_load)
+        if m:
+            base, steps = m.group(1), m.group(2)
+            buffer_path = f"{base}_replay_buffer_{steps}_steps.pkl"
+            if os.path.exists(buffer_path):
+                model.load_replay_buffer(buffer_path)
+                print(f"Loaded replay buffer: {buffer_path} ({model.replay_buffer.size()} transitions)")
+            else:
+                print(f"No matching replay buffer at {buffer_path}")
+
     callbacks = CallbackList([
         StatsCallback(),
         CurriculumCallback(start_level=1, target_level=5, threshold=0.9),

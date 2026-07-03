@@ -180,6 +180,82 @@ class StatsCallback(BaseCallback):
         return True
 
 
+class DebugCallback(BaseCallback):
+    """Log per-module grad norms, Q-value stats, and alpha every N steps.
+
+    Without these it's impossible to tell whether policy collapse comes from
+    Q-value explosion, actor grad spikes, or alpha collapsing to zero.
+    """
+
+    def __init__(self, log_every=500, q_sample_size=256, verbose=0):
+        super().__init__(verbose)
+        self.log_every = int(log_every)
+        self.q_sample_size = int(q_sample_size)
+
+    def _grad_norm(self, module):
+        total = 0.0
+        for p in module.parameters():
+            if p.grad is not None:
+                total += p.grad.detach().data.norm(2).item() ** 2
+        return total ** 0.5
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.log_every != 0:
+            return True
+
+        # Grad norms per module (only meaningful right after backward).
+        for name, module in [("actor", self.model.actor),
+                             ("critic", self.model.critic)]:
+            gn = self._grad_norm(module)
+            self.logger.record(f"debug/{name}_grad_norm", gn)
+
+        # Q-value distribution over a sampled batch.
+        if self.model.replay_buffer is not None and self.model.replay_buffer.size() > 1000:
+            try:
+                batch = self.model.replay_buffer.sample(
+                    self.q_sample_size, env=self.model._vec_normalize_env
+                )
+                with torch.no_grad():
+                    q_values = self.model.critic(batch.observations, batch.actions)
+                    q_tensor = q_values[0] if isinstance(q_values, tuple) else q_values
+                    self.logger.record("debug/q_min", float(q_tensor.min().item()))
+                    self.logger.record("debug/q_max", float(q_tensor.max().item()))
+                    self.logger.record("debug/q_mean", float(q_tensor.mean().item()))
+                    self.logger.record("debug/q_std", float(q_tensor.std().item()))
+            except Exception as e:
+                self.logger.record("debug/q_sample_error", 1.0)
+
+        # Alpha (entropy coefficient).
+        if hasattr(self.model, "log_ent_coef") and self.model.log_ent_coef is not None:
+            alpha = float(self.model.log_ent_coef.exp().item())
+            self.logger.record("debug/alpha", alpha)
+
+        return True
+
+
+class AlphaClampCallback(BaseCallback):
+    """Enforce a lower bound on the SAC entropy coefficient (alpha).
+
+    If alpha drops below `alpha_min`, the policy becomes too deterministic,
+    which is a major cause of policy collapse in self-play. Clamp log_ent_coef
+    each step so that alpha >= alpha_min.
+    """
+
+    def __init__(self, alpha_min=0.05, verbose=0):
+        super().__init__(verbose)
+        self.alpha_min = float(alpha_min)
+        self._log_min = None
+
+    def _on_training_start(self) -> None:
+        self._log_min = float(np.log(self.alpha_min))
+
+    def _on_step(self) -> bool:
+        if hasattr(self.model, "log_ent_coef") and self.model.log_ent_coef is not None:
+            with torch.no_grad():
+                self.model.log_ent_coef.clamp_(min=self._log_min)
+        return True
+
+
 def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path)
@@ -238,11 +314,11 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         model = MASAC(
             policy=MASACPolicy, env=env, verbose=1, device="cuda",
             tensorboard_log=log_dir, seed=seed,
-            train_freq=1, gradient_steps=1, batch_size=1024,
-            buffer_size=200_000, learning_rate=1e-4,
-            learning_starts=10000, ent_coef=0.05, target_entropy="auto",
-            critic_warmup_grad_steps=0, max_grad_norm=0.0,
-            policy_kwargs=policy_kwargs, gamma=0.995,
+            train_freq=48, gradient_steps=48, batch_size=2048,
+            buffer_size=1_000_000, learning_rate=3e-4,
+            learning_starts=20000, ent_coef="auto_0.05", target_entropy="auto",
+            critic_warmup_grad_steps=5000, max_grad_norm=0.5,
+            policy_kwargs=policy_kwargs, gamma=0.99,
         )
     else:
         # Independent SAC diagnostic: stock SB3 SAC over per-agent (52,)
@@ -299,13 +375,42 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             base, steps = m.group(1), m.group(2)
             buffer_path = f"{base}_replay_buffer_{steps}_steps.pkl"
             if os.path.exists(buffer_path):
-                model.load_replay_buffer(buffer_path)
-                print(f"Loaded replay buffer: {buffer_path} ({model.replay_buffer.size()} transitions)")
+                # Peek at buffer's n_envs — SB3 refuses to add transitions if
+                # the saved buffer's n_envs doesn't match the current VecEnv.
+                import pickle
+                with open(buffer_path, "rb") as _f:
+                    _buf = pickle.load(_f)
+                saved_n_envs = getattr(_buf, "n_envs", None)
+                cur_n_envs = model.replay_buffer.n_envs
+                if saved_n_envs == cur_n_envs:
+                    model.load_replay_buffer(buffer_path)
+                    print(f"Loaded replay buffer: {buffer_path} ({model.replay_buffer.size()} transitions)")
+                else:
+                    print(
+                        f"Skipping buffer load: saved n_envs={saved_n_envs} != current n_envs={cur_n_envs}. "
+                        f"Run with matching n_pairs (each pair uses 1 env slot for MASAC / joint variant)."
+                    )
+                del _buf
             else:
                 print(f"No matching replay buffer at {buffer_path}")
 
+    # Separate Actor/Critic learning rates.
+    # Actor 3x slower than critic prevents "actor-chase" collapse where the
+    # policy follows a not-yet-stable critic into a bad local minimum.
+    ACTOR_LR = 1e-4
+    CRITIC_LR = 3e-4
+    if hasattr(model, "actor") and hasattr(model.actor, "optimizer"):
+        for pg in model.actor.optimizer.param_groups:
+            pg["lr"] = ACTOR_LR
+    if hasattr(model, "critic") and hasattr(model.critic, "optimizer"):
+        for pg in model.critic.optimizer.param_groups:
+            pg["lr"] = CRITIC_LR
+    print(f"Actor LR: {ACTOR_LR} | Critic LR: {CRITIC_LR}")
+
     callbacks = CallbackList([
         StatsCallback(),
+        DebugCallback(log_every=500),
+        AlphaClampCallback(alpha_min=0.05),
         CurriculumCallback(start_level=1, target_level=5, threshold=0.9),
         CheckpointCallback(
             save_freq=20000, save_path=MODEL_DIR,

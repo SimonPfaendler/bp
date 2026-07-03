@@ -26,17 +26,17 @@ def main():
     executor = submitit.AutoExecutor(folder=log_folder)
     executor.update_parameters(
         slurm_job_name="sp2v2",
-        slurm_time="00:30:00",
-        slurm_partition="gpu_h100_short",
-        slurm_cpus_per_task=48,
+        slurm_time="02:30:00",
+        slurm_partition="gpu_h100",
+        slurm_cpus_per_task=24,
         slurm_mem="193300mb",
         slurm_additional_parameters={"gres": "gpu:1"},
     )
 
     # RUN A — build a competent attacker from scratch with the clean stack
     # (MASAC + LayerNorm + thin reward). Blue stands still (frozen_path=None),
-    frozen_path = None
-    init_path = None
+    frozen_path = "models/2v2_selfplay_MASAC_dense_seed822_20260516-170440_1920000_steps.zip"
+    init_path = "models/2v2_selfplay_MASAC_dense_seed822_20260516-170440_1920000_steps.zip"
     reward_type = "dense"
     n_pairs = 24
     seeds = [822]

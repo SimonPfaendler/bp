@@ -399,13 +399,17 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     # policy follows a not-yet-stable critic into a bad local minimum.
     ACTOR_LR = 1e-4
     CRITIC_LR = 3e-4
+    # Weight decay on critic bounds Q-value magnitude via L2 on network weights.
+    # Prevents Q-explosion (observed: q_mean climbing from 0 to 200+ pre-collapse).
+    CRITIC_WEIGHT_DECAY = 1e-3
     if hasattr(model, "actor") and hasattr(model.actor, "optimizer"):
         for pg in model.actor.optimizer.param_groups:
             pg["lr"] = ACTOR_LR
     if hasattr(model, "critic") and hasattr(model.critic, "optimizer"):
         for pg in model.critic.optimizer.param_groups:
             pg["lr"] = CRITIC_LR
-    print(f"Actor LR: {ACTOR_LR} | Critic LR: {CRITIC_LR}")
+            pg["weight_decay"] = CRITIC_WEIGHT_DECAY
+    print(f"Actor LR: {ACTOR_LR} | Critic LR: {CRITIC_LR} | Critic WD: {CRITIC_WEIGHT_DECAY}")
 
     callbacks = CallbackList([
         StatsCallback(),

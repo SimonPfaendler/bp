@@ -837,11 +837,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         if abs(ball.x) > max_x and abs(ball.y) <= goal_half_width:
             done = True
             if ball.x < 0:  # Yellow scored
-                rewards += 100.0
-                rewards += (self.max_steps - self.current_step) * 0.01
+                rewards += 10.0
+                rewards += (self.max_steps - self.current_step) * 0.001
                 self.match_result = 1
             else:  # Blue scored
-                rewards -= 50.0
+                rewards -= 5.0
                 self.match_result = -1
                 self.blue_goal_scored = True
             return rewards, done, truncated
@@ -849,7 +849,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # Ball OOB without a goal: small penalty.
         if (abs(ball.x) > max_x or abs(ball.y) > max_y) and not in_grace:
             done = True
-            rewards -= 5.0
+            rewards -= 0.5
             self.match_result = -1
             return rewards, done, truncated
         # Yellow robot OOB: heavy penalty (deters escape). Blue OOB ends
@@ -858,7 +858,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             for r in yellows:
                 if abs(r.x) > max_x or abs(r.y) > max_y:
                     done = True
-                    rewards -= 20.0
+                    rewards -= 2.0
                     self.match_result = -1
                     return rewards, done, truncated
             for r in blues:
@@ -951,7 +951,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 prev = yellows[self.last_yellow_carrier]
                 ball_to_prev = math.hypot(ball.x - prev.x, ball.y - prev.y)
                 if ball_to_prev > 0.5:
-                    rewards += 30.0
+                    rewards += 3.0
                     self.passes_in_episode += 1
             self.last_yellow_carrier = current_carrier
             self.blue_touched_since_yellow = False

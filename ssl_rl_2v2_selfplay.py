@@ -879,18 +879,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             ya_has = (dist_a < 0.12) or ya.infrared
             yb_has = (dist_b < 0.12) or yb.infrared
 
-            # Absolute potential: constant gradient toward the ball even
-            # when the agent isn't moving.
-            rewards[0] += 0.05 * (1.0 - dist_a / max_dist)
-            rewards[1] += 0.05 * (1.0 - dist_b / max_dist)
-
-            # Standing-still penalty (per agent, only without the ball).
-            if math.hypot(ya.v_x, ya.v_y) < 0.1 and not ya_has:
-                rewards[0] -= 0.05
-            if math.hypot(yb.v_x, yb.v_y) < 0.1 and not yb_has:
-                rewards[1] -= 0.05
-
-            # Robot→Ball signed delta — per agent.
+            # Robot→Ball signed delta — per agent. Only progress signal.
+            # Rewards moving toward the ball, penalizes moving away.
             if self.last_dist_to_ball is None:
                 self.last_dist_to_ball = [dist_a, dist_b]
             for i in range(2):
@@ -898,25 +888,18 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 rewards[i] += float(np.clip(delta * 5.0, -0.5, 0.5))
             self.last_dist_to_ball = [dist_a, dist_b]
 
-            # Ball→Goal signed delta — shared.
+            # Ball→Goal signed delta — shared. Rewards ball moving toward
+            # opponent goal (progress toward scoring).
             dist_ball_goal = self._dist_ball_to_goal(ball.x, ball.y)
             if self.last_dist_ball_goal is not None:
                 goal_delta = self.last_dist_ball_goal - dist_ball_goal
                 rewards += float(np.clip(goal_delta * 10.0, -1.0, 1.5))
             self.last_dist_ball_goal = dist_ball_goal
 
-            # Ball direction toward attack goal (-x) — shared.
-            if ball.v_x < -0.5:
-                rewards += 0.02 * min(-ball.v_x, 3.0)
-            elif ball.v_x > 0.5:
-                rewards -= 0.02 * min(ball.v_x, 3.0)
-
-            # Possession — per agent.
-            if ya_has:
-                rewards[0] += 0.01
-            if yb_has:
-                rewards[1] += 0.01
+            # Anti-passivity: whenever a Yellow holds the ball, small negative
+            # per step. Prevents "hold ball, don't shoot" degenerate policy.
             if ya_has or yb_has:
+                rewards -= 0.03
                 self.team_possession_steps += 1
 
             self.last_ball_pos = (ball.x, ball.y)

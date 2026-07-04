@@ -868,7 +868,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
         if self.current_step >= self.max_steps:
             truncated = True
-            rewards -= 10.0
+            rewards -= 1.0
             self.match_result = -1
             return rewards, done, truncated
 

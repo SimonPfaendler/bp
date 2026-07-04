@@ -256,6 +256,39 @@ class AlphaClampCallback(BaseCallback):
         return True
 
 
+class BestSuccessCallback(BaseCallback):
+    """Save a checkpoint whenever the rolling success rate hits a new best.
+
+    Training oscillates; the final checkpoint may sit in a trough. This keeps
+    the peak policy on disk (single file, overwritten on each new best).
+    """
+
+    def __init__(self, save_path, window=300, min_episodes=100, verbose=1):
+        super().__init__(verbose)
+        self.save_path = save_path
+        self.window = int(window)
+        self.min_episodes = int(min_episodes)
+        self.buffer = deque(maxlen=self.window)
+        self.best = 0.0
+
+    def _on_step(self) -> bool:
+        dones = self.locals.get("dones", [])
+        infos = self.locals.get("infos", [])
+        for i, done in enumerate(dones):
+            if done and "is_success" in infos[i]:
+                self.buffer.append(float(infos[i]["is_success"]))
+        if len(self.buffer) >= self.min_episodes:
+            sr = float(np.mean(self.buffer))
+            if sr > self.best:
+                self.best = sr
+                path = f"{self.save_path}_best"
+                self.model.save(path)
+                self.logger.record("selfplay/best_success_rate", self.best)
+                if self.verbose:
+                    print(f"[BestCkpt] success_rate={sr:.3f} -> saved {path}")
+        return True
+
+
 def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path)
@@ -331,9 +364,9 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             policy="MlpPolicy", env=env, verbose=1, device="cuda",
             tensorboard_log=log_dir, seed=seed,
             train_freq=1, gradient_steps=1, batch_size=2048,
-            buffer_size=200_000, learning_rate=3e-4,
-            learning_starts=10000, ent_coef=0.05, target_entropy="auto",
-            policy_kwargs=policy_kwargs, gamma=0.995,
+            buffer_size=1_000_000, learning_rate=3e-4,
+            learning_starts=10000, ent_coef="auto_0.05", target_entropy="auto",
+            policy_kwargs=policy_kwargs, gamma=0.99,
         )
     if init_load and os.path.exists(init_load):
         print(f"Transferring actor weights from {init_load}")
@@ -415,6 +448,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         StatsCallback(),
         DebugCallback(log_every=500),
         AlphaClampCallback(alpha_min=0.05),
+        BestSuccessCallback(save_path=f"{MODEL_DIR}/{run_name}"),
         CurriculumCallback(start_level=1, target_level=5, threshold=0.9),
         CheckpointCallback(
             save_freq=20000, save_path=MODEL_DIR,

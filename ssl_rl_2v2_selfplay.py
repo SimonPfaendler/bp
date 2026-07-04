@@ -828,11 +828,13 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
         # Time penalty (per step, halved while ball is in defensive half so
         # defense isn't punished). Applied first so terminals also pay it.
+        # Scaled 10x down together with the terminal rewards so the
+        # terminal:shaping ratio matches the original design.
         if self.reward_type == "dense":
             if ball.x < 0:
-                rewards -= 0.02 * (1.0 + 2.0 * progress)
+                rewards -= 0.002 * (1.0 + 2.0 * progress)
             else:
-                rewards -= 0.04 * (1.0 + 2.0 * progress)
+                rewards -= 0.004 * (1.0 + 2.0 * progress)
 
         if abs(ball.x) > max_x and abs(ball.y) <= goal_half_width:
             done = True
@@ -885,7 +887,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 self.last_dist_to_ball = [dist_a, dist_b]
             for i in range(2):
                 delta = self.last_dist_to_ball[i] - dists[i]
-                rewards[i] += float(np.clip(delta * 5.0, -0.5, 0.5))
+                rewards[i] += float(np.clip(delta * 0.5, -0.05, 0.05))
             self.last_dist_to_ball = [dist_a, dist_b]
 
             # Ball→Goal signed delta — shared. Rewards ball moving toward
@@ -893,13 +895,13 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             dist_ball_goal = self._dist_ball_to_goal(ball.x, ball.y)
             if self.last_dist_ball_goal is not None:
                 goal_delta = self.last_dist_ball_goal - dist_ball_goal
-                rewards += float(np.clip(goal_delta * 10.0, -1.0, 1.5))
+                rewards += float(np.clip(goal_delta * 1.0, -0.1, 0.15))
             self.last_dist_ball_goal = dist_ball_goal
 
             # Anti-passivity: whenever a Yellow holds the ball, small negative
             # per step. Prevents "hold ball, don't shoot" degenerate policy.
             if ya_has or yb_has:
-                rewards -= 0.03
+                rewards -= 0.003
                 self.team_possession_steps += 1
 
             self.last_ball_pos = (ball.x, ball.y)

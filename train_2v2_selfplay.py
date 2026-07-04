@@ -432,17 +432,31 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     # policy follows a not-yet-stable critic into a bad local minimum.
     ACTOR_LR = 1e-4
     CRITIC_LR = 3e-4
+    ENT_LR = 3e-4
     # Weight decay on critic bounds Q-value magnitude via L2 on network weights.
     # Prevents Q-explosion (observed: q_mean climbing from 0 to 200+ pre-collapse).
     CRITIC_WEIGHT_DECAY = 1e-3
-    if hasattr(model, "actor") and hasattr(model.actor, "optimizer"):
+    for pg in model.critic.optimizer.param_groups:
+        pg["weight_decay"] = CRITIC_WEIGHT_DECAY
+
+    # SB3's train() calls _update_learning_rate every iteration, which resets
+    # ALL optimizer param groups to lr_schedule(progress) — silently undoing
+    # any manual LR split. Override it on the instance so the split LRs are
+    # re-applied on every train() call instead.
+    def _split_lr_update(optimizers):
         for pg in model.actor.optimizer.param_groups:
             pg["lr"] = ACTOR_LR
-    if hasattr(model, "critic") and hasattr(model.critic, "optimizer"):
         for pg in model.critic.optimizer.param_groups:
             pg["lr"] = CRITIC_LR
-            pg["weight_decay"] = CRITIC_WEIGHT_DECAY
-    print(f"Actor LR: {ACTOR_LR} | Critic LR: {CRITIC_LR} | Critic WD: {CRITIC_WEIGHT_DECAY}")
+        if getattr(model, "ent_coef_optimizer", None) is not None:
+            for pg in model.ent_coef_optimizer.param_groups:
+                pg["lr"] = ENT_LR
+        model.logger.record("train/actor_lr", ACTOR_LR)
+        model.logger.record("train/critic_lr", CRITIC_LR)
+
+    model._update_learning_rate = _split_lr_update
+    print(f"Actor LR: {ACTOR_LR} | Critic LR: {CRITIC_LR} | Critic WD: {CRITIC_WEIGHT_DECAY} "
+          f"(enforced via _update_learning_rate override)")
 
     callbacks = CallbackList([
         StatsCallback(),

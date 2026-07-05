@@ -26,7 +26,7 @@ def main():
     executor = submitit.AutoExecutor(folder=log_folder)
     executor.update_parameters(
         slurm_job_name="sp2v2",
-        slurm_time="02:30:00",
+        slurm_time="01:30:00",
         slurm_partition="gpu_h100",
         slurm_cpus_per_task=24,
         slurm_mem="193300mb",
@@ -40,7 +40,7 @@ def main():
     reward_type = "dense"
     n_pairs = 24
     seeds = [822]
-    total_steps = 4_000_000
+    total_steps = 11_500_000
     algo = "masac"  # "sac" for the Independent-SAC diagnostic
 
     jobs = []

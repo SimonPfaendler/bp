@@ -441,20 +441,25 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
 
     # SB3's train() calls _update_learning_rate every iteration, which resets
     # ALL optimizer param groups to lr_schedule(progress) — silently undoing
-    # any manual LR split. Override it on the instance so the split LRs are
-    # re-applied on every train() call instead.
-    def _split_lr_update(optimizers):
-        for pg in model.actor.optimizer.param_groups:
-            pg["lr"] = ACTOR_LR
-        for pg in model.critic.optimizer.param_groups:
-            pg["lr"] = CRITIC_LR
-        if getattr(model, "ent_coef_optimizer", None) is not None:
-            for pg in model.ent_coef_optimizer.param_groups:
-                pg["lr"] = ENT_LR
-        model.logger.record("train/actor_lr", ACTOR_LR)
-        model.logger.record("train/critic_lr", CRITIC_LR)
+    # any manual LR split. Override it so the split LRs are re-applied on
+    # every train() call instead.
+    # NOTE: must be set on the CLASS, not the instance — instance attributes
+    # land in __dict__ and model.save() would try to cloudpickle the closure
+    # (which drags in the SubprocVecEnv and fails on AuthenticationString).
+    actor_lr, critic_lr, ent_lr = ACTOR_LR, CRITIC_LR, ENT_LR
 
-    model._update_learning_rate = _split_lr_update
+    def _split_lr_update(self, optimizers):
+        for pg in self.actor.optimizer.param_groups:
+            pg["lr"] = actor_lr
+        for pg in self.critic.optimizer.param_groups:
+            pg["lr"] = critic_lr
+        if getattr(self, "ent_coef_optimizer", None) is not None:
+            for pg in self.ent_coef_optimizer.param_groups:
+                pg["lr"] = ent_lr
+        self.logger.record("train/actor_lr", actor_lr)
+        self.logger.record("train/critic_lr", critic_lr)
+
+    type(model)._update_learning_rate = _split_lr_update
     print(f"Actor LR: {ACTOR_LR} | Critic LR: {CRITIC_LR} | Critic WD: {CRITIC_WEIGHT_DECAY} "
           f"(enforced via _update_learning_rate override)")
 

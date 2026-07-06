@@ -435,7 +435,9 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     ENT_LR = 3e-4
     # Weight decay on critic bounds Q-value magnitude via L2 on network weights.
     # Prevents Q-explosion (observed: q_mean climbing from 0 to 200+ pre-collapse).
-    CRITIC_WEIGHT_DECAY = 1e-3
+    # 1e-4 (not 1e-3): rescaled together with the 10x reward scaling — Q targets
+    # are ~10x smaller now, so the old value would over-flatten the Q landscape.
+    CRITIC_WEIGHT_DECAY = 1e-4
     for pg in model.critic.optimizer.param_groups:
         pg["weight_decay"] = CRITIC_WEIGHT_DECAY
 
@@ -466,7 +468,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     callbacks = CallbackList([
         StatsCallback(),
         DebugCallback(log_every=500),
-        AlphaClampCallback(alpha_min=0.05),
+        AlphaClampCallback(alpha_min=0.005),
         BestSuccessCallback(save_path=f"{MODEL_DIR}/{run_name}"),
         CurriculumCallback(start_level=1, target_level=5, threshold=0.9),
         CheckpointCallback(

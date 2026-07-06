@@ -35,13 +35,14 @@ def main():
 
     # RUN A — build a competent attacker from scratch with the clean stack
     # (MASAC + LayerNorm + thin reward). Blue stands still (frozen_path=None),
-    frozen_path = "models/2v2_selfplay_MASAC_dense_seed822_20260516-170440_1920000_steps.zip"
-    init_path = "models/2v2_selfplay_MASAC_dense_seed822_20260516-170440_1920000_steps.zip"
+    checkpoint = "models/2v2_selfplay_SAC_dense_seed822_20260706-081229_10560000_steps.zip"
+    frozen_path = checkpoint
+    init_path = checkpoint
     reward_type = "dense"
     n_pairs = 24
     seeds = [822]
     total_steps = 11_500_000
-    algo = "masac"  # "sac" for the Independent-SAC diagnostic
+    algo = "sac"  # "sac" for the Independent-SAC diagnostic
 
     jobs = []
     for seed in seeds:

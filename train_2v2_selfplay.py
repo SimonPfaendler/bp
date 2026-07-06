@@ -369,25 +369,25 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             policy_kwargs=policy_kwargs, gamma=0.99,
         )
     if init_load and os.path.exists(init_load):
-        print(f"Transferring actor weights from {init_load}")
+        print(f"Transferring policy weights from {init_load}")
         old_model = _load_any(init_load)
         new_state = model.policy.state_dict()
         old_state = old_model.policy.state_dict()
         transferred, skipped = [], []
+        # Shape-matching transfer: same-algo checkpoints (SAC->SAC generation
+        # steps) warm-start actor AND critic/critic_target; cross-algo inits
+        # (e.g. MASAC->SAC) skip the incompatible critic automatically.
         for k, v in old_state.items():
-            if (
-                k.startswith("actor.")
-                and k in new_state
-                and new_state[k].shape == v.shape
-            ):
+            if k in new_state and new_state[k].shape == v.shape:
                 new_state[k] = v
                 transferred.append(k)
             else:
                 skipped.append(k)
         model.policy.load_state_dict(new_state)
+        n_critic = sum(1 for k in transferred if k.startswith("critic"))
         print(
-            f"Actor transfer: {len(transferred)} params copied, "
-            f"{len(skipped)} skipped (critic + mismatches)"
+            f"Policy transfer: {len(transferred)} params copied "
+            f"({n_critic} critic/target), {len(skipped)} skipped (mismatches)"
         )
         del old_model
     else:

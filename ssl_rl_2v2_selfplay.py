@@ -144,6 +144,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         curriculum_threshold=0.9,
         curriculum_window=200,
         blue_heuristic=None,
+        pass_scenario_prob=0.0,
     ):
         super().__init__(
             field_type=1,
@@ -189,6 +190,15 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # productive practice instead of episodes ending the moment a robot
         # wanders off the field.
         self.oob_grace_steps = int(oob_grace_steps)
+
+        # Pass-scenario mix: at level 5, spawn a staged pass situation
+        # (carrier cornered by a blocker, mate free in front of the goal)
+        # with this probability instead of the chaos spawn. Targets the
+        # cooperative-exploration bootstrap problem: passing is the only
+        # high-percentage play in this geometry, and the mate already has
+        # the finishing skill from level 1.
+        self.pass_scenario_prob = float(pass_scenario_prob)
+        self._episode_scenario = "chaos"  # set on every spawn
 
         self.single_observation_space = Box(
             low=-self.NORM_BOUNDS, high=self.NORM_BOUNDS,
@@ -356,6 +366,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             info["scored_after_pass"] = 1.0 if (
                 self.match_result == 1 and self.passes_in_episode > 0
             ) else 0.0
+            info["scenario"] = self._episode_scenario
             # Curriculum auto-promotion: track is_success in a rolling buffer
             # and bump level once the rolling mean clears the threshold.
             # Each env subprocess runs this independently — close enough since
@@ -964,6 +975,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
         if level <= 1:
             # LEVEL 1 — gestellte Torchance.
+            self._episode_scenario = "level1"
             bx = float(rng.uniform(-max_x + 1.0, -max_x + 2.5))
             by = float(rng.uniform(-0.6, 0.6))
             pos.ball = Ball(x=bx, y=by)
@@ -993,7 +1005,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             )
             return pos
 
-        # LEVEL 5 — chaos (original setup).
+        # LEVEL 5 — scenario roll: staged pass situation vs. chaos.
+        if rng.random() < self.pass_scenario_prob:
+            return self._pass_scenario_frame(pos, rng, max_x)
+
+        self._episode_scenario = "chaos"
         pos.ball = Ball(
             x=float(rng.uniform(-3, 3)),
             y=float(rng.uniform(-2, 2)),
@@ -1016,6 +1032,62 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         pos.robots_blue[1] = Robot(
             x=float(rng.uniform(-3.5, -0.2)),
             y=float(rng.uniform(-2.5, 2.5)),
+            theta=float(rng.uniform(-180, 180)),
+        )
+        return pos
+
+    def _pass_scenario_frame(self, pos, rng, max_x):
+        """Staged pass situation.
+
+        Carrier holds the ball wide near the corner, a blocker sits directly
+        on the carrier->goal line at contact distance (shot/dribble lane
+        closed, and max_dribble_dist caps any escape at 1m). The mate is
+        free at the far post with an open pass lane; the second blue starts
+        far upfield and only creates time pressure. Passing is the intended
+        high-percentage play; the mate already has the level-1 finishing
+        skill to convert.
+        """
+        self._episode_scenario = "pass"
+        side = 1.0 if rng.random() < 0.5 else -1.0
+        carrier_idx = int(rng.integers(0, 2))
+        mate_idx = 1 - carrier_idx
+
+        cx = float(rng.uniform(-max_x + 1.0, -max_x + 2.0))
+        cy = float(side * rng.uniform(1.5, 2.3))
+
+        # Carrier faces the goal; ball just in front of it. Offset must stay
+        # OUTSIDE the collision hull (robot radius ~0.09 + ball ~0.02),
+        # otherwise the physics engine ejects the overlapping ball at spawn.
+        goal = np.array([-max_x, 0.0])
+        to_goal = goal - np.array([cx, cy])
+        to_goal = to_goal / np.linalg.norm(to_goal)
+        theta_carrier = math.degrees(math.atan2(to_goal[1], to_goal[0]))
+        ball_off = float(rng.uniform(0.14, 0.18))
+        bx = cx + ball_off * float(to_goal[0])
+        by = cy + ball_off * float(to_goal[1])
+        pos.ball = Ball(x=bx, y=by)
+
+        yellows = [None, None]
+        yellows[carrier_idx] = Robot(x=cx, y=cy, theta=theta_carrier)
+        # Mate at the far post (opposite y-side): the pass lane diverges
+        # from the blocked shot lane.
+        mx = float(rng.uniform(-max_x + 0.7, -max_x + 1.4))
+        my = float(-side * rng.uniform(0.2, 0.7))
+        theta_mate = math.degrees(math.atan2(by - my, bx - mx))
+        yellows[mate_idx] = Robot(x=mx, y=my, theta=theta_mate)
+        pos.robots_yellow[0] = yellows[0]
+        pos.robots_yellow[1] = yellows[1]
+
+        # Blocker on the carrier->goal line, facing the carrier.
+        bdist = float(rng.uniform(0.55, 0.85))
+        blx = bx + bdist * float(to_goal[0])
+        bly = by + bdist * float(to_goal[1])
+        theta_blocker = math.degrees(math.atan2(cy - bly, cx - blx))
+        pos.robots_blue[0] = Robot(x=blx, y=bly, theta=theta_blocker)
+        # Second blue far upfield — arrives late.
+        pos.robots_blue[1] = Robot(
+            x=float(rng.uniform(0.5, 2.0)),
+            y=float(rng.uniform(-1.5, 1.5)),
             theta=float(rng.uniform(-180, 180)),
         )
         return pos

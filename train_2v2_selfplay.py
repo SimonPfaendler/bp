@@ -56,10 +56,11 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 
-def make_env_fn(reward_type, seed, frozen_path):
+def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0):
     def _init():
         env = SSL2v2SelfPlayEnv(
-            reward_type=reward_type, frozen_path=frozen_path
+            reward_type=reward_type, frozen_path=frozen_path,
+            pass_scenario_prob=pass_scenario_prob,
         )
         env.reset(seed=seed)
         return env
@@ -140,6 +141,14 @@ class StatsCallback(BaseCallback):
         self.blue_goal_buffer = deque(maxlen=300)
         self.passes_buffer = deque(maxlen=300)
         self.scored_after_pass_buffer = deque(maxlen=300)
+        # Per-scenario split: the thesis question is whether passing learned
+        # in the staged scenario GENERALIZES to chaos spawns — without the
+        # split, a passes increase would only measure the scenario share.
+        self.pass_success = deque(maxlen=200)
+        self.pass_passes = deque(maxlen=200)
+        self.chaos_success = deque(maxlen=300)
+        self.chaos_passes = deque(maxlen=300)
+        self.chaos_sap = deque(maxlen=300)
 
     def _on_step(self) -> bool:
         dones = self.locals.get("dones", [])
@@ -156,6 +165,16 @@ class StatsCallback(BaseCallback):
             if "scored_after_pass" in infos[i]:
                 self.scored_after_pass_buffer.append(
                     float(infos[i]["scored_after_pass"])
+                )
+            scen = infos[i].get("scenario")
+            if scen == "pass":
+                self.pass_success.append(float(infos[i].get("is_success", 0.0)))
+                self.pass_passes.append(float(infos[i].get("passes", 0.0)))
+            elif scen == "chaos":
+                self.chaos_success.append(float(infos[i].get("is_success", 0.0)))
+                self.chaos_passes.append(float(infos[i].get("passes", 0.0)))
+                self.chaos_sap.append(
+                    float(infos[i].get("scored_after_pass", 0.0))
                 )
         if self.success_buffer:
             self.logger.record(
@@ -176,6 +195,27 @@ class StatsCallback(BaseCallback):
             self.logger.record(
                 "rollout/scored_after_pass_rate",
                 float(np.mean(self.scored_after_pass_buffer)),
+            )
+        if self.pass_success:
+            self.logger.record(
+                "scenario_pass/success_rate", float(np.mean(self.pass_success))
+            )
+            self.logger.record(
+                "scenario_pass/passes_per_episode",
+                float(np.mean(self.pass_passes)),
+            )
+        if self.chaos_success:
+            self.logger.record(
+                "scenario_chaos/success_rate",
+                float(np.mean(self.chaos_success)),
+            )
+            self.logger.record(
+                "scenario_chaos/passes_per_episode",
+                float(np.mean(self.chaos_passes)),
+            )
+            self.logger.record(
+                "scenario_chaos/scored_after_pass_rate",
+                float(np.mean(self.chaos_sap)),
             )
         return True
 
@@ -289,9 +329,96 @@ class BestSuccessCallback(BaseCallback):
         return True
 
 
-def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo):
+def load_demo_transitions(demo_dir, joint):
+    """Load pass-demo .pkl episodes into flat transition arrays.
+
+    joint=True (MASAC): keeps the (2, obs) joint layout, action flattened
+    to (12,), reward = team mean — matching JointSubprocPairVecEnv.
+    joint=False (SAC): unstacks each joint step into 2 per-agent
+    transitions — matching the SubprocPairVecEnv slot layout.
+    """
+    import glob
+    import pickle
+
+    files = sorted(glob.glob(os.path.join(demo_dir, "*.pkl")))
+    if not files:
+        raise FileNotFoundError(f"No .pkl demos in {demo_dir}")
+    obs_l, next_l, act_l, rew_l, done_l = [], [], [], [], []
+    for fp in files:
+        with open(fp, "rb") as f:
+            rec = pickle.load(f)
+        for s in rec["steps"]:
+            o = np.asarray(s["obs"], dtype=np.float32)
+            no = np.asarray(s["next_obs"], dtype=np.float32)
+            a = np.asarray(s["action"], dtype=np.float32)
+            r = np.asarray(s["reward"], dtype=np.float32)
+            d = bool(s["done"])
+            if joint:
+                obs_l.append(o)
+                next_l.append(no)
+                act_l.append(a.reshape(-1))
+                rew_l.append(float(r.mean()))
+                done_l.append(d)
+            else:
+                for i in range(o.shape[0]):
+                    obs_l.append(o[i])
+                    next_l.append(no[i])
+                    act_l.append(a[i])
+                    rew_l.append(float(r[i]))
+                    done_l.append(d)
+    print(f"Loaded {len(files)} demo episodes -> {len(obs_l)} transitions "
+          f"({'joint' if joint else 'per-agent'})")
+    return {
+        "obs": np.stack(obs_l),
+        "next_obs": np.stack(next_l),
+        "actions": np.stack(act_l),
+        "rewards": np.asarray(rew_l, dtype=np.float32),
+        "dones": np.asarray(done_l, dtype=np.float32),
+    }
+
+
+def inject_demos(replay_buffer, demos):
+    """Write demo transitions into the SB3 buffer in n_envs-sized chunks
+    (buffer.add expects one transition per env slot)."""
+    n_envs = replay_buffer.n_envs
+    n = demos["obs"].shape[0]
+    n_chunks = n // n_envs
+    infos = [{} for _ in range(n_envs)]
+    for c in range(n_chunks):
+        sl = slice(c * n_envs, (c + 1) * n_envs)
+        replay_buffer.add(
+            demos["obs"][sl], demos["next_obs"][sl], demos["actions"][sl],
+            demos["rewards"][sl], demos["dones"][sl], infos,
+        )
+    print(f"Injected {n_chunks * n_envs}/{n} demo transitions "
+          f"(buffer size now {replay_buffer.size()}/{replay_buffer.buffer_size})")
+
+
+class DemoInjectionCallback(BaseCallback):
+    """Periodically re-inject demo transitions (DQfD-light).
+
+    The SB3 buffer is FIFO — without re-injection the demos are evicted
+    after ~buffer_size collected steps and the critic forgets what a
+    completed pass is worth.
+    """
+
+    def __init__(self, demos, every_steps=500_000, verbose=1):
+        super().__init__(verbose)
+        self.demos = demos
+        self.every_steps = int(every_steps)
+        self._last_inject = 0
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps - self._last_inject >= self.every_steps:
+            inject_demos(self.model.replay_buffer, self.demos)
+            self._last_inject = self.num_timesteps
+        return True
+
+
+def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
+                  pass_scenario_prob=0.0):
     fns = [
-        make_env_fn(reward_type, seed + i, frozen_path)
+        make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob)
         for i in range(n_envs)
     ]
     if algo == "masac":
@@ -309,7 +436,8 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo):
 
 
 def train(reward_type, seed, n_envs, frozen_path, init_path=None,
-          total_steps=5_000_000, algo="masac"):
+          total_steps=5_000_000, algo="masac", pass_scenario_prob=0.0,
+          demo_dir=None, demo_reinject_every=500_000):
     assert algo in ("masac", "sac"), algo
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     algo_tag = algo.upper()
@@ -328,12 +456,16 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             "frozen_path": frozen_path,
             "init_path": init_path,
             "total_steps": total_steps,
+            "pass_scenario_prob": pass_scenario_prob,
+            "demo_dir": demo_dir,
+            "demo_reinject_every": demo_reinject_every,
         },
     )
 
     env = build_vec_env(
         n_envs=n_envs, reward_type=reward_type, seed=seed,
         frozen_path=frozen_path, use_subproc=True, algo=algo,
+        pass_scenario_prob=pass_scenario_prob,
     )
     print(
         f"2v2 {algo_tag} self-play | frozen={frozen_path} | seed={seed} | "
@@ -465,7 +597,15 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     print(f"Actor LR: {ACTOR_LR} | Critic LR: {CRITIC_LR} | Critic WD: {CRITIC_WEIGHT_DECAY} "
           f"(enforced via _update_learning_rate override)")
 
-    callbacks = CallbackList([
+    # Demo prefill (DQfD-light): inject scripted pass->goal transitions so
+    # the critic learns the value of a completed pass — exploration alone
+    # never produces one (cooperative bootstrap problem).
+    demos = None
+    if demo_dir:
+        demos = load_demo_transitions(demo_dir, joint=(algo == "masac"))
+        inject_demos(model.replay_buffer, demos)
+
+    callback_list = [
         StatsCallback(),
         DebugCallback(log_every=500),
         AlphaClampCallback(alpha_min=0.005),
@@ -475,7 +615,12 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             save_freq=20000, save_path=MODEL_DIR,
             name_prefix=run_name, save_replay_buffer=True,
         ),
-    ])
+    ]
+    if demos is not None:
+        callback_list.append(
+            DemoInjectionCallback(demos, every_steps=demo_reinject_every)
+        )
+    callbacks = CallbackList(callback_list)
 
     model.learn(
         total_timesteps=total_steps,
@@ -507,11 +652,21 @@ if __name__ == "__main__":
     parser.add_argument("--algo", default="masac", choices=["masac", "sac"],
                         help="masac: custom CTDE (default). "
                              "sac: stock Independent SAC diagnostic.")
+    parser.add_argument("--pass_scenario_prob", type=float, default=0.0,
+                        help="Probability of the staged pass scenario "
+                             "(vs. chaos spawn) at curriculum level 5.")
+    parser.add_argument("--demo_dir", default=None,
+                        help="Directory of pass-demo .pkl episodes to "
+                             "prefill (and periodically re-inject into) "
+                             "the replay buffer.")
+    parser.add_argument("--demo_reinject_every", type=int, default=500_000,
+                        help="Re-inject the demo set every N env steps.")
     args = parser.parse_args()
 
     train(
         reward_type=args.reward_type, seed=args.seed,
         n_envs=args.n_pairs, frozen_path=args.frozen_path,
         init_path=args.init_path, total_steps=args.total_steps,
-        algo=args.algo,
+        algo=args.algo, pass_scenario_prob=args.pass_scenario_prob,
+        demo_dir=args.demo_dir, demo_reinject_every=args.demo_reinject_every,
     )

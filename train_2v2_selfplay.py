@@ -610,7 +610,9 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         DebugCallback(log_every=500),
         AlphaClampCallback(alpha_min=0.005),
         BestSuccessCallback(save_path=f"{MODEL_DIR}/{run_name}"),
-        CurriculumCallback(start_level=1, target_level=5, threshold=0.9),
+        # Gen 3: init/frozen is the Gen-2 champion (already solves L5), so
+        # skip the L1 tap-in warmup and expose pass scenarios from step 0.
+        CurriculumCallback(start_level=5, target_level=5, threshold=0.9),
         CheckpointCallback(
             save_freq=20000, save_path=MODEL_DIR,
             name_prefix=run_name, save_replay_buffer=True,

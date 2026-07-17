@@ -5,6 +5,7 @@ from gymnasium.spaces import Box
 from pynput import keyboard
 from rsoccer_gym.Entities import Robot
 from ssl_rl_1v1_continuous import SSL1v1ContinuousEnv
+from skills import move_to_ball
 
 
 class SSL1v1ManualEnv(SSL1v1ContinuousEnv):
@@ -15,9 +16,9 @@ class SSL1v1ManualEnv(SSL1v1ContinuousEnv):
     def _get_commands(self, actions):
         yellow = self.frame.robots_yellow[0]
         blue_robot_data = self.frame.robots_blue[0]
-        v_x_global = actions[0] 
-        v_y_global = actions[1] 
-        v_theta = actions[2] 
+        v_x_global = actions[0] * 1.5
+        v_y_global = actions[1] * 1.5
+        v_theta = actions[2] * 6.0
         kick = 6.0 if actions[3] > 0.5 else 0.0
         dribble = True if actions[4] > 0.5 else False
 
@@ -31,15 +32,27 @@ class SSL1v1ManualEnv(SSL1v1ContinuousEnv):
                              v_x=v_x_global, v_y=v_y_global, v_theta=v_theta,
                              kick_v_x=kick, dribbler=dribble)
 
-        difficulty = getattr(self, 'difficulty_factor', 0.2)
-        b_cmd = np.zeros(5, dtype=np.float32)
-        b_angle_rad = np.deg2rad(blue_robot_data.theta)
-        bv_x, bv_y, bv_theta = self.convert_actions([b_cmd[0], b_cmd[1], b_cmd[2]], b_angle_rad)
-        
-        robot_blue = Robot(yellow=False, id=0, 
-                           v_x=bv_x, v_y=bv_y, v_theta=bv_theta, 
-                           kick_v_x=b_cmd[3], 
-                           dribbler=True if b_cmd[4] > 0 else False)
+        # Blue: curriculum-level-aware (mirrors parent _get_commands).
+        ball = self.frame.ball
+        level = getattr(self, 'curriculum_level', 1)
+        if level <= 2:
+            bv_x, bv_y, bv_theta = 0.0, 0.0, 0.0
+            blue_kick = 0.0
+            blue_dribble = False
+        elif level == 3:
+            b_cmd = move_to_ball(blue_robot_data, ball, speed=0.5)
+            b_angle_rad = np.deg2rad(blue_robot_data.theta)
+            bv_x, bv_y, bv_theta = self.convert_actions(
+                [b_cmd[0], b_cmd[1], b_cmd[2]], b_angle_rad
+            )
+            blue_kick = 0.0
+            blue_dribble = False
+        else:
+            bv_x, bv_y, bv_theta, blue_kick, blue_dribble = self._heuristic_blue_motion()
+
+        robot_blue = Robot(yellow=False, id=0,
+                           v_x=bv_x, v_y=bv_y, v_theta=bv_theta,
+                           kick_v_x=blue_kick, dribbler=blue_dribble)
 
         return [robot_blue, robot_yellow]
 
@@ -74,6 +87,7 @@ def interactive_debug_live():
     global current_action, running
     env = SSL1v1ManualEnv()
     env.render_mode = "human"
+    env.set_curriculum_level(4)
     env.reset()
     env.render()
 

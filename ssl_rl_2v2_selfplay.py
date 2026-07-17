@@ -367,6 +367,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 self.match_result == 1 and self.passes_in_episode > 0
             ) else 0.0
             info["scenario"] = self._episode_scenario
+            if self._episode_scenario == "pass":
+                info["pass_variant"] = getattr(
+                    self, "_episode_pass_variant", "corner"
+                )
             # Curriculum auto-promotion: track is_success in a rolling buffer
             # and bump level once the rolling mean clears the threshold.
             # Each env subprocess runs this independently — close enough since
@@ -917,15 +921,17 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
             self.last_ball_pos = (ball.x, ball.y)
 
-        # Pass detection: +30 shared event bonus.
+        # Pass detection: +3 shared event bonus. Receiver must be at true
+        # contact distance (0.13 ≈ robot hull + ball) or have infrared —
+        # tighter than the old 0.20 fly-by radius.
         ya_has_pass = (
-            math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.20
+            math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.13
         ) or ya.infrared
         yb_has_pass = (
-            math.hypot(yb.x - ball.x, yb.y - ball.y) < 0.20
+            math.hypot(yb.x - ball.x, yb.y - ball.y) < 0.13
         ) or yb.infrared
         blue_has = any(
-            (math.hypot(b.x - ball.x, b.y - ball.y) < 0.12) or b.infrared
+            (math.hypot(b.x - ball.x, b.y - ball.y) < 0.13) or b.infrared
             for b in blues
         )
 
@@ -1037,17 +1043,37 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         return pos
 
     def _pass_scenario_frame(self, pos, rng, max_x):
-        """Staged pass situation.
+        """Staged pass situation — one of three variants, so the policy has
+        to learn the CONCEPT (blocked + free mate -> pass) instead of a
+        positional hack tied to a single geometry:
 
-        Carrier holds the ball wide near the corner, a blocker sits directly
-        on the carrier->goal line at contact distance (shot/dribble lane
-        closed, and max_dribble_dist caps any escape at 1m). The mate is
-        free at the far post with an open pass lane; the second blue starts
-        far upfield and only creates time pressure. Passing is the intended
-        high-percentage play; the mate already has the level-1 finishing
-        skill to convert.
+          corner:  carrier wide in the corner, blocker on the shot lane,
+                   mate free at the far post. Single pass + finish.
+          counter: carrier in OWN half with a chaser behind, mate advanced
+                   and free — long forward pass. Closest to the chaos spawn
+                   distribution, so the best transfer candidate.
+          tiktaka: carrier in front of goal with BOTH blues congesting the
+                   shot lanes, mate free BEHIND — back-pass draws the
+                   ball-chasing blues, carrier sprints free, return pass,
+                   finish. Two-pass give-and-go.
         """
         self._episode_scenario = "pass"
+        variant = int(rng.integers(0, 3))
+        if variant == 0:
+            return self._pass_corner_frame(pos, rng, max_x)
+        if variant == 1:
+            return self._pass_counter_frame(pos, rng, max_x)
+        return self._pass_tiktaka_frame(pos, rng, max_x)
+
+    @staticmethod
+    def _ball_in_front(rng, cx, cy, direction):
+        """Ball just outside the collision hull (robot ~0.09 + ball ~0.02);
+        overlapping spawns get ejected by the physics engine."""
+        off = float(rng.uniform(0.14, 0.18))
+        return cx + off * float(direction[0]), cy + off * float(direction[1])
+
+    def _pass_corner_frame(self, pos, rng, max_x):
+        self._episode_pass_variant = "corner"
         side = 1.0 if rng.random() < 0.5 else -1.0
         carrier_idx = int(rng.integers(0, 2))
         mate_idx = 1 - carrier_idx
@@ -1055,22 +1081,17 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         cx = float(rng.uniform(-max_x + 1.0, -max_x + 2.0))
         cy = float(side * rng.uniform(1.5, 2.3))
 
-        # Carrier faces the goal; ball just in front of it. Offset must stay
-        # OUTSIDE the collision hull (robot radius ~0.09 + ball ~0.02),
-        # otherwise the physics engine ejects the overlapping ball at spawn.
         goal = np.array([-max_x, 0.0])
         to_goal = goal - np.array([cx, cy])
         to_goal = to_goal / np.linalg.norm(to_goal)
         theta_carrier = math.degrees(math.atan2(to_goal[1], to_goal[0]))
-        ball_off = float(rng.uniform(0.14, 0.18))
-        bx = cx + ball_off * float(to_goal[0])
-        by = cy + ball_off * float(to_goal[1])
+        bx, by = self._ball_in_front(rng, cx, cy, to_goal)
         pos.ball = Ball(x=bx, y=by)
 
         yellows = [None, None]
         yellows[carrier_idx] = Robot(x=cx, y=cy, theta=theta_carrier)
-        # Mate at the far post (opposite y-side): the pass lane diverges
-        # from the blocked shot lane.
+        # Mate at the far post (opposite y-side): pass lane diverges from
+        # the blocked shot lane.
         mx = float(rng.uniform(-max_x + 0.7, -max_x + 1.4))
         my = float(-side * rng.uniform(0.2, 0.7))
         theta_mate = math.degrees(math.atan2(by - my, bx - mx))
@@ -1089,5 +1110,91 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             x=float(rng.uniform(0.5, 2.0)),
             y=float(rng.uniform(-1.5, 1.5)),
             theta=float(rng.uniform(-180, 180)),
+        )
+        return pos
+
+    def _pass_counter_frame(self, pos, rng, max_x):
+        """Counter: carrier in OWN half, chaser behind him, mate advanced
+        and unmarked — the long forward pass beats the chase."""
+        self._episode_pass_variant = "counter"
+        carrier_idx = int(rng.integers(0, 2))
+        mate_idx = 1 - carrier_idx
+
+        cx = float(rng.uniform(0.8, 1.8))
+        cy = float(rng.uniform(-1.5, 1.5))
+
+        goal = np.array([-max_x, 0.0])
+        to_goal = goal - np.array([cx, cy])
+        to_goal = to_goal / np.linalg.norm(to_goal)
+        theta_carrier = math.degrees(math.atan2(to_goal[1], to_goal[0]))
+        bx, by = self._ball_in_front(rng, cx, cy, to_goal)
+        pos.ball = Ball(x=bx, y=by)
+
+        yellows = [None, None]
+        yellows[carrier_idx] = Robot(x=cx, y=cy, theta=theta_carrier)
+        # Mate advanced in the attacking half, roughly central corridor.
+        mx = float(rng.uniform(-2.8, -1.8))
+        my = float(np.clip(cy * -0.3 + rng.uniform(-0.8, 0.8), -2.0, 2.0))
+        theta_mate = math.degrees(math.atan2(by - my, bx - mx))
+        yellows[mate_idx] = Robot(x=mx, y=my, theta=theta_mate)
+        pos.robots_yellow[0] = yellows[0]
+        pos.robots_yellow[1] = yellows[1]
+
+        # Chaser BEHIND the carrier (pressure, not in the pass lane).
+        chx = cx + float(rng.uniform(0.5, 0.9))
+        chy = float(np.clip(cy + rng.uniform(-0.3, 0.3), -2.4, 2.4))
+        theta_chaser = math.degrees(math.atan2(cy - chy, cx - chx))
+        pos.robots_blue[0] = Robot(x=chx, y=chy, theta=theta_chaser)
+        # Retreating defender near the goal, displaced off the mate's lane.
+        d_side = 1.0 if rng.random() < 0.5 else -1.0
+        pos.robots_blue[1] = Robot(
+            x=float(rng.uniform(-3.8, -3.0)),
+            y=float(np.clip(my + d_side * rng.uniform(1.2, 1.8), -2.4, 2.4)),
+            theta=float(rng.uniform(-180, 180)),
+        )
+        return pos
+
+    def _pass_tiktaka_frame(self, pos, rng, max_x):
+        """Give-and-go: both blues congest the carrier's shot lanes in
+        front, the mate is free BEHIND the carrier. Intended play:
+        back-pass -> blues chase the ball -> carrier sprints goal-ward
+        into free space -> return pass -> finish. Two passes."""
+        self._episode_pass_variant = "tiktaka"
+        carrier_idx = int(rng.integers(0, 2))
+        mate_idx = 1 - carrier_idx
+        side = 1.0 if rng.random() < 0.5 else -1.0
+
+        cx = float(rng.uniform(-2.4, -1.6))
+        cy = float(rng.uniform(-1.2, 1.2))
+
+        goal = np.array([-max_x, 0.0])
+        to_goal = goal - np.array([cx, cy])
+        to_goal = to_goal / np.linalg.norm(to_goal)
+        theta_carrier = math.degrees(math.atan2(to_goal[1], to_goal[0]))
+        bx, by = self._ball_in_front(rng, cx, cy, to_goal)
+        pos.ball = Ball(x=bx, y=by)
+
+        yellows = [None, None]
+        yellows[carrier_idx] = Robot(x=cx, y=cy, theta=theta_carrier)
+        # Mate free BEHIND the carrier (both blues are in front).
+        mx = float(np.clip(cx + rng.uniform(0.9, 1.5), -max_x + 0.3, max_x - 0.3))
+        my = float(np.clip(cy + side * rng.uniform(0.3, 0.9), -2.3, 2.3))
+        theta_mate = math.degrees(math.atan2(by - my, bx - mx))
+        yellows[mate_idx] = Robot(x=mx, y=my, theta=theta_mate)
+        pos.robots_yellow[0] = yellows[0]
+        pos.robots_yellow[1] = yellows[1]
+
+        # Blue 1: blocker on the shot lane.
+        bdist = float(rng.uniform(0.55, 0.85))
+        blx = bx + bdist * float(to_goal[0])
+        bly = by + bdist * float(to_goal[1])
+        theta_blocker = math.degrees(math.atan2(cy - bly, cx - blx))
+        pos.robots_blue[0] = Robot(x=blx, y=bly, theta=theta_blocker)
+        # Blue 2: congests the second lane in front, laterally displaced.
+        b2x = float(np.clip(cx - rng.uniform(0.4, 0.8), -max_x + 0.3, max_x))
+        b2y = float(np.clip(cy - side * rng.uniform(0.6, 1.0), -2.4, 2.4))
+        pos.robots_blue[1] = Robot(
+            x=b2x, y=b2y,
+            theta=math.degrees(math.atan2(cy - b2y, cx - b2x)),
         )
         return pos

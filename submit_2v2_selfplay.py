@@ -42,7 +42,7 @@ def main():
     # frozen/init = Gen-2 champion; demos must be generated against the SAME
     # checkpoint (generate_pass_demos.py --frozen <gen2>) and uploaded to
     # demo_dir before submitting 3b.
-    gen2_champion = "models/<GEN2-CHAMPION>.zip"  # TODO: set before submit
+    gen2_champion = "models/2v2_selfplay_SAC_dense_seed822_20260706-111029_final.zip"
     reward_type = "dense"
     n_pairs = 24
     seed = 822

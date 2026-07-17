@@ -34,7 +34,9 @@ def main():
     idle = np.zeros((2, 6), dtype=np.float32)
     for i in range(args.n):
         env.reset(seed=100 + i)
-        print(f"Spawn {i + 1}/{args.n}  (scenario={env._episode_scenario})")
+        variant = getattr(env, "_episode_pass_variant", "-")
+        print(f"Spawn {i + 1}/{args.n}  "
+              f"(scenario={env._episode_scenario}, variant={variant})")
         t_end = time.time() + args.hold
         while time.time() < t_end:
             env.step(idle)

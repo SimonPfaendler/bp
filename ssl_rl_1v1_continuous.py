@@ -19,10 +19,15 @@ def blue_attacker_heuristic(env, robot):
     if robot.infrared:
         return shoot_at_goal_center(env, robot, team_color="blue")
     
-    # Yellow is closer to the ball fall back on the ball on the goal line.
     dist_blue_ball = math.hypot(robot.x - ball.x, robot.y - ball.y)
     dist_yellow_ball = math.hypot(yellow.x - ball.x, yellow.y - ball.y)
-    if dist_yellow_ball < dist_blue_ball:
+    ball_speed = math.hypot(ball.v_x, ball.v_y)
+    # Ball heading toward our goal at speed -> intercept has priority over "who is closer".
+    ball_toward_own_goal = ball.v_x < -0.2
+    intercept_priority = ball_speed > 0.5 and ball_toward_own_goal
+
+    # Yellow is closer to the ball fall back on the ball on the goal line.
+    if dist_yellow_ball < dist_blue_ball and not intercept_priority:
         goal = np.array([defend_goal_x, 0.0])
         ball_pos = np.array([ball.x, ball.y])
         bg = goal - ball_pos
@@ -36,11 +41,10 @@ def blue_attacker_heuristic(env, robot):
         return np.array([v_x, v_y, v_theta, 0.0, 0.0])
 
     # Intercept
-    ball_speed = math.hypot(ball.v_x, ball.v_y)
     if ball_speed > 0.3:
         # Solve |ball + v·t − robot| = s·t for smallest t ≥ 0.
         dx, dy = ball.x - robot.x, ball.y - robot.y
-        s = 1.2
+        s = 2.0
         a = ball_speed * ball_speed - s * s
         b = 2.0 * (dx * ball.v_x + dy * ball.v_y)
         c = dx * dx + dy * dy
@@ -59,7 +63,11 @@ def blue_attacker_heuristic(env, robot):
                 if roots:
                     t = min(roots)
         if t is not None and t < 2.0:
-            target = np.array([ball.x + ball.v_x * t, ball.y + ball.v_y * t])
+            # Ball decelerates due to simulator friction: v(τ) = v0 * exp(-k·τ).
+            # Integrated displacement until t: (1 - exp(-k·t)) / k.
+            BALL_FRICTION = 0.6
+            decay = (1.0 - math.exp(-BALL_FRICTION * t)) / BALL_FRICTION
+            target = np.array([ball.x + ball.v_x * decay, ball.y + ball.v_y * decay])
             dx, dy = target[0] - robot.x, target[1] - robot.y
             dist = math.hypot(dx, dy)
             if dist > 1e-3:

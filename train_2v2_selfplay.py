@@ -37,6 +37,7 @@ from pair_vec_env import (
     SubprocPairVecEnv,
 )
 from ssl_rl_2v2_selfplay import SSL2v2SelfPlayEnv
+from demo_buffer import DemoMixReplayBuffer, build_demo_buffer, load_buffer_into
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -437,7 +438,7 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
 
 def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           total_steps=5_000_000, algo="masac", pass_scenario_prob=0.0,
-          demo_dir=None, demo_reinject_every=500_000):
+          demo_dir=None, demo_reinject_every=500_000, demo_ratio=0.25):
     assert algo in ("masac", "sac"), algo
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     algo_tag = algo.upper()
@@ -475,6 +476,11 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     init_load = init_path or frozen_path
 
     policy_kwargs = dict(net_arch=[512, 512, 512])
+    # Demo mixing: swap in a DemoMixReplayBuffer that blends a fixed fraction
+    # of demo transitions into every batch (constant share, no re-injection).
+    use_demos = demo_dir is not None
+    rb_class = DemoMixReplayBuffer if use_demos else None
+    rb_kwargs = {"demo_ratio": demo_ratio} if use_demos else None
     if algo == "masac":
         model = MASAC(
             policy=MASACPolicy, env=env, verbose=1, device="cuda",
@@ -484,6 +490,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             learning_starts=20000, ent_coef="auto_0.05", target_entropy="auto",
             critic_warmup_grad_steps=5000, max_grad_norm=0.5,
             policy_kwargs=policy_kwargs, gamma=0.99,
+            replay_buffer_class=rb_class, replay_buffer_kwargs=rb_kwargs,
         )
     else:
         # Independent SAC diagnostic: stock SB3 SAC over per-agent (52,)
@@ -499,6 +506,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             buffer_size=1_000_000, learning_rate=3e-4,
             learning_starts=10000, ent_coef="auto_0.05", target_entropy="auto",
             policy_kwargs=policy_kwargs, gamma=0.99,
+            replay_buffer_class=rb_class, replay_buffer_kwargs=rb_kwargs,
         )
     if init_load and os.path.exists(init_load):
         print(f"Transferring policy weights from {init_load}")
@@ -548,7 +556,13 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
                 saved_n_envs = getattr(_buf, "n_envs", None)
                 cur_n_envs = model.replay_buffer.n_envs
                 if saved_n_envs == cur_n_envs:
-                    model.load_replay_buffer(buffer_path)
+                    if use_demos:
+                        # Copy data in place — plain load_replay_buffer would
+                        # replace the instance and drop the DemoMix behavior.
+                        if not load_buffer_into(model, buffer_path):
+                            model.load_replay_buffer(buffer_path)
+                    else:
+                        model.load_replay_buffer(buffer_path)
                     print(f"Loaded replay buffer: {buffer_path} ({model.replay_buffer.size()} transitions)")
                 else:
                     print(
@@ -597,13 +611,17 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     print(f"Actor LR: {ACTOR_LR} | Critic LR: {CRITIC_LR} | Critic WD: {CRITIC_WEIGHT_DECAY} "
           f"(enforced via _update_learning_rate override)")
 
-    # Demo prefill (DQfD-light): inject scripted pass->goal transitions so
-    # the critic learns the value of a completed pass — exploration alone
-    # never produces one (cooperative bootstrap problem).
+    # Demo mixing (DQfD-style): scripted pass->goal transitions live in a
+    # separate buffer and a fixed fraction is blended into every batch, so the
+    # critic keeps a constant view of what a completed pass is worth —
+    # exploration alone never produces one (cooperative bootstrap problem).
     demos = None
     if demo_dir:
         demos = load_demo_transitions(demo_dir, joint=(algo == "masac"))
-        inject_demos(model.replay_buffer, demos)
+        demo_buf = build_demo_buffer(demos, model.replay_buffer)
+        model.replay_buffer.attach_demo_buffer(demo_buf)
+        print(f"Demo mixing enabled: {demo_ratio:.0%} of every batch drawn "
+              f"from the demo buffer (constant share, no re-injection)")
 
     callback_list = [
         StatsCallback(),
@@ -618,10 +636,6 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             name_prefix=run_name, save_replay_buffer=True,
         ),
     ]
-    if demos is not None:
-        callback_list.append(
-            DemoInjectionCallback(demos, every_steps=demo_reinject_every)
-        )
     callbacks = CallbackList(callback_list)
 
     model.learn(
@@ -662,7 +676,10 @@ if __name__ == "__main__":
                              "prefill (and periodically re-inject into) "
                              "the replay buffer.")
     parser.add_argument("--demo_reinject_every", type=int, default=500_000,
-                        help="Re-inject the demo set every N env steps.")
+                        help="Deprecated (demo mixing now uses a fixed ratio).")
+    parser.add_argument("--demo_ratio", type=float, default=0.25,
+                        help="Fixed fraction of every training batch drawn "
+                             "from the demo buffer (0 disables mixing).")
     args = parser.parse_args()
 
     train(
@@ -671,4 +688,5 @@ if __name__ == "__main__":
         init_path=args.init_path, total_steps=args.total_steps,
         algo=args.algo, pass_scenario_prob=args.pass_scenario_prob,
         demo_dir=args.demo_dir, demo_reinject_every=args.demo_reinject_every,
+        demo_ratio=args.demo_ratio,
     )

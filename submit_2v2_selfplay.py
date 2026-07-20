@@ -7,6 +7,7 @@ def run_experiment(
     reward_type, seed, n_pairs, frozen_path=None, init_path=None,
     total_steps=5_000_000, algo="masac",
     pass_scenario_prob=0.0, demo_dir=None,
+    pass_scenario_prob_start=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -19,6 +20,8 @@ def run_experiment(
         f"--algo {algo} "
         f"--pass_scenario_prob {pass_scenario_prob}"
     )
+    if pass_scenario_prob_start is not None:
+        cmd += f" --pass_scenario_prob_start {pass_scenario_prob_start}"
     os.system(cmd)
 
 
@@ -29,30 +32,30 @@ def main():
     executor = submitit.AutoExecutor(folder=log_folder)
     executor.update_parameters(
         slurm_job_name="sp2v2",
-        slurm_time="04:00:00",
-        slurm_partition="gpu_h100",
+        slurm_time="00:30:00",
+        slurm_partition="dev_gpu_h100",
         slurm_cpus_per_task=24,
         slurm_mem="193300mb",
         slurm_additional_parameters={"gres": "gpu:1"},
     )
 
-    # GENERATION 3 — cooperation induction A/B:
-    #   Run 3a: pass scenario only          (attribution baseline)
-    #   Run 3b: pass scenario + demo prefill (full package)
-    # frozen/init = Gen-2 champion; demos must be generated against the SAME
-    # checkpoint (generate_pass_demos.py --frozen <gen2>) and uploaded to
-    # demo_dir before submitting 3b.
+    # GENERATION 3 — cooperation induction (3b continue):
+    #   pass scenario + demo mixing + BC loss + staged->chaos schedule.
+    # frozen = Gen-2 champion (blue opponent), init = last 3b checkpoint.
     gen2_champion = "models/2v2_selfplay_SAC_dense_seed822_20260706-111029_final.zip"
+    init_3b = "models/2v2_selfplay_SAC_dense_seed822_20260720-095823_2880000_steps.zip"
     reward_type = "dense"
     n_pairs = 24
     seed = 822
-    total_steps = 12_000_000
+    total_steps = 3_300_000
     algo = "sac"
-    pass_scenario_prob = 0.3
+    # Pass-scenario schedule: start heavily staged (learn to pass), anneal to
+    # mostly chaos (apply passing in unstructured play).
+    pass_scenario_prob = 0.2          # end value
+    pass_scenario_prob_start = 0.8    # start value
 
     runs = [
         # (label, demo_dir)
-        ("3a_scenario_only", None),
         ("3b_scenario_plus_demos", "pass_demos"),
     ]
 
@@ -60,13 +63,14 @@ def main():
     for label, demo_dir in runs:
         job = executor.submit(
             run_experiment, reward_type, seed, n_pairs,
-            gen2_champion, gen2_champion, total_steps, algo,
+            gen2_champion, init_3b, total_steps, algo,
             pass_scenario_prob, demo_dir,
+            pass_scenario_prob_start,
         )
         jobs.append((label, job))
         print(f"Submitted {label}: job {job.job_id}")
     print(f"{len(jobs)} Gen-3 job(s) submitted [algo={algo}, "
-          f"pass_scenario_prob={pass_scenario_prob}]")
+          f"pass_scenario_prob={pass_scenario_prob_start}->{pass_scenario_prob}]")
 
 
 if __name__ == "__main__":

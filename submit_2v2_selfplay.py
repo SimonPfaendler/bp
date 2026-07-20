@@ -39,16 +39,19 @@ def main():
         slurm_additional_parameters={"gres": "gpu:1"},
     )
 
-    # GENERATION 3 — cooperation induction (3b continue):
-    #   pass scenario + demo mixing + BC loss + staged->chaos schedule.
-    # frozen = Gen-2 champion (blue opponent), init = last 3b checkpoint.
+    # GENERATION 4 — MASAC (centralized critic) with the new stack:
+    #   demo mixing + staged->chaos schedule (BC is SAC-only, auto-off here).
+    # init = best SAC actor (Gen-3 3b champion) -> MASAC transfers the actor,
+    # the centralized critic starts fresh (critic_warmup handles it). The SAC
+    # replay buffer is per-agent, incompatible with MASAC's joint buffer, so
+    # the reload is auto-skipped and MASAC fills a fresh joint buffer.
     gen2_champion = "models/2v2_selfplay_SAC_dense_seed822_20260706-111029_final.zip"
-    init_3b = "models/2v2_selfplay_SAC_dense_seed822_20260720-095823_2880000_steps.zip"
+    init_actor = "models/2v2_selfplay_SAC_dense_seed822_20260720-171222_final.zip"
     reward_type = "dense"
     n_pairs = 24
     seed = 822
     total_steps = 3_300_000
-    algo = "sac"
+    algo = "masac"
     # Pass-scenario schedule: start heavily staged (learn to pass), anneal to
     # mostly chaos (apply passing in unstructured play).
     pass_scenario_prob = 0.2          # end value
@@ -56,14 +59,14 @@ def main():
 
     runs = [
         # (label, demo_dir)
-        ("3b_scenario_plus_demos", "pass_demos"),
+        ("4_masac_demos_schedule", "pass_demos"),
     ]
 
     jobs = []
     for label, demo_dir in runs:
         job = executor.submit(
             run_experiment, reward_type, seed, n_pairs,
-            gen2_champion, init_3b, total_steps, algo,
+            gen2_champion, init_actor, total_steps, algo,
             pass_scenario_prob, demo_dir,
             pass_scenario_prob_start,
         )

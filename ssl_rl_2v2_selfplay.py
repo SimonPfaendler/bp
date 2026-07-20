@@ -406,6 +406,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # No-op in self-play, kept for compat with shared CurriculumCallback.
         self.curriculum_level = int(level)
 
+    def set_pass_scenario_prob(self, prob: float):
+        # Scheduled by PassScenarioScheduleCallback: anneal the staged-scenario
+        # share from high (learn to pass) to low (apply passing in chaos).
+        self.pass_scenario_prob = float(prob)
+
     # ---------- observation ----------
 
     def _stacked_obs_yellow(self) -> np.ndarray:

@@ -458,6 +458,31 @@ class BCLossCallback(BaseCallback):
         return True
 
 
+class PassScenarioScheduleCallback(BaseCallback):
+    """Linearly anneal pass_scenario_prob from start to end over the run:
+    start heavily staged so the policy learns to pass, end mostly chaos so it
+    learns to apply passing in unstructured play. Bridges the staged->chaos
+    generalization gap. Updates the env only when the prob shifts by >=0.02, to
+    avoid per-step env_method overhead across subprocesses.
+    """
+
+    def __init__(self, start_prob, end_prob, total_steps, verbose=1):
+        super().__init__(verbose)
+        self.start_prob = float(start_prob)
+        self.end_prob = float(end_prob)
+        self.total_steps = max(1, int(total_steps))
+        self._last = None
+
+    def _on_step(self) -> bool:
+        frac = min(1.0, self.num_timesteps / self.total_steps)
+        prob = self.start_prob + frac * (self.end_prob - self.start_prob)
+        if self._last is None or abs(prob - self._last) >= 0.02:
+            self.training_env.env_method("set_pass_scenario_prob", prob)
+            self._last = prob
+        self.logger.record("curriculum/pass_scenario_prob", prob)
+        return True
+
+
 def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   pass_scenario_prob=0.0):
     fns = [
@@ -481,7 +506,7 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
 def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           total_steps=5_000_000, algo="masac", pass_scenario_prob=0.0,
           demo_dir=None, demo_reinject_every=500_000, demo_ratio=0.25,
-          bc_coef=0.5):
+          bc_coef=0.5, pass_scenario_prob_start=None):
     assert algo in ("masac", "sac"), algo
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     algo_tag = algo.upper()
@@ -506,10 +531,16 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         },
     )
 
+    # Optional pass-scenario schedule: start heavily staged, anneal to the
+    # target prob over the run (bridge from staged passing to chaos).
+    use_pass_schedule = pass_scenario_prob_start is not None
+    initial_pass_prob = (
+        pass_scenario_prob_start if use_pass_schedule else pass_scenario_prob
+    )
     env = build_vec_env(
         n_envs=n_envs, reward_type=reward_type, seed=seed,
         frozen_path=frozen_path, use_subproc=True, algo=algo,
-        pass_scenario_prob=pass_scenario_prob,
+        pass_scenario_prob=initial_pass_prob,
     )
     print(
         f"2v2 {algo_tag} self-play | frozen={frozen_path} | seed={seed} | "
@@ -688,6 +719,13 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         ))
         print(f"BC loss enabled: bc_coef={bc_coef} (actor pulled toward demo "
               f"actions on demo states)")
+    if use_pass_schedule:
+        callback_list.append(PassScenarioScheduleCallback(
+            start_prob=pass_scenario_prob_start, end_prob=pass_scenario_prob,
+            total_steps=total_steps,
+        ))
+        print(f"Pass-scenario schedule: {pass_scenario_prob_start} -> "
+              f"{pass_scenario_prob} over {total_steps} steps")
     callbacks = CallbackList(callback_list)
 
     model.learn(
@@ -735,6 +773,10 @@ if __name__ == "__main__":
     parser.add_argument("--bc_coef", type=float, default=0.5,
                         help="Behavior-cloning loss weight pulling the actor "
                              "toward demo actions (SAC only; 0 disables).")
+    parser.add_argument("--pass_scenario_prob_start", type=float, default=None,
+                        help="If set, linearly anneal pass_scenario_prob from "
+                             "this start value to --pass_scenario_prob over the "
+                             "run (staged->chaos curriculum). Omit for fixed.")
     args = parser.parse_args()
 
     train(
@@ -744,4 +786,5 @@ if __name__ == "__main__":
         algo=args.algo, pass_scenario_prob=args.pass_scenario_prob,
         demo_dir=args.demo_dir, demo_reinject_every=args.demo_reinject_every,
         demo_ratio=args.demo_ratio, bc_coef=args.bc_coef,
+        pass_scenario_prob_start=args.pass_scenario_prob_start,
     )

@@ -416,6 +416,48 @@ class DemoInjectionCallback(BaseCallback):
         return True
 
 
+class BCLossCallback(BaseCallback):
+    """Behavior-cloning auxiliary update: pull the actor toward demo actions on
+    demo states. Runs an extra actor gradient step every `every` env-steps
+    (after learning_starts), sharing the actor optimizer but decoupled from the
+    SAC actor loss — so no train() override is needed.
+
+    Closes the gap the DemoMixReplayBuffer leaves open: demo mixing teaches the
+    CRITIC what a completed pass is worth, but the actor only reaches those
+    states if it already acts like the demo. BC couples the demos to the policy.
+    SAC-only (MASAC's joint obs would need separate handling).
+    """
+
+    def __init__(self, demo_buffer, bc_coef=0.5, batch_size=256, every=1,
+                 learning_starts=10000, verbose=0):
+        super().__init__(verbose)
+        self.demo_buffer = demo_buffer
+        self.bc_coef = float(bc_coef)
+        self.bc_batch = int(batch_size)
+        self.every = int(every)
+        self.learning_starts = int(learning_starts)
+
+    def _on_step(self) -> bool:
+        if (
+            self.bc_coef <= 0.0
+            or self.demo_buffer is None
+            or self.demo_buffer.size() == 0
+            or self.num_timesteps < self.learning_starts
+            or self.n_calls % self.every != 0
+        ):
+            return True
+        import torch.nn.functional as F
+        data = self.demo_buffer.sample(self.bc_batch)
+        self.model.policy.set_training_mode(True)
+        pred = self.model.actor(data.observations, deterministic=True)
+        bc_loss = F.mse_loss(pred, data.actions)
+        self.model.actor.optimizer.zero_grad()
+        (self.bc_coef * bc_loss).backward()
+        self.model.actor.optimizer.step()
+        self.logger.record("train/bc_loss", float(bc_loss.item()))
+        return True
+
+
 def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   pass_scenario_prob=0.0):
     fns = [
@@ -438,7 +480,8 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
 
 def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           total_steps=5_000_000, algo="masac", pass_scenario_prob=0.0,
-          demo_dir=None, demo_reinject_every=500_000, demo_ratio=0.25):
+          demo_dir=None, demo_reinject_every=500_000, demo_ratio=0.25,
+          bc_coef=0.5):
     assert algo in ("masac", "sac"), algo
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     algo_tag = algo.upper()
@@ -636,6 +679,15 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             name_prefix=run_name, save_replay_buffer=True,
         ),
     ]
+    # BC auxiliary loss: couple the actor to the demo actions (SAC only —
+    # MASAC's joint obs / decentralized actor would need separate handling).
+    if demos is not None and algo == "sac" and bc_coef > 0.0:
+        callback_list.append(BCLossCallback(
+            demo_buffer=demo_buf, bc_coef=bc_coef,
+            learning_starts=model.learning_starts,
+        ))
+        print(f"BC loss enabled: bc_coef={bc_coef} (actor pulled toward demo "
+              f"actions on demo states)")
     callbacks = CallbackList(callback_list)
 
     model.learn(
@@ -680,6 +732,9 @@ if __name__ == "__main__":
     parser.add_argument("--demo_ratio", type=float, default=0.25,
                         help="Fixed fraction of every training batch drawn "
                              "from the demo buffer (0 disables mixing).")
+    parser.add_argument("--bc_coef", type=float, default=0.5,
+                        help="Behavior-cloning loss weight pulling the actor "
+                             "toward demo actions (SAC only; 0 disables).")
     args = parser.parse_args()
 
     train(
@@ -688,5 +743,5 @@ if __name__ == "__main__":
         init_path=args.init_path, total_steps=args.total_steps,
         algo=args.algo, pass_scenario_prob=args.pass_scenario_prob,
         demo_dir=args.demo_dir, demo_reinject_every=args.demo_reinject_every,
-        demo_ratio=args.demo_ratio,
+        demo_ratio=args.demo_ratio, bc_coef=args.bc_coef,
     )

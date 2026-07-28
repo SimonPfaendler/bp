@@ -38,6 +38,7 @@ from pair_vec_env import (
 )
 from ssl_rl_2v2_selfplay import SSL2v2SelfPlayEnv
 from demo_buffer import DemoMixReplayBuffer, build_demo_buffer, load_buffer_into
+from deepsets_extractor import DeepSetsExtractor
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -506,11 +507,19 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
 def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           total_steps=5_000_000, algo="masac", pass_scenario_prob=0.0,
           demo_dir=None, demo_reinject_every=500_000, demo_ratio=0.25,
-          bc_coef=0.5, pass_scenario_prob_start=None):
+          bc_coef=0.5, pass_scenario_prob_start=None, net="flat",
+          start_level=None):
     assert algo in ("masac", "sac"), algo
+    assert net in ("flat", "deepsets"), net
+    if net == "deepsets" and algo == "masac":
+        raise NotImplementedError(
+            "deepsets is wired for the stock-SAC branch only for now "
+            "(MASACPolicy builds its own actor/critic)."
+        )
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     algo_tag = algo.upper()
-    run_name = f"2v2_selfplay_{algo_tag}_{reward_type}_seed{seed}_{timestamp}"
+    net_tag = f"_{net}" if net != "flat" else ""
+    run_name = f"2v2_selfplay_{algo_tag}{net_tag}_{reward_type}_seed{seed}_{timestamp}"
     log_dir = os.path.join(LOG_DIR, run_name)
 
     wandb.init(
@@ -528,6 +537,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             "pass_scenario_prob": pass_scenario_prob,
             "demo_dir": demo_dir,
             "demo_reinject_every": demo_reinject_every,
+            "net": net,
+            "start_level": start_level,
         },
     )
 
@@ -550,6 +561,15 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     init_load = init_path or frozen_path
 
     policy_kwargs = dict(net_arch=[512, 512, 512])
+    if net == "deepsets":
+        # Entity-token extractor instead of the flat 52 -> MLP input; the
+        # obs/demos/env are untouched, only the network input structure
+        # changes (slicing happens inside the extractor).
+        policy_kwargs.update(
+            features_extractor_class=DeepSetsExtractor,
+            features_extractor_kwargs=dict(embed_dim=64),
+        )
+        print("Net: DeepSets entity extractor (ego + mate-enc + opp-pool)")
     # Demo mixing: swap in a DemoMixReplayBuffer that blends a fixed fraction
     # of demo transitions into every batch (constant share, no re-injection).
     use_demos = demo_dir is not None
@@ -588,15 +608,27 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         new_state = model.policy.state_dict()
         old_state = old_model.policy.state_dict()
         transferred, skipped = [], []
-        # Shape-matching transfer: same-algo checkpoints (SAC->SAC generation
-        # steps) warm-start actor AND critic/critic_target; cross-algo inits
-        # (e.g. MASAC->SAC) skip the incompatible critic automatically.
+        # Module-wise all-or-nothing transfer: a module (actor / critic /
+        # critic_target) is only copied if EVERY one of its keys shape-matches.
+        # Same-arch checkpoints warm-start actor AND critic; cross-algo or
+        # cross-net inits (MASAC->SAC, flat->deepsets) skip the incompatible
+        # module wholesale — a partial copy (deep layers transferred onto a
+        # random first layer) would be a garbage init, worse than fresh.
+        groups = {}
         for k, v in old_state.items():
-            if k in new_state and new_state[k].shape == v.shape:
-                new_state[k] = v
-                transferred.append(k)
+            groups.setdefault(k.split(".")[0], []).append((k, v))
+        for prefix, items in groups.items():
+            ok = all(
+                k in new_state and new_state[k].shape == v.shape
+                for k, v in items
+            )
+            if ok:
+                for k, v in items:
+                    new_state[k] = v
+                    transferred.append(k)
             else:
-                skipped.append(k)
+                skipped.extend(k for k, _ in items)
+                print(f"  Skipping module '{prefix}' (shape mismatch)")
         model.policy.load_state_dict(new_state)
         n_critic = sum(1 for k in transferred if k.startswith("critic"))
         print(
@@ -702,9 +734,16 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         DebugCallback(log_every=500),
         AlphaClampCallback(alpha_min=0.005),
         BestSuccessCallback(save_path=f"{MODEL_DIR}/{run_name}"),
-        # Gen 3: init/frozen is the Gen-2 champion (already solves L5), so
-        # skip the L1 tap-in warmup and expose pass scenarios from step 0.
-        CurriculumCallback(start_level=5, target_level=5, threshold=0.9),
+        # Warm-started runs (init = champion) skip the L1 tap-in warmup and
+        # see pass scenarios from step 0; from-scratch runs (e.g. the
+        # deepsets arm, which cannot transfer weights) need the L1 phase.
+        CurriculumCallback(
+            start_level=(
+                start_level if start_level is not None
+                else (5 if init_path else 1)
+            ),
+            target_level=5, threshold=0.9,
+        ),
         CheckpointCallback(
             save_freq=20000, save_path=MODEL_DIR,
             name_prefix=run_name, save_replay_buffer=True,
@@ -777,6 +816,12 @@ if __name__ == "__main__":
                         help="If set, linearly anneal pass_scenario_prob from "
                              "this start value to --pass_scenario_prob over the "
                              "run (staged->chaos curriculum). Omit for fixed.")
+    parser.add_argument("--net", default="flat", choices=["flat", "deepsets"],
+                        help="Network input structure: flat 52->MLP (default) "
+                             "or Deep-Sets entity extractor (SAC only).")
+    parser.add_argument("--start_level", type=int, default=None,
+                        help="Curriculum start level. Default: auto — 5 with "
+                             "--init_path (warm start), 1 from scratch.")
     args = parser.parse_args()
 
     train(
@@ -787,4 +832,5 @@ if __name__ == "__main__":
         demo_dir=args.demo_dir, demo_reinject_every=args.demo_reinject_every,
         demo_ratio=args.demo_ratio, bc_coef=args.bc_coef,
         pass_scenario_prob_start=args.pass_scenario_prob_start,
+        net=args.net, start_level=args.start_level,
     )

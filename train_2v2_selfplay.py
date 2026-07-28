@@ -510,8 +510,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           bc_coef=0.5, pass_scenario_prob_start=None, net="flat",
           start_level=None):
     assert algo in ("masac", "sac"), algo
-    assert net in ("flat", "deepsets"), net
-    if net == "deepsets" and algo == "masac":
+    assert net in ("flat", "deepsets", "deepsets_mean"), net
+    if net.startswith("deepsets") and algo == "masac":
         raise NotImplementedError(
             "deepsets is wired for the stock-SAC branch only for now "
             "(MASACPolicy builds its own actor/critic)."
@@ -561,15 +561,18 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     init_load = init_path or frozen_path
 
     policy_kwargs = dict(net_arch=[512, 512, 512])
-    if net == "deepsets":
+    if net.startswith("deepsets"):
         # Entity-token extractor instead of the flat 52 -> MLP input; the
         # obs/demos/env are untouched, only the network input structure
         # changes (slicing happens inside the extractor).
+        # "deepsets"      -> mean+max opponent pooling (default)
+        # "deepsets_mean" -> mean only (first-generation ablation arm)
+        pooling = "mean" if net == "deepsets_mean" else "meanmax"
         policy_kwargs.update(
             features_extractor_class=DeepSetsExtractor,
-            features_extractor_kwargs=dict(embed_dim=64),
+            features_extractor_kwargs=dict(embed_dim=64, pooling=pooling),
         )
-        print("Net: DeepSets entity extractor (ego + mate-enc + opp-pool)")
+        print(f"Net: DeepSets entity extractor (opp pooling={pooling})")
     # Demo mixing: swap in a DemoMixReplayBuffer that blends a fixed fraction
     # of demo transitions into every batch (constant share, no re-injection).
     use_demos = demo_dir is not None
@@ -816,9 +819,11 @@ if __name__ == "__main__":
                         help="If set, linearly anneal pass_scenario_prob from "
                              "this start value to --pass_scenario_prob over the "
                              "run (staged->chaos curriculum). Omit for fixed.")
-    parser.add_argument("--net", default="flat", choices=["flat", "deepsets"],
-                        help="Network input structure: flat 52->MLP (default) "
-                             "or Deep-Sets entity extractor (SAC only).")
+    parser.add_argument("--net", default="flat",
+                        choices=["flat", "deepsets", "deepsets_mean"],
+                        help="Network input structure: flat 52->MLP (default), "
+                             "deepsets (mean+max opponent pooling) or "
+                             "deepsets_mean (mean-only ablation). SAC only.")
     parser.add_argument("--start_level", type=int, default=None,
                         help="Curriculum start level. Default: auto — 5 with "
                              "--init_path (warm start), 1 from scratch.")

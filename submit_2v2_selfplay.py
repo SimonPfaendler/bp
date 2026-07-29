@@ -32,7 +32,7 @@ def main():
     executor = submitit.AutoExecutor(folder=log_folder)
     executor.update_parameters(
         slurm_job_name="sp2v2",
-        slurm_time="02:00:00",
+        slurm_time="03:00:00",
         slurm_partition="gpu_h100",
         slurm_cpus_per_task=24,
         slurm_mem="193300mb",
@@ -47,46 +47,44 @@ def main():
     # schedule, making any SAC-vs-MASAC comparison at that checkpoint an
     # apples-to-oranges mid-schedule-vs-finished comparison.
 
-    # GENERATION 6 — pooling ablation inside the Deep-Sets idea.
-    # Gen 5 showed deepsets matching flat in STAGED scenarios (pass sr 0.34 vs
-    # 0.35) but collapsing in CHAOS (sr 0.04 vs 0.23, passes 0.0 vs 0.013):
-    # mean pooling alone cannot separate "one opponent on me, one far" from
-    # "both mid-range" at N=2. meanmax adds per-feature max pooling (the
-    # "most threatening opponent" signal) at equal permutation invariance.
-    #
-    # Same seed/config as Gen 5, so 6a is directly comparable to the existing
-    # 5a (flat) and 5b (mean-pooled) curves. 6b re-runs mean-only under the
-    # current extractor (mate encoder removed) for a clean pooling ablation —
-    # drop it if GPU time is tight and use 5b as the reference instead.
+    # GENERATION 7 — best known config, finally with a real step budget.
+    # Deep-Sets ablation (Gen 5/6) is closed: pooling costs base-game spatial
+    # precision at N=2; flat wins. Back to the strongest stack: flat MLP,
+    # warm-start from the best champion (20260720-171222: success 0.38,
+    # chaos passes 0.027, trained with demos+BC+schedule), frozen = Gen-2
+    # (kept identical so the 12M curves overlay the earlier 3.3M curves).
+    # All previous full-stack runs were only 3.3M steps — the schedule had
+    # just finished annealing at cutoff, so the policy barely trained in the
+    # mostly-chaos regime. 12M gives a long post-anneal phase.
+    # Schedule starts at 0.5 (not 0.8): the init already masters the staged
+    # scenarios, so front-load less and spend the budget on chaos transfer.
     gen2_champion = "models/2v2_selfplay_SAC_dense_seed822_20260706-111029_final.zip"
+    best_champion = "models/2v2_selfplay_SAC_dense_seed822_20260720-171222_final.zip"
     reward_type = "dense"
     n_pairs = 24
     seed = 822
-    total_steps = 3_300_000
+    total_steps = 12_000_000
     algo = "sac"
-    # Pass-scenario schedule: start heavily staged (learn to pass), anneal to
-    # mostly chaos (apply passing in unstructured play).
     pass_scenario_prob = 0.2          # end value
-    pass_scenario_prob_start = 0.8    # start value
+    pass_scenario_prob_start = 0.5    # start value (init knows staged passes)
 
     runs = [
         # (label, net)
-        ("6a_deepsets_meanmax", "deepsets"),
-        ("6b_deepsets_mean", "deepsets_mean"),
+        ("7_flat_warm_12M", "flat"),
     ]
 
     jobs = []
     for label, net in runs:
         job = executor.submit(
             run_experiment, reward_type, seed, n_pairs,
-            gen2_champion, None, total_steps, algo,
+            gen2_champion, best_champion, total_steps, algo,
             pass_scenario_prob, "pass_demos",
             pass_scenario_prob_start, net,
         )
         jobs.append((label, job))
         print(f"Submitted {label}: job {job.job_id}")
-    print(f"{len(jobs)} Gen-6 job(s) submitted [pooling ablation, "
-          f"algo={algo}, from scratch, "
+    print(f"{len(jobs)} Gen-7 job(s) submitted [best config, 12M, "
+          f"algo={algo}, warm start, "
           f"pass_scenario_prob={pass_scenario_prob_start}->{pass_scenario_prob}]")
 
 

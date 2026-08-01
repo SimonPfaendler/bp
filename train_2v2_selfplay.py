@@ -644,18 +644,21 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
 
     # Optional: load matching replay buffer to skip cold-start.
     if init_load and os.path.exists(init_load):
-        buf_path = init_load.replace(".zip", "").replace("_steps", "") + "_replay_buffer"
-        # Try both naming schemes (matches CheckpointCallback + final save).
-        candidates = [
-            init_load.replace(".zip", ".pkl").replace("_steps", "_replay_buffer_") + "steps.pkl",
-            init_load.replace("_steps.zip", "").replace("_", "_", 1) + "_replay_buffer.pkl",
-        ]
-        # Simple explicit match for _NNNN_steps.zip -> _replay_buffer_NNNN_steps.pkl
+        # Two naming schemes:
+        #   CheckpointCallback: <run>_NNNN_steps.zip -> <run>_replay_buffer_NNNN_steps.pkl
+        #   final save:         <run>_final.zip      -> <run>_final_replay_buffer.pkl
+        # The final scheme is what checkpoint-chaining (12M as 4x3M dev-queue
+        # chunks, each warm-starting from the previous _final) relies on.
         import re
+        buffer_path = None
         m = re.match(r"^(.*)_(\d+)_steps\.zip$", init_load)
         if m:
-            base, steps = m.group(1), m.group(2)
-            buffer_path = f"{base}_replay_buffer_{steps}_steps.pkl"
+            buffer_path = f"{m.group(1)}_replay_buffer_{m.group(2)}_steps.pkl"
+        else:
+            final_buf = init_load.replace(".zip", "") + "_replay_buffer.pkl"
+            if os.path.exists(final_buf):
+                buffer_path = final_buf
+        if buffer_path is not None:
             if os.path.exists(buffer_path):
                 # Peek at buffer's n_envs — SB3 refuses to add transitions if
                 # the saved buffer's n_envs doesn't match the current VecEnv.

@@ -7,7 +7,7 @@ def run_experiment(
     reward_type, seed, n_pairs, frozen_path=None, init_path=None,
     total_steps=5_000_000, algo="masac",
     pass_scenario_prob=0.0, demo_dir=None,
-    pass_scenario_prob_start=None, net="flat",
+    pass_scenario_prob_start=None, net="flat", load_buffer="auto",
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -18,7 +18,8 @@ def run_experiment(
         f"--reward_type {reward_type} --seed {seed} "
         f"--n_pairs {n_pairs} --total_steps {total_steps} "
         f"--algo {algo} --net {net} "
-        f"--pass_scenario_prob {pass_scenario_prob}"
+        f"--pass_scenario_prob {pass_scenario_prob} "
+        f"--load_buffer {load_buffer}"
     )
     if pass_scenario_prob_start is not None:
         cmd += f" --pass_scenario_prob_start {pass_scenario_prob_start}"
@@ -47,42 +48,45 @@ def main():
     # schedule, making any SAC-vs-MASAC comparison at that checkpoint an
     # apples-to-oranges mid-schedule-vs-finished comparison.
 
-    # GENERATION 7 — best config, 12M total via CHECKPOINT CHAINING:
-    # the dev queue caps jobs at 30 min (~3M steps), so the 12M budget runs
-    # as 4 chained chunks. Each chunk warm-starts actor+critic AND reloads
-    # the replay buffer from the previous chunk's _final (loader now handles
-    # the _final_replay_buffer.pkl naming). Between chunks, update chain_from
-    # to the newest *_final.zip and resubmit.
-    #   Chunk 1 (20260729-213408): init = 171222 champion, schedule 0.5->0.2
-    #   Chunks 2..4: init = previous _final, FIXED prob 0.2 (anneal is done)
-    # frozen stays Gen-2 so all curves remain comparable.
-    gen2_champion = "models/2v2_selfplay_SAC_dense_seed822_20260706-111029_final.zip"
-    chain_from = "models/2v2_selfplay_SAC_dense_seed822_20260729-213408_final.zip"
+    # GENERATION 8 — ladder step with role-split checkpoints.
+    # Chain verdict (Gen 7, 6M cumulative): pass skill ERODES under
+    # continued training at prob 0.2 (scenario passes 0.26->0.16,
+    # scored_after_pass 0.033->0) while solo skill climbs to best-ever
+    # (chaos success 0.40). Two consequences, both applied here:
+    #   frozen := chunk-2 final (140727) — the strongest solo presser we
+    #       have; pressure is what should make the solo path unprofitable.
+    #   init   := 171222 — the most pass-capable champion.
+    #   pass_scenario_prob FIXED at 0.35, no anneal (the erosion lesson).
+    #   load_buffer=off — 171222's buffer holds experience against the OLD
+    #       frozen; stale dynamics under the new opponent.
+    strongest_presser = "models/2v2_selfplay_SAC_dense_seed822_20260801-140727_final.zip"
+    best_passer = "models/2v2_selfplay_SAC_dense_seed822_20260720-171222_final.zip"
     reward_type = "dense"
     n_pairs = 24
     seed = 822
     total_steps = 3_000_000
     algo = "sac"
-    pass_scenario_prob = 0.2          # fixed: anneal finished in chunk 1
+    pass_scenario_prob = 0.35         # fixed — no anneal
     pass_scenario_prob_start = None
+    load_buffer = "off"
 
     runs = [
         # (label, net)
-        ("7_chain2_flat_12M", "flat"),
+        ("8_ladder_passer_vs_presser", "flat"),
     ]
 
     jobs = []
     for label, net in runs:
         job = executor.submit(
             run_experiment, reward_type, seed, n_pairs,
-            gen2_champion, chain_from, total_steps, algo,
+            strongest_presser, best_passer, total_steps, algo,
             pass_scenario_prob, "pass_demos",
-            pass_scenario_prob_start, net,
+            pass_scenario_prob_start, net, load_buffer,
         )
         jobs.append((label, job))
         print(f"Submitted {label}: job {job.job_id}")
-    print(f"{len(jobs)} Gen-7 chain job(s) submitted [init={chain_from}, "
-          f"fixed pass_scenario_prob={pass_scenario_prob}]")
+    print(f"{len(jobs)} Gen-8 job(s) submitted [frozen=strongest presser, "
+          f"init=best passer, fixed pass_scenario_prob={pass_scenario_prob}]")
 
 
 if __name__ == "__main__":

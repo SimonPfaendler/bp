@@ -508,7 +508,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           total_steps=5_000_000, algo="masac", pass_scenario_prob=0.0,
           demo_dir=None, demo_reinject_every=500_000, demo_ratio=0.25,
           bc_coef=0.5, pass_scenario_prob_start=None, net="flat",
-          start_level=None):
+          start_level=None, load_buffer="auto"):
     assert algo in ("masac", "sac"), algo
     assert net in ("flat", "deepsets", "deepsets_mean"), net
     if net.startswith("deepsets") and algo == "masac":
@@ -638,12 +638,30 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             f"Policy transfer: {len(transferred)} params copied "
             f"({n_critic} critic/target), {len(skipped)} skipped (mismatches)"
         )
+        # Entropy coef lives OUTSIDE policy.state_dict — without this, every
+        # chained chunk restarts at alpha=0.05 (10x the converged 0.005) and
+        # burns a few hundred k steps re-decaying exploration noise.
+        if (
+            getattr(old_model, "log_ent_coef", None) is not None
+            and getattr(model, "log_ent_coef", None) is not None
+        ):
+            with torch.no_grad():
+                model.log_ent_coef.data.copy_(
+                    old_model.log_ent_coef.data.to(model.log_ent_coef.device)
+                )
+            print(
+                f"Entropy coef transferred: alpha="
+                f"{float(torch.exp(model.log_ent_coef.detach())):.4f}"
+            )
         del old_model
     else:
         print(f"No init checkpoint at {init_load}; training from scratch")
 
     # Optional: load matching replay buffer to skip cold-start.
-    if init_load and os.path.exists(init_load):
+    # load_buffer="off" for ladder steps: the old buffer holds experience
+    # against a DIFFERENT frozen opponent — under new opponent dynamics those
+    # transitions are stale and bias the critic.
+    if load_buffer != "off" and init_load and os.path.exists(init_load):
         # Two naming schemes:
         #   CheckpointCallback: <run>_NNNN_steps.zip -> <run>_replay_buffer_NNNN_steps.pkl
         #   final save:         <run>_final.zip      -> <run>_final_replay_buffer.pkl
@@ -676,6 +694,11 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
                     else:
                         model.load_replay_buffer(buffer_path)
                     print(f"Loaded replay buffer: {buffer_path} ({model.replay_buffer.size()} transitions)")
+                    # Warm buffer -> the uniform-random warmup phase (which
+                    # exists to fill an empty buffer with diverse data) is
+                    # pure waste: it delays training and pollutes the buffer.
+                    model.learning_starts = 0
+                    print("learning_starts=0 (warm buffer loaded, skipping random warmup)")
                 else:
                     print(
                         f"Skipping buffer load: saved n_envs={saved_n_envs} != current n_envs={cur_n_envs}. "
@@ -830,6 +853,12 @@ if __name__ == "__main__":
     parser.add_argument("--start_level", type=int, default=None,
                         help="Curriculum start level. Default: auto — 5 with "
                              "--init_path (warm start), 1 from scratch.")
+    parser.add_argument("--load_buffer", default="auto",
+                        choices=["auto", "off"],
+                        help="off: skip replay-buffer reload even if a "
+                             "matching file exists (use for ladder steps — "
+                             "old buffer data was generated against a "
+                             "different frozen opponent).")
     args = parser.parse_args()
 
     train(
@@ -841,4 +870,5 @@ if __name__ == "__main__":
         demo_ratio=args.demo_ratio, bc_coef=args.bc_coef,
         pass_scenario_prob_start=args.pass_scenario_prob_start,
         net=args.net, start_level=args.start_level,
+        load_buffer=args.load_buffer,
     )

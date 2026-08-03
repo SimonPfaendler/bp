@@ -53,26 +53,28 @@ def main():
     # schedule, making any SAC-vs-MASAC comparison at that checkpoint an
     # apples-to-oranges mid-schedule-vs-finished comparison.
 
-    # GENERATION 9 — MASAC restart with the full stack and a FAIR budget.
-    # The old MASAC run was handicapped three ways: half the sim budget
-    # (its counter logs 24 timesteps/sim-tick vs SAC's 48, so 3.3M counted
-    # steps = only half the episodes), cut off mid-anneal, and missing the
-    # BC loss (was SAC-only). Fixed here:
-    #   total_steps 1.65M       == 3.3M SAC sim-equivalent, fits 30-min dev
+    # GENERATION 9 — MASAC FROM SCRATCH with the full cooperation stack.
+    # Rationale: the erosion results show the solo equilibrium is an
+    # attractor — warm-starting from a solo champion drops the policy inside
+    # its basin. From scratch, demos + BC steer early learning toward
+    # passing BEFORE solo habits form, and the centralized critic assigns
+    # team credit from step 0.
+    #   init = "scratch"        brand-new actor AND critic, alpha starts 0.05
+    #       (explicit sentinel — plain None would fall back to frozen_path!)
+    #   frozen = Gen-2 champion (curve comparability; L1 shields the early
+    #       phase — blues spawn parked far away at level 1)
+    #   start_level=1           scratch policy must learn to score first
     #   pass_scenario_prob 0.35 fixed, no anneal (erosion lesson)
-    #   BC loss now MASAC-capable (joint demo batches unstacked per-agent)
-    #   critic_warmup 10000     fresh centralized critic, warm actor
-    #   start_level=1           L1 tap-ins calibrate the fresh joint critic
-    #       on dense value targets; the competent actor promotes quickly
-    #   init = 171222 (most pass-capable actor; critic can't transfer)
-    #   frozen = Gen-2 champion (comparability with all main curves)
-    #   load_buffer=off (SAC per-agent buffer is joint-incompatible anyway)
+    #   BC loss MASAC-capable   (joint demo batches unstacked per-agent)
+    #   critic_warmup auto-off  (only needed for transferred actors)
+    #   total_steps 1.4M        empirical 30-min-slot max incl. startup;
+    #       from scratch needs CHAINING: continue via init = newest _final
+    #       (then set start_level=None and load_buffer="auto").
     gen2_champion = "models/2v2_selfplay_SAC_dense_seed822_20260706-111029_final.zip"
-    best_passer = "models/2v2_selfplay_SAC_dense_seed822_20260720-171222_final.zip"
     reward_type = "dense"
     n_pairs = 24
     seed = 822
-    total_steps = 1_650_000
+    total_steps = 1_400_000
     algo = "masac"
     pass_scenario_prob = 0.35         # fixed — no anneal
     pass_scenario_prob_start = None
@@ -81,22 +83,22 @@ def main():
 
     runs = [
         # (label, net)
-        ("9_masac_full_stack", "flat"),
+        ("9_masac_scratch", "flat"),
     ]
 
     jobs = []
     for label, net in runs:
         job = executor.submit(
             run_experiment, reward_type, seed, n_pairs,
-            gen2_champion, best_passer, total_steps, algo,
+            gen2_champion, "scratch", total_steps, algo,
             pass_scenario_prob, "pass_demos",
             pass_scenario_prob_start, net, load_buffer,
             start_level,
         )
         jobs.append((label, job))
         print(f"Submitted {label}: job {job.job_id}")
-    print(f"{len(jobs)} Gen-9 job(s) submitted [MASAC full stack, "
-          f"1.65M (=3.3M SAC-equiv), start_level={start_level}, "
+    print(f"{len(jobs)} Gen-9 job(s) submitted [MASAC from scratch, "
+          f"start_level={start_level}, "
           f"fixed pass_scenario_prob={pass_scenario_prob}]")
 
 

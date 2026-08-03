@@ -575,7 +575,14 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         f"envs={n_envs} | vec_slots={env.num_envs}"
     )
 
-    init_load = init_path or frozen_path
+    # --init_path scratch: NO warm start at all (fresh actor AND critic),
+    # overriding the historical "init defaults to frozen" fallback — with a
+    # frozen opponent set, a scratch run would otherwise silently warm-start
+    # the actor from the opponent checkpoint.
+    if init_path == "scratch":
+        init_load = None
+    else:
+        init_load = init_path or frozen_path
 
     policy_kwargs = dict(net_arch=[512, 512, 512])
     if net.startswith("deepsets"):
@@ -602,7 +609,11 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             train_freq=48, gradient_steps=96, batch_size=2048,
             buffer_size=1_000_000, learning_rate=3e-4,
             learning_starts=20000, ent_coef="auto_0.05", target_entropy="auto",
-            critic_warmup_grad_steps=10000, max_grad_norm=0.5,
+            # Warmup exists to protect a TRANSFERRED competent actor from a
+            # fresh critic's garbage gradients. From scratch both are fresh —
+            # standard SAC dynamics, no warmup needed.
+            critic_warmup_grad_steps=(10000 if init_load else 0),
+            max_grad_norm=0.5,
             policy_kwargs=policy_kwargs, gamma=0.99,
             replay_buffer_class=rb_class, replay_buffer_kwargs=rb_kwargs,
         )
@@ -786,7 +797,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         CurriculumCallback(
             start_level=(
                 start_level if start_level is not None
-                else (5 if init_path else 1)
+                else (5 if init_load else 1)
             ),
             target_level=5, threshold=0.9,
         ),
@@ -833,7 +844,8 @@ if __name__ == "__main__":
                         help="Path to frozen SAC checkpoint for blue side. "
                              "Omit for stationary Blue (warmup phase).")
     parser.add_argument("--init_path", default=None,
-                        help="Yellow init checkpoint. Defaults to frozen_path.")
+                        help="Yellow init checkpoint. Defaults to frozen_path. "
+                             "Pass 'scratch' for NO warm start (fresh nets).")
     parser.add_argument("--reward_type", default="dense",
                         choices=["sparse", "dense"])
     parser.add_argument("--seed", type=int, default=0)

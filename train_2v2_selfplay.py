@@ -58,11 +58,17 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 
-def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0):
+def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
+                curriculum_start_level=None):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
             pass_scenario_prob=pass_scenario_prob,
+            # Without this the env defaults to L5 until the curriculum
+            # callback's first set_curriculum_level — the first episode per
+            # env then spawns L5 scenarios whose stats sit as stale values
+            # in the scenario_* logs for the whole L1 phase.
+            curriculum_start_level=curriculum_start_level,
         )
         env.reset(seed=seed)
         return env
@@ -512,9 +518,10 @@ class PassScenarioScheduleCallback(BaseCallback):
 
 
 def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
-                  pass_scenario_prob=0.0):
+                  pass_scenario_prob=0.0, curriculum_start_level=None):
     fns = [
-        make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob)
+        make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob,
+                    curriculum_start_level)
         for i in range(n_envs)
     ]
     if algo == "masac":
@@ -569,6 +576,23 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         },
     )
 
+    # --init_path scratch: NO warm start at all (fresh actor AND critic),
+    # overriding the historical "init defaults to frozen" fallback — with a
+    # frozen opponent set, a scratch run would otherwise silently warm-start
+    # the actor from the opponent checkpoint.
+    # Resolved BEFORE the env is built: it decides the curriculum start level,
+    # which the envs need at construction time.
+    if init_path == "scratch":
+        init_load = None
+    else:
+        init_load = init_path or frozen_path
+
+    # Warm-started runs skip the L1 tap-in warmup; from-scratch runs need it.
+    effective_start_level = (
+        start_level if start_level is not None
+        else (5 if init_load else 1)
+    )
+
     # Optional pass-scenario schedule: start heavily staged, anneal to the
     # target prob over the run (bridge from staged passing to chaos).
     use_pass_schedule = pass_scenario_prob_start is not None
@@ -579,20 +603,13 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         n_envs=n_envs, reward_type=reward_type, seed=seed,
         frozen_path=frozen_path, use_subproc=True, algo=algo,
         pass_scenario_prob=initial_pass_prob,
+        curriculum_start_level=effective_start_level,
     )
     print(
         f"2v2 {algo_tag} self-play | frozen={frozen_path} | seed={seed} | "
-        f"envs={n_envs} | vec_slots={env.num_envs}"
+        f"envs={n_envs} | vec_slots={env.num_envs} | "
+        f"start_level={effective_start_level}"
     )
-
-    # --init_path scratch: NO warm start at all (fresh actor AND critic),
-    # overriding the historical "init defaults to frozen" fallback — with a
-    # frozen opponent set, a scratch run would otherwise silently warm-start
-    # the actor from the opponent checkpoint.
-    if init_path == "scratch":
-        init_load = None
-    else:
-        init_load = init_path or frozen_path
 
     policy_kwargs = dict(net_arch=[512, 512, 512])
     if net.startswith("deepsets"):
@@ -807,11 +824,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         # see pass scenarios from step 0; from-scratch runs (e.g. the
         # deepsets arm, which cannot transfer weights) need the L1 phase.
         CurriculumCallback(
-            start_level=(
-                start_level if start_level is not None
-                else (5 if init_load else 1)
-            ),
-            target_level=5, threshold=0.9,
+            start_level=effective_start_level, target_level=5, threshold=0.9,
         ),
         CheckpointCallback(
             save_freq=20000, save_path=MODEL_DIR,

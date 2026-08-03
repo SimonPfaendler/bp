@@ -59,18 +59,23 @@ def main():
     # its basin. From scratch, demos + BC steer early learning toward
     # passing BEFORE solo habits form, and the centralized critic assigns
     # team credit from step 0.
-    #   init = "scratch"        brand-new actor AND critic, alpha starts 0.05
-    #       (explicit sentinel — plain None would fall back to frozen_path!)
     #   frozen = Gen-2 champion (curve comparability; L1 shields the early
     #       phase — blues spawn parked far away at level 1)
-    #   start_level=1           scratch policy must learn to score first
     #   pass_scenario_prob 0.35 fixed, no anneal (erosion lesson)
     #   BC loss MASAC-capable   (joint demo batches unstacked per-agent)
-    #   critic_warmup auto-off  (only needed for transferred actors)
-    #   total_steps 1.4M        empirical 30-min-slot max incl. startup;
-    #       from scratch needs CHAINING: continue via init = newest _final
-    #       (then set start_level=None and load_buffer="auto").
+    #   critic warmup + TD target clip +-30 (fresh centralized critic + 25%
+    #       demo states per batch diverged to q_mean 1.6e6 without them)
+    #
+    # CHAINING: 1.4M is the empirical 30-min-slot max incl. startup, so the
+    # run continues in chunks. Per chunk, set `chain_from` to the newest
+    # *_final.zip; everything else adapts automatically.
+    #   chunk 1 (20260803-174912): scratch, L1, reached success 0.63
+    #   chunk 2+: init = previous _final, buffer reloaded, still L1 until
+    #       the curriculum promotes at success >= 0.9 over 300 episodes.
+    # start_level stays pinned at 1: the auto-rule would jump a warm-started
+    # run to L5, but this chain has not promoted yet.
     gen2_champion = "models/2v2_selfplay_SAC_dense_seed822_20260706-111029_final.zip"
+    chain_from = "models/2v2_selfplay_MASAC_dense_seed822_20260803-174912_final.zip"
     reward_type = "dense"
     n_pairs = 24
     seed = 822
@@ -78,27 +83,27 @@ def main():
     algo = "masac"
     pass_scenario_prob = 0.35         # fixed — no anneal
     pass_scenario_prob_start = None
-    load_buffer = "off"
-    start_level = 1
+    load_buffer = "auto"              # chunk 1 used "off" (nothing to load)
+    start_level = 1                   # raise to 5 once the chain promotes
 
     runs = [
         # (label, net)
-        ("9_masac_scratch", "flat"),
+        ("9_masac_chain2", "flat"),
     ]
 
     jobs = []
     for label, net in runs:
         job = executor.submit(
             run_experiment, reward_type, seed, n_pairs,
-            gen2_champion, "scratch", total_steps, algo,
+            gen2_champion, chain_from, total_steps, algo,
             pass_scenario_prob, "pass_demos",
             pass_scenario_prob_start, net, load_buffer,
             start_level,
         )
         jobs.append((label, job))
         print(f"Submitted {label}: job {job.job_id}")
-    print(f"{len(jobs)} Gen-9 job(s) submitted [MASAC from scratch, "
-          f"start_level={start_level}, "
+    print(f"{len(jobs)} Gen-9 job(s) submitted [MASAC chain, "
+          f"init={chain_from}, start_level={start_level}, "
           f"fixed pass_scenario_prob={pass_scenario_prob}]")
 
 

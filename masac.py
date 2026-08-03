@@ -42,12 +42,20 @@ class MASAC(SAC):
         self, *args,
         critic_warmup_grad_steps: int = 0,
         max_grad_norm: float = 0.0,
+        target_clip: float = 0.0,
         **kwargs,
     ):
-        # Stored before super().__init__ so they survive _setup_model; both
+        # Stored before super().__init__ so they survive _setup_model; all
         # are plain scalars, so SB3 save/load round-trips them via __dict__.
         self.critic_warmup_grad_steps = int(critic_warmup_grad_steps)
         self.max_grad_norm = float(max_grad_norm)
+        # target_clip > 0: clamp the TD target to +-target_clip. Principled
+        # for this env — episode returns are bounded (goal +10 + shaping vs.
+        # a handful of negative terminals), so any target far outside that
+        # range is bootstrap extrapolation error, not signal. Hard-stops the
+        # runaway observed with a fresh centralized critic + demo mixing
+        # (q_mean 1.6e6 despite clamped alpha).
+        self.target_clip = float(target_clip)
         super().__init__(*args, **kwargs)
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
@@ -114,6 +122,10 @@ class MASAC(SAC):
                     replay_data.rewards
                     + (1 - replay_data.dones) * discounts * next_q_values
                 )
+                if self.target_clip > 0.0:
+                    target_q_values = th.clamp(
+                        target_q_values, -self.target_clip, self.target_clip
+                    )
 
             # Current Q from buffer actions (already joint (B, 12)).
             current_q_values = self.critic(

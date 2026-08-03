@@ -619,11 +619,13 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             train_freq=48, gradient_steps=96, batch_size=2048,
             buffer_size=1_000_000, learning_rate=3e-4,
             learning_starts=20000, ent_coef="auto_0.05", target_entropy="auto",
-            # Warmup exists to protect a TRANSFERRED competent actor from a
-            # fresh critic's garbage gradients. From scratch both are fresh —
-            # standard SAC dynamics, no warmup needed.
-            critic_warmup_grad_steps=(10000 if init_load else 0),
-            max_grad_norm=0.5,
+            # Warmup ALSO for scratch runs: without it the fresh centralized
+            # critic diverged (q_mean 1.6e6) — 25% demo states per batch mean
+            # the target queries Q(s', pi(s')) at state-action pairs the
+            # random policy never generates; the critic must fit real data
+            # before the actor starts optimizing against it.
+            critic_warmup_grad_steps=10000,
+            max_grad_norm=0.5, target_clip=30.0,
             policy_kwargs=policy_kwargs, gamma=0.99,
             replay_buffer_class=rb_class, replay_buffer_kwargs=rb_kwargs,
         )

@@ -13,8 +13,10 @@ def run_experiment(
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
     demo_flag = f"--demo_dir {demo_dir} " if demo_dir else ""
+    # -u: unbuffered stdout — without it the first log tables sit in the
+    # 4KB block buffer for minutes and the slurm .out looks dead.
     cmd = (
-        f"python train_2v2_selfplay.py "
+        f"python -u train_2v2_selfplay.py "
         f"{frozen_flag}{init_flag}{demo_flag}"
         f"--reward_type {reward_type} --seed {seed} "
         f"--n_pairs {n_pairs} --total_steps {total_steps} "

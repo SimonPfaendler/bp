@@ -70,12 +70,13 @@ def main():
     # run continues in chunks. Per chunk, set `chain_from` to the newest
     # *_final.zip; everything else adapts automatically.
     #   chunk 1 (20260803-174912): scratch, L1, reached success 0.63
-    #   chunk 2+: init = previous _final, buffer reloaded, still L1 until
-    #       the curriculum promotes at success >= 0.9 over 300 episodes.
-    # start_level stays pinned at 1: the auto-rule would jump a warm-started
-    # run to L5, but this chain has not promoted yet.
+    #   chunk 2 (20260803-193423): PROMOTED to L5 mid-chunk; arrived there
+    #       at success 0.02 (curriculum cliff: L1 tap-ins -> full play).
+    #       Q stayed healthy (q_mean 5.7, critic_loss 0.14) — fixes hold.
+    #   chunk 3+: start_level PINNED TO 5 — the chain already promoted, and
+    #       the callback would otherwise restart the env on L1 tap-ins.
     gen2_champion = "models/2v2_selfplay_SAC_dense_seed822_20260706-111029_final.zip"
-    chain_from = "models/2v2_selfplay_MASAC_dense_seed822_20260803-174912_final.zip"
+    chain_from = "models/2v2_selfplay_MASAC_dense_seed822_20260803-193423_final.zip"
     reward_type = "dense"
     n_pairs = 24
     seed = 822
@@ -84,11 +85,11 @@ def main():
     pass_scenario_prob = 0.35         # fixed — no anneal
     pass_scenario_prob_start = None
     load_buffer = "auto"              # chunk 1 used "off" (nothing to load)
-    start_level = 1                   # raise to 5 once the chain promotes
+    start_level = 5                   # chain promoted during chunk 2
 
     runs = [
         # (label, net)
-        ("9_masac_chain2", "flat"),
+        ("9_masac_chain3", "flat"),
     ]
 
     jobs = []

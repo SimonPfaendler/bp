@@ -8,6 +8,7 @@ def run_experiment(
     total_steps=5_000_000, algo="masac",
     pass_scenario_prob=0.0, demo_dir=None,
     pass_scenario_prob_start=None, net="flat", load_buffer="auto",
+    start_level=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -23,6 +24,8 @@ def run_experiment(
     )
     if pass_scenario_prob_start is not None:
         cmd += f" --pass_scenario_prob_start {pass_scenario_prob_start}"
+    if start_level is not None:
+        cmd += f" --start_level {start_level}"
     os.system(cmd)
 
 
@@ -48,45 +51,51 @@ def main():
     # schedule, making any SAC-vs-MASAC comparison at that checkpoint an
     # apples-to-oranges mid-schedule-vs-finished comparison.
 
-    # GENERATION 8 — ladder step with role-split checkpoints.
-    # Chain verdict (Gen 7, 6M cumulative): pass skill ERODES under
-    # continued training at prob 0.2 (scenario passes 0.26->0.16,
-    # scored_after_pass 0.033->0) while solo skill climbs to best-ever
-    # (chaos success 0.40). Two consequences, both applied here:
-    #   frozen := chunk-2 final (140727) — the strongest solo presser we
-    #       have; pressure is what should make the solo path unprofitable.
-    #   init   := 171222 — the most pass-capable champion.
-    #   pass_scenario_prob FIXED at 0.35, no anneal (the erosion lesson).
-    #   load_buffer=off — 171222's buffer holds experience against the OLD
-    #       frozen; stale dynamics under the new opponent.
-    strongest_presser = "models/2v2_selfplay_SAC_dense_seed822_20260801-140727_final.zip"
+    # GENERATION 9 — MASAC restart with the full stack and a FAIR budget.
+    # The old MASAC run was handicapped three ways: half the sim budget
+    # (its counter logs 24 timesteps/sim-tick vs SAC's 48, so 3.3M counted
+    # steps = only half the episodes), cut off mid-anneal, and missing the
+    # BC loss (was SAC-only). Fixed here:
+    #   total_steps 1.65M       == 3.3M SAC sim-equivalent, fits 30-min dev
+    #   pass_scenario_prob 0.35 fixed, no anneal (erosion lesson)
+    #   BC loss now MASAC-capable (joint demo batches unstacked per-agent)
+    #   critic_warmup 10000     fresh centralized critic, warm actor
+    #   start_level=1           L1 tap-ins calibrate the fresh joint critic
+    #       on dense value targets; the competent actor promotes quickly
+    #   init = 171222 (most pass-capable actor; critic can't transfer)
+    #   frozen = Gen-2 champion (comparability with all main curves)
+    #   load_buffer=off (SAC per-agent buffer is joint-incompatible anyway)
+    gen2_champion = "models/2v2_selfplay_SAC_dense_seed822_20260706-111029_final.zip"
     best_passer = "models/2v2_selfplay_SAC_dense_seed822_20260720-171222_final.zip"
     reward_type = "dense"
     n_pairs = 24
     seed = 822
-    total_steps = 3_000_000
-    algo = "sac"
+    total_steps = 1_650_000
+    algo = "masac"
     pass_scenario_prob = 0.35         # fixed — no anneal
     pass_scenario_prob_start = None
     load_buffer = "off"
+    start_level = 1
 
     runs = [
         # (label, net)
-        ("8_ladder_passer_vs_presser", "flat"),
+        ("9_masac_full_stack", "flat"),
     ]
 
     jobs = []
     for label, net in runs:
         job = executor.submit(
             run_experiment, reward_type, seed, n_pairs,
-            strongest_presser, best_passer, total_steps, algo,
+            gen2_champion, best_passer, total_steps, algo,
             pass_scenario_prob, "pass_demos",
             pass_scenario_prob_start, net, load_buffer,
+            start_level,
         )
         jobs.append((label, job))
         print(f"Submitted {label}: job {job.job_id}")
-    print(f"{len(jobs)} Gen-8 job(s) submitted [frozen=strongest presser, "
-          f"init=best passer, fixed pass_scenario_prob={pass_scenario_prob}]")
+    print(f"{len(jobs)} Gen-9 job(s) submitted [MASAC full stack, "
+          f"1.65M (=3.3M SAC-equiv), start_level={start_level}, "
+          f"fixed pass_scenario_prob={pass_scenario_prob}]")
 
 
 if __name__ == "__main__":

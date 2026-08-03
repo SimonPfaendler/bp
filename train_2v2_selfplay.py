@@ -426,7 +426,10 @@ class BCLossCallback(BaseCallback):
     Closes the gap the DemoMixReplayBuffer leaves open: demo mixing teaches the
     CRITIC what a completed pass is worth, but the actor only reaches those
     states if it already acts like the demo. BC couples the demos to the policy.
-    SAC-only (MASAC's joint obs would need separate handling).
+
+    Works for both algos: MASAC's joint demo buffer stores obs (B, 2, 52) and
+    actions (B, 12) — unstacked here to per-agent (2B, 52)/(2B, 6), which the
+    parameter-shared actor consumes exactly like SAC's per-agent batches.
     """
 
     def __init__(self, demo_buffer, bc_coef=0.5, batch_size=256, every=1,
@@ -447,11 +450,25 @@ class BCLossCallback(BaseCallback):
             or self.n_calls % self.every != 0
         ):
             return True
+        # During MASAC's critic warmup the actor must stay frozen — BC moving
+        # it would defeat the point of calibrating Q on the fixed actor.
+        if (
+            getattr(self.model, "critic_warmup_grad_steps", 0)
+            > getattr(self.model, "_n_updates", 0)
+        ):
+            return True
         import torch.nn.functional as F
         data = self.demo_buffer.sample(self.bc_batch)
+        obs, acts = data.observations, data.actions
+        if obs.dim() == 3:
+            # MASAC joint layout (B, 2, obs)/(B, 12) -> per-agent batches.
+            # Both reshapes are C-order agent-major, so row i of obs still
+            # pairs with row i of acts.
+            obs = obs.reshape(-1, obs.shape[-1])
+            acts = acts.reshape(-1, acts.shape[-1] // 2)
         self.model.policy.set_training_mode(True)
-        pred = self.model.actor(data.observations, deterministic=True)
-        bc_loss = F.mse_loss(pred, data.actions)
+        pred = self.model.actor(obs, deterministic=True)
+        bc_loss = F.mse_loss(pred, acts)
         self.model.actor.optimizer.zero_grad()
         (self.bc_coef * bc_loss).backward()
         self.model.actor.optimizer.step()
@@ -585,7 +602,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             train_freq=48, gradient_steps=96, batch_size=2048,
             buffer_size=1_000_000, learning_rate=3e-4,
             learning_starts=20000, ent_coef="auto_0.05", target_entropy="auto",
-            critic_warmup_grad_steps=5000, max_grad_norm=0.5,
+            critic_warmup_grad_steps=10000, max_grad_norm=0.5,
             policy_kwargs=policy_kwargs, gamma=0.99,
             replay_buffer_class=rb_class, replay_buffer_kwargs=rb_kwargs,
         )
@@ -778,9 +795,9 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             name_prefix=run_name, save_replay_buffer=True,
         ),
     ]
-    # BC auxiliary loss: couple the actor to the demo actions (SAC only —
-    # MASAC's joint obs / decentralized actor would need separate handling).
-    if demos is not None and algo == "sac" and bc_coef > 0.0:
+    # BC auxiliary loss: couple the actor to the demo actions. Works for both
+    # algos — the callback unstacks MASAC's joint demo batches per-agent.
+    if demos is not None and bc_coef > 0.0:
         callback_list.append(BCLossCallback(
             demo_buffer=demo_buf, bc_coef=bc_coef,
             learning_starts=model.learning_starts,

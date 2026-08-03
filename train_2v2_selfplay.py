@@ -276,25 +276,35 @@ class DebugCallback(BaseCallback):
 
 
 class AlphaClampCallback(BaseCallback):
-    """Enforce a lower bound on the SAC entropy coefficient (alpha).
+    """Enforce bounds on the SAC entropy coefficient (alpha).
 
-    If alpha drops below `alpha_min`, the policy becomes too deterministic,
-    which is a major cause of policy collapse in self-play. Clamp log_ent_coef
-    each step so that alpha >= alpha_min.
+    Lower bound: if alpha drops below `alpha_min`, the policy becomes too
+    deterministic — a major cause of policy collapse in self-play.
+
+    Upper bound: the auto-tuner has no ceiling. A fresh (scratch) actor whose
+    entropy sits persistently below the joint target ratchets alpha up
+    without limit (observed: alpha=114), and the entropy bonus in the critic
+    target (-alpha * log_prob') then explodes Q (q_mean 4e5, critic_loss
+    1e9). Warm-started runs never hit this because their alpha only decays.
     """
 
-    def __init__(self, alpha_min=0.05, verbose=0):
+    def __init__(self, alpha_min=0.05, alpha_max=0.3, verbose=0):
         super().__init__(verbose)
         self.alpha_min = float(alpha_min)
+        self.alpha_max = float(alpha_max)
         self._log_min = None
+        self._log_max = None
 
     def _on_training_start(self) -> None:
         self._log_min = float(np.log(self.alpha_min))
+        self._log_max = float(np.log(self.alpha_max))
 
     def _on_step(self) -> bool:
         if hasattr(self.model, "log_ent_coef") and self.model.log_ent_coef is not None:
             with torch.no_grad():
-                self.model.log_ent_coef.clamp_(min=self._log_min)
+                self.model.log_ent_coef.clamp_(
+                    min=self._log_min, max=self._log_max
+                )
         return True
 
 
@@ -789,7 +799,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     callback_list = [
         StatsCallback(),
         DebugCallback(log_every=500),
-        AlphaClampCallback(alpha_min=0.005),
+        AlphaClampCallback(alpha_min=0.005, alpha_max=0.3),
         BestSuccessCallback(save_path=f"{MODEL_DIR}/{run_name}"),
         # Warm-started runs (init = champion) skip the L1 tap-in warmup and
         # see pass scenarios from step 0; from-scratch runs (e.g. the

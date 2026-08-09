@@ -8,7 +8,7 @@ def run_experiment(
     total_steps=5_000_000, algo="masac",
     pass_scenario_prob=0.0, demo_dir=None,
     pass_scenario_prob_start=None, net="flat", load_buffer="auto",
-    start_level=None,
+    start_level=None, blue_heuristic=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -28,6 +28,8 @@ def run_experiment(
         cmd += f" --pass_scenario_prob_start {pass_scenario_prob_start}"
     if start_level is not None:
         cmd += f" --start_level {start_level}"
+    if blue_heuristic is not None:
+        cmd += f" --blue_heuristic {blue_heuristic}"
     os.system(cmd)
 
 
@@ -53,58 +55,58 @@ def main():
     # schedule, making any SAC-vs-MASAC comparison at that checkpoint an
     # apples-to-oranges mid-schedule-vs-finished comparison.
 
-    # GENERATION 9 — MASAC FROM SCRATCH with the full cooperation stack.
-    # Rationale: the erosion results show the solo equilibrium is an
-    # attractor — warm-starting from a solo champion drops the policy inside
-    # its basin. From scratch, demos + BC steer early learning toward
-    # passing BEFORE solo habits form, and the centralized critic assigns
-    # team credit from step 0.
-    #   frozen = Gen-2 champion (curve comparability; L1 shields the early
-    #       phase — blues spawn parked far away at level 1)
-    #   pass_scenario_prob 0.35 fixed, no anneal (erosion lesson)
-    #   BC loss MASAC-capable   (joint demo batches unstacked per-agent)
-    #   critic warmup + TD target clip +-30 (fresh centralized critic + 25%
-    #       demo states per batch diverged to q_mean 1.6e6 without them)
+    # GENERATION 10 — training against the HAND-CODED blue team.
+    # Blue 0 chases and shoots, blue 1 holds the goal-ball line
+    # (blue_attacker_heuristic_2v2 / blue_defender_heuristic_2v2).
     #
-    # CHAINING: 1.4M is the empirical 30-min-slot max incl. startup, so the
-    # run continues in chunks. Per chunk, set `chain_from` to the newest
-    # *_final.zip; everything else adapts automatically.
-    #   chunk 1 (20260803-174912): scratch, L1, reached success 0.63
-    #   chunk 2 (20260803-193423): PROMOTED to L5 mid-chunk; arrived there
-    #       at success 0.02 (curriculum cliff: L1 tap-ins -> full play).
-    #       Q stayed healthy (q_mean 5.7, critic_loss 0.14) — fixes hold.
-    #   chunk 3+: start_level PINNED TO 5 — the chain already promoted, and
-    #       the callback would otherwise restart the env on L1 tap-ins.
-    gen2_champion = "models/2v2_selfplay_SAC_dense_seed822_20260706-111029_final.zip"
-    chain_from = "models/2v2_selfplay_MASAC_dense_seed822_20260803-193423_final.zip"
+    # Two reasons this differs from every previous generation:
+    #  1) Fixed yardstick. Every frozen opponent so far was a different
+    #     checkpoint, so success rates were never comparable across
+    #     generations. Against a fixed heuristic they are, exactly like the
+    #     1v1 project's "72% vs heuristic baseline".
+    #  2) A defender that HOLDS POSITION. In self-play both blues chase the
+    #     ball (mirrored solo equilibrium), leaving the goal open, which is
+    #     why the solo route stayed profitable. A dedicated defender blocks
+    #     the direct shot lane in ordinary chaos episodes, not just in the
+    #     staged pass scenarios. That is the structural "make solo
+    #     unattractive" lever, for free from the opponent design.
+    #
+    # Caveat for the thesis (see BP 5.4): a static heuristic caps the
+    # strategic ceiling and invites exploitation. This is a CONDITION and an
+    # evaluator, not a replacement for self-play.
+    #
+    # SAC (not MASAC): the stronger and better-understood arm, and it makes
+    # the comparison against the earlier SAC-vs-frozen curves meaningful.
+    init_from = "models/2v2_selfplay_SAC_dense_seed822_20260720-171222_final.zip"
     reward_type = "dense"
     n_pairs = 24
     seed = 822
-    total_steps = 1_400_000
-    algo = "masac"
-    pass_scenario_prob = 0.35         # fixed — no anneal
+    total_steps = 3_000_000
+    algo = "sac"
+    pass_scenario_prob = 0.35         # fixed — no anneal (erosion lesson)
     pass_scenario_prob_start = None
-    load_buffer = "auto"              # chunk 1 used "off" (nothing to load)
-    start_level = 5                   # chain promoted during chunk 2
+    load_buffer = "off"               # old buffer is vs. a different opponent
+    start_level = 5                   # warm init already plays level 5
+    blue_heuristic = "attacker"
 
     runs = [
         # (label, net)
-        ("9_masac_chain3", "flat"),
+        ("10_sac_vs_heuristic", "flat"),
     ]
 
     jobs = []
     for label, net in runs:
         job = executor.submit(
             run_experiment, reward_type, seed, n_pairs,
-            gen2_champion, chain_from, total_steps, algo,
+            None, init_from, total_steps, algo,
             pass_scenario_prob, "pass_demos",
             pass_scenario_prob_start, net, load_buffer,
-            start_level,
+            start_level, blue_heuristic,
         )
         jobs.append((label, job))
         print(f"Submitted {label}: job {job.job_id}")
-    print(f"{len(jobs)} Gen-9 job(s) submitted [MASAC chain, "
-          f"init={chain_from}, start_level={start_level}, "
+    print(f"{len(jobs)} Gen-10 job(s) submitted [opponent=heuristic team, "
+          f"init={init_from}, start_level={start_level}, "
           f"fixed pass_scenario_prob={pass_scenario_prob}]")
 
 

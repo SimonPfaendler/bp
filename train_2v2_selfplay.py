@@ -59,10 +59,13 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 
 def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
-                curriculum_start_level=None):
+                curriculum_start_level=None, blue_heuristic=None):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
+            # "attacker": blue 0 chases+shoots, blue 1 holds the goal-ball
+            # line. Mutually exclusive with frozen_path (see env docstring).
+            blue_heuristic=blue_heuristic,
             pass_scenario_prob=pass_scenario_prob,
             # Without this the env defaults to L5 until the curriculum
             # callback's first set_curriculum_level — the first episode per
@@ -518,10 +521,11 @@ class PassScenarioScheduleCallback(BaseCallback):
 
 
 def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
-                  pass_scenario_prob=0.0, curriculum_start_level=None):
+                  pass_scenario_prob=0.0, curriculum_start_level=None,
+                  blue_heuristic=None):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob,
-                    curriculum_start_level)
+                    curriculum_start_level, blue_heuristic)
         for i in range(n_envs)
     ]
     if algo == "masac":
@@ -542,8 +546,9 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           total_steps=5_000_000, algo="masac", pass_scenario_prob=0.0,
           demo_dir=None, demo_reinject_every=500_000, demo_ratio=0.25,
           bc_coef=0.5, pass_scenario_prob_start=None, net="flat",
-          start_level=None, load_buffer="auto"):
+          start_level=None, load_buffer="auto", blue_heuristic=None):
     assert algo in ("masac", "sac"), algo
+    assert blue_heuristic in (None, "attacker"), blue_heuristic
     assert net in ("flat", "deepsets", "deepsets_mean"), net
     if net.startswith("deepsets") and algo == "masac":
         raise NotImplementedError(
@@ -553,7 +558,11 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     algo_tag = algo.upper()
     net_tag = f"_{net}" if net != "flat" else ""
-    run_name = f"2v2_selfplay_{algo_tag}{net_tag}_{reward_type}_seed{seed}_{timestamp}"
+    opp_tag = "_vsheur" if blue_heuristic else ""
+    run_name = (
+        f"2v2_selfplay_{algo_tag}{net_tag}{opp_tag}_{reward_type}"
+        f"_seed{seed}_{timestamp}"
+    )
     log_dir = os.path.join(LOG_DIR, run_name)
 
     wandb.init(
@@ -573,6 +582,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             "demo_reinject_every": demo_reinject_every,
             "net": net,
             "start_level": start_level,
+            "blue_heuristic": blue_heuristic,
         },
     )
 
@@ -599,14 +609,22 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     initial_pass_prob = (
         pass_scenario_prob_start if use_pass_schedule else pass_scenario_prob
     )
+    # With the heuristic opponent the env must NOT load a frozen model (blue
+    # is hand-coded). frozen_path stays available as an init source above.
+    env_frozen_path = None if blue_heuristic else frozen_path
     env = build_vec_env(
         n_envs=n_envs, reward_type=reward_type, seed=seed,
-        frozen_path=frozen_path, use_subproc=True, algo=algo,
+        frozen_path=env_frozen_path, use_subproc=True, algo=algo,
         pass_scenario_prob=initial_pass_prob,
         curriculum_start_level=effective_start_level,
+        blue_heuristic=blue_heuristic,
+    )
+    opponent = (
+        f"heuristic({blue_heuristic}: blue0 aggressive, blue1 defensive)"
+        if blue_heuristic else f"frozen={frozen_path}"
     )
     print(
-        f"2v2 {algo_tag} self-play | frozen={frozen_path} | seed={seed} | "
+        f"2v2 {algo_tag} self-play | opponent={opponent} | seed={seed} | "
         f"envs={n_envs} | vec_slots={env.num_envs} | "
         f"start_level={effective_start_level}"
     )
@@ -907,6 +925,13 @@ if __name__ == "__main__":
     parser.add_argument("--start_level", type=int, default=None,
                         help="Curriculum start level. Default: auto — 5 with "
                              "--init_path (warm start), 1 from scratch.")
+    parser.add_argument("--blue_heuristic", default=None,
+                        choices=["attacker"],
+                        help="Hand-coded blue team instead of a frozen "
+                             "checkpoint: blue 0 chases and shoots, blue 1 "
+                             "holds the goal-ball line. Gives a fixed, "
+                             "non-exploitable evaluation baseline and a "
+                             "persistently blocked shot lane.")
     parser.add_argument("--load_buffer", default="auto",
                         choices=["auto", "off"],
                         help="off: skip replay-buffer reload even if a "
@@ -924,5 +949,5 @@ if __name__ == "__main__":
         demo_ratio=args.demo_ratio, bc_coef=args.bc_coef,
         pass_scenario_prob_start=args.pass_scenario_prob_start,
         net=args.net, start_level=args.start_level,
-        load_buffer=args.load_buffer,
+        load_buffer=args.load_buffer, blue_heuristic=args.blue_heuristic,
     )

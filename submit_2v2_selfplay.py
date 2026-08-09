@@ -77,7 +77,22 @@ def main():
     #
     # SAC (not MASAC): the stronger and better-understood arm, and it makes
     # the comparison against the earlier SAC-vs-frozen curves meaningful.
-    init_from = "models/2v2_selfplay_SAC_dense_seed822_20260720-171222_final.zip"
+    # TWO ARMS, because warm-vs-scratch is itself the test of the attractor
+    # hypothesis (Gen 7 erosion + Gen 8 solo-solves-pass-scenarios):
+    #   10a warm    — can an existing solo player be re-educated by a
+    #                 permanently blocked shot lane? Answer in one chunk.
+    #   10b scratch — does cooperation emerge when the policy learns from
+    #                 the start in a world where solo does not reliably pay?
+    #                 Needs ~3 chunks (5a scratch took 3.3M for success .30),
+    #                 so it is the long pole — start it now, chain it via
+    #                 init = newest _final with start_level=None.
+    # Everything else identical between arms, so the difference is the init.
+    # 140727 = Gen-7 chunk 2: the strongest player overall (chaos success
+    # 0.40, best ever) and simultaneously the most pass-eroded one
+    # (scenario_pass passes 0.16, scored_after_pass 0). That makes it the
+    # sharpest possible warm test: if a permanently blocked shot lane can
+    # re-educate THIS policy, the effect is real.
+    champion = "models/2v2_selfplay_SAC_dense_seed822_20260801-140727_final.zip"
     reward_type = "dense"
     n_pairs = 24
     seed = 822
@@ -86,28 +101,27 @@ def main():
     pass_scenario_prob = 0.35         # fixed — no anneal (erosion lesson)
     pass_scenario_prob_start = None
     load_buffer = "off"               # old buffer is vs. a different opponent
-    start_level = 5                   # warm init already plays level 5
     blue_heuristic = "attacker"
 
     runs = [
-        # (label, net)
-        ("10_sac_vs_heuristic", "flat"),
+        # (label, init_path, start_level)
+        ("10a_sac_warm_vs_heuristic", champion, 5),
+        ("10b_sac_scratch_vs_heuristic", "scratch", 1),
     ]
 
     jobs = []
-    for label, net in runs:
+    for label, init_path, start_level in runs:
         job = executor.submit(
             run_experiment, reward_type, seed, n_pairs,
-            None, init_from, total_steps, algo,
+            None, init_path, total_steps, algo,
             pass_scenario_prob, "pass_demos",
-            pass_scenario_prob_start, net, load_buffer,
+            pass_scenario_prob_start, "flat", load_buffer,
             start_level, blue_heuristic,
         )
         jobs.append((label, job))
         print(f"Submitted {label}: job {job.job_id}")
     print(f"{len(jobs)} Gen-10 job(s) submitted [opponent=heuristic team, "
-          f"init={init_from}, start_level={start_level}, "
-          f"fixed pass_scenario_prob={pass_scenario_prob}]")
+          f"warm vs scratch, fixed pass_scenario_prob={pass_scenario_prob}]")
 
 
 if __name__ == "__main__":

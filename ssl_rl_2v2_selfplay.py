@@ -759,7 +759,16 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             self.frame.robots_yellow[1], yellow_action[1],
             self.must_release_y[1], yellow=True,
         ))
-        if self.blue_heuristic == "attacker":
+        # Level 1 is a STAGED SCORING CHANCE and presupposes passive blues
+        # ("parked far from the goal mouth"). An active heuristic turns it
+        # into a race that a fresh policy loses (observed: success 0.0 at
+        # blue_goal_rate 0.41 after 2.9M steps, curriculum never promotes),
+        # so the heuristic only engages from level 2 upward.
+        heuristic_active = (
+            self.blue_heuristic == "attacker"
+            and int(getattr(self, "curriculum_level", 5)) > 1
+        )
+        if heuristic_active:
             # Blue 0 = aggressive (just chase + shoot), Blue 1 = defensive
             # (chase if closer to ball, else fall back to defensive line).
             cmds.append(self._blue_heuristic_command(

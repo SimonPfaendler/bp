@@ -92,7 +92,21 @@ def main():
     # (scenario_pass passes 0.16, scored_after_pass 0). That makes it the
     # sharpest possible warm test: if a permanently blocked shot lane can
     # re-educate THIS policy, the effect is real.
-    champion = "models/2v2_selfplay_SAC_dense_seed822_20260801-140727_final.zip"
+    # Chunk 2 of the warm arm. Chunk 1 (20260809-220118) was still improving
+    # at cutoff (success .12 -> .14 inside the log window, Q healthy at
+    # q_mean 2.0), so this continues it rather than restarting.
+    # load_buffer="auto" now: chunk 1's buffer was collected against THIS
+    # heuristic, so it is valid (chunk 1 had to drop the old one, which came
+    # from a different opponent). That also enables learning_starts=0.
+    warm_chain = "models/2v2_selfplay_SAC_vsheur_dense_seed822_20260809-220118_final.zip"
+    # 10b restart: the first attempt could not promote because the heuristic
+    # blues were active at level 1, which is designed around PASSIVE blues
+    # (success 0.0 at blue_goal_rate 0.41 after 2.9M). The env now engages
+    # the heuristic only from level 2 up. The Q blow-up (critic_loss 2.7e3)
+    # was downstream of that: with no grounded success signal the fresh
+    # critic had nothing to anchor against while 25% demo states pulled it
+    # off-distribution. Scratch MASAC on level 1 with passive blues was
+    # stable, so the level fix should be enough without target clipping.
     reward_type = "dense"
     n_pairs = 24
     seed = 822
@@ -100,17 +114,16 @@ def main():
     algo = "sac"
     pass_scenario_prob = 0.35         # fixed — no anneal (erosion lesson)
     pass_scenario_prob_start = None
-    load_buffer = "off"               # old buffer is vs. a different opponent
     blue_heuristic = "attacker"
 
     runs = [
-        # (label, init_path, start_level)
-        ("10a_sac_warm_vs_heuristic", champion, 5),
-        ("10b_sac_scratch_vs_heuristic", "scratch", 1),
+        # (label, init_path, start_level, load_buffer)
+        ("10a2_sac_warm_vs_heuristic", warm_chain, 5, "auto"),
+        ("10b2_sac_scratch_vs_heuristic", "scratch", 1, "off"),
     ]
 
     jobs = []
-    for label, init_path, start_level in runs:
+    for label, init_path, start_level, load_buffer in runs:
         job = executor.submit(
             run_experiment, reward_type, seed, n_pairs,
             None, init_path, total_steps, algo,
@@ -121,7 +134,8 @@ def main():
         jobs.append((label, job))
         print(f"Submitted {label}: job {job.job_id}")
     print(f"{len(jobs)} Gen-10 job(s) submitted [opponent=heuristic team, "
-          f"warm vs scratch, fixed pass_scenario_prob={pass_scenario_prob}]")
+          f"warm chunk 2 + scratch restart, "
+          f"fixed pass_scenario_prob={pass_scenario_prob}]")
 
 
 if __name__ == "__main__":

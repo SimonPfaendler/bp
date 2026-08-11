@@ -8,7 +8,7 @@ def run_experiment(
     total_steps=5_000_000, algo="masac",
     pass_scenario_prob=0.0, demo_dir=None,
     pass_scenario_prob_start=None, net="flat", load_buffer="auto",
-    start_level=None, blue_heuristic=None,
+    start_level=None, blue_heuristic=None, goal_reward_solo=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -30,6 +30,8 @@ def run_experiment(
         cmd += f" --start_level {start_level}"
     if blue_heuristic is not None:
         cmd += f" --blue_heuristic {blue_heuristic}"
+    if goal_reward_solo is not None:
+        cmd += f" --goal_reward_solo {goal_reward_solo}"
     os.system(cmd)
 
 
@@ -99,6 +101,7 @@ def main():
     # heuristic, so it is valid (chunk 1 had to drop the old one, which came
     # from a different opponent). That also enables learning_starts=0.
     warm_chain = "models/2v2_selfplay_SAC_vsheur_dense_seed822_20260809-220118_final.zip"
+    champion_solo = "models/2v2_selfplay_SAC_dense_seed822_20260801-140727_final.zip"
     # 10b restart: the first attempt could not promote because the heuristic
     # blues were active at level 1, which is designed around PASSIVE blues
     # (success 0.0 at blue_goal_rate 0.41 after 2.9M). The env now engages
@@ -116,10 +119,22 @@ def main():
     pass_scenario_prob_start = None
     blue_heuristic = "attacker"
 
+    # GENERATION 11 — asymmetric terminal payoff (phase 1 of the two-phase
+    # test). Goal after a completed pass +10, solo goal +3. Every earlier
+    # intervention left solo scoring exactly as valuable as cooperative
+    # scoring, so the solo equilibrium stayed optimal; this changes the
+    # payoff structure that DEFINES the equilibrium.
+    # 11a continues the heuristic chain (blocked lane + payoff), 11b isolates
+    # the payoff against the same heuristic from the best solo champion, so
+    # the two differ only in their starting point.
+    # PHASE 2 (later): drop goal_reward_solo -> symmetric payoff again, and
+    # check whether the learned passing survives or erodes back.
+    goal_reward_solo = 3.0
+
     runs = [
         # (label, init_path, start_level, load_buffer)
-        ("10a2_sac_warm_vs_heuristic", warm_chain, 5, "auto"),
-        ("10b2_sac_scratch_vs_heuristic", "scratch", 1, "off"),
+        ("11a_payoff_warm_chain", warm_chain, 5, "auto"),
+        ("11b_payoff_from_champion", champion_solo, 5, "off"),
     ]
 
     jobs = []
@@ -129,13 +144,13 @@ def main():
             None, init_path, total_steps, algo,
             pass_scenario_prob, "pass_demos",
             pass_scenario_prob_start, "flat", load_buffer,
-            start_level, blue_heuristic,
+            start_level, blue_heuristic, goal_reward_solo,
         )
         jobs.append((label, job))
         print(f"Submitted {label}: job {job.job_id}")
-    print(f"{len(jobs)} Gen-10 job(s) submitted [opponent=heuristic team, "
-          f"warm chunk 2 + scratch restart, "
-          f"fixed pass_scenario_prob={pass_scenario_prob}]")
+    print(f"{len(jobs)} Gen-11 job(s) submitted [asymmetric payoff: "
+          f"pass-goal +10 vs solo-goal +{goal_reward_solo}, "
+          f"opponent=heuristic, pass_scenario_prob={pass_scenario_prob}]")
 
 
 if __name__ == "__main__":

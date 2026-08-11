@@ -145,6 +145,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         curriculum_window=200,
         blue_heuristic=None,
         pass_scenario_prob=0.0,
+        goal_reward=10.0,
+        goal_reward_solo=None,
     ):
         super().__init__(
             field_type=1,
@@ -171,6 +173,22 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # frozen_path and is controlled by the hand-coded heuristic at the
         # _build_commands stage. Mutually exclusive with frozen_path.
         self.blue_heuristic = blue_heuristic
+
+        # Asymmetric terminal payoff. A goal that FOLLOWS a completed pass is
+        # worth `goal_reward`; a solo goal only `goal_reward_solo`. This is a
+        # change to the payoff STRUCTURE that defines the equilibrium, not
+        # another shaping term — every shaping attempt so far left the solo
+        # equilibrium intact because solo scoring stayed exactly as valuable
+        # as cooperative scoring.
+        # goal_reward_solo=None keeps the symmetric payoff (both = 10), which
+        # is also phase 2 of the two-phase test: train asymmetric until the
+        # policy passes, then restore symmetry and see whether cooperation
+        # survives or erodes back.
+        self.goal_reward = float(goal_reward)
+        self.goal_reward_solo = (
+            float(goal_reward_solo) if goal_reward_solo is not None
+            else float(goal_reward)
+        )
         # Frozen-model input dim (filled on lazy-load). If older than current
         # obs (e.g. v3 trained without role-index), we strip role-index dims
         # before predict so the same policy class can act as blue.
@@ -868,7 +886,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         if abs(ball.x) > max_x and abs(ball.y) <= goal_half_width:
             done = True
             if ball.x < 0:  # Yellow scored
-                rewards += 10.0
+                # Same condition as info["scored_after_pass"], so the reward
+                # and the logged metric can never disagree.
+                rewards += (
+                    self.goal_reward if self.passes_in_episode > 0
+                    else self.goal_reward_solo
+                )
                 rewards += (self.max_steps - self.current_step) * 0.001
                 self.match_result = 1
             else:  # Blue scored

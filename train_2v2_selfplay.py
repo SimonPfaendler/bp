@@ -59,13 +59,17 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 
 def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
-                curriculum_start_level=None, blue_heuristic=None):
+                curriculum_start_level=None, blue_heuristic=None,
+                goal_reward_solo=None):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
             # "attacker": blue 0 chases+shoots, blue 1 holds the goal-ball
             # line. Mutually exclusive with frozen_path (see env docstring).
             blue_heuristic=blue_heuristic,
+            # None -> symmetric payoff (solo goal worth the same as a goal
+            # after a pass), which is the historical behaviour.
+            goal_reward_solo=goal_reward_solo,
             pass_scenario_prob=pass_scenario_prob,
             # Without this the env defaults to L5 until the curriculum
             # callback's first set_curriculum_level — the first episode per
@@ -522,10 +526,10 @@ class PassScenarioScheduleCallback(BaseCallback):
 
 def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   pass_scenario_prob=0.0, curriculum_start_level=None,
-                  blue_heuristic=None):
+                  blue_heuristic=None, goal_reward_solo=None):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob,
-                    curriculum_start_level, blue_heuristic)
+                    curriculum_start_level, blue_heuristic, goal_reward_solo)
         for i in range(n_envs)
     ]
     if algo == "masac":
@@ -546,7 +550,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           total_steps=5_000_000, algo="masac", pass_scenario_prob=0.0,
           demo_dir=None, demo_reinject_every=500_000, demo_ratio=0.25,
           bc_coef=0.5, pass_scenario_prob_start=None, net="flat",
-          start_level=None, load_buffer="auto", blue_heuristic=None):
+          start_level=None, load_buffer="auto", blue_heuristic=None,
+          goal_reward_solo=None):
     assert algo in ("masac", "sac"), algo
     assert blue_heuristic in (None, "attacker"), blue_heuristic
     assert net in ("flat", "deepsets", "deepsets_mean"), net
@@ -583,6 +588,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             "net": net,
             "start_level": start_level,
             "blue_heuristic": blue_heuristic,
+            "goal_reward_solo": goal_reward_solo,
         },
     )
 
@@ -618,7 +624,13 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         pass_scenario_prob=initial_pass_prob,
         curriculum_start_level=effective_start_level,
         blue_heuristic=blue_heuristic,
+        goal_reward_solo=goal_reward_solo,
     )
+    if goal_reward_solo is not None:
+        print(
+            f"Asymmetric goal payoff: goal after pass +10.0, "
+            f"solo goal +{goal_reward_solo}"
+        )
     opponent = (
         f"heuristic({blue_heuristic}: blue0 aggressive, blue1 defensive)"
         if blue_heuristic else f"frozen={frozen_path}"
@@ -932,6 +944,11 @@ if __name__ == "__main__":
                              "holds the goal-ball line. Gives a fixed, "
                              "non-exploitable evaluation baseline and a "
                              "persistently blocked shot lane.")
+    parser.add_argument("--goal_reward_solo", type=float, default=None,
+                        help="Reward for a goal WITHOUT a preceding pass "
+                             "(a goal after a pass always gives 10.0). "
+                             "E.g. 3.0 makes cooperative scoring strictly "
+                             "more valuable. Omit for the symmetric payoff.")
     parser.add_argument("--load_buffer", default="auto",
                         choices=["auto", "off"],
                         help="off: skip replay-buffer reload even if a "
@@ -950,4 +967,5 @@ if __name__ == "__main__":
         pass_scenario_prob_start=args.pass_scenario_prob_start,
         net=args.net, start_level=args.start_level,
         load_buffer=args.load_buffer, blue_heuristic=args.blue_heuristic,
+        goal_reward_solo=args.goal_reward_solo,
     )

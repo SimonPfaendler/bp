@@ -9,6 +9,7 @@ def run_experiment(
     pass_scenario_prob=0.0, demo_dir=None,
     pass_scenario_prob_start=None, net="flat", load_buffer="auto",
     start_level=None, blue_heuristic=None, goal_reward_solo=None,
+    target_action_std=None, noise_repeat_s=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -32,6 +33,10 @@ def run_experiment(
         cmd += f" --blue_heuristic {blue_heuristic}"
     if goal_reward_solo is not None:
         cmd += f" --goal_reward_solo {goal_reward_solo}"
+    if target_action_std is not None:
+        cmd += f" --target_action_std {target_action_std}"
+    if noise_repeat_s is not None:
+        cmd += f" --noise_repeat_s {noise_repeat_s}"
     os.system(cmd)
 
 
@@ -119,38 +124,52 @@ def main():
     pass_scenario_prob_start = None
     blue_heuristic = "attacker"
 
-    # GENERATION 11 — asymmetric terminal payoff (phase 1 of the two-phase
-    # test). Goal after a completed pass +10, solo goal +3. Every earlier
-    # intervention left solo scoring exactly as valuable as cooperative
-    # scoring, so the solo equilibrium stayed optimal; this changes the
-    # payoff structure that DEFINES the equilibrium.
-    # 11a continues the heuristic chain (blocked lane + payoff), 11b isolates
-    # the payoff against the same heuristic from the best solo champion, so
-    # the two differ only in their starting point.
-    # PHASE 2 (later): drop goal_reward_solo -> symmetric payoff again, and
-    # check whether the learned passing survives or erodes back.
+    # GENERATION 12 — scenario redesign + exploration, A/B.
+    #
+    # Gen 11 showed the payoff is NOT the binding constraint: with a
+    # pass-goal worth 11 and a solo goal worth 4, roughly 54 goals per
+    # window still contained exactly 2 that followed a pass. The agent
+    # forgoes 2.75x reward because it cannot find or execute the pass, so
+    # the remaining levers are discoverability and state coverage.
+    #
+    # Both arms get the redesigned scenarios (env-side, unavoidable):
+    # jittered carrier heading, a loose ball in ~30% of spawns, and the new
+    # `pressed` variant — chaos geometry with only the blocked shot lane
+    # enforced. The three old templates fixed the entire relative topology
+    # (blocker offset from the lane: 0.03 m) and always started the carrier
+    # in possession facing the goal, while chaos starts with a loose ball
+    # and random headings. Those distributions barely overlapped, which is
+    # the most likely reason staged passing never transferred.
+    #
+    # 12b adds the exploration package on top, so the arms differ only in
+    # that. alpha has been pinned at its 0.005 floor in nearly every run,
+    # i.e. the policy barely explores, and the residual noise is redrawn
+    # every step (jitter). A pass is a multi-step manoeuvre and is never
+    # discovered that way. Measured on identical weights, noise repetition
+    # lifts action autocorrelation from 0.02 to 0.55.
     goal_reward_solo = 3.0
+    demo_dir = "pass_demos_v2"        # regenerated for the 4-variant mix
 
     runs = [
-        # (label, init_path, start_level, load_buffer)
-        ("11a_payoff_warm_chain", warm_chain, 5, "auto"),
-        ("11b_payoff_from_champion", champion_solo, 5, "off"),
+        # (label, target_action_std, noise_repeat_s)
+        ("12a_scenarios_only", None, None),
+        ("12b_scenarios_plus_exploration", 0.15, 2.0),
     ]
 
     jobs = []
-    for label, init_path, start_level, load_buffer in runs:
+    for label, tgt_std, nr_s in runs:
         job = executor.submit(
             run_experiment, reward_type, seed, n_pairs,
-            None, init_path, total_steps, algo,
-            pass_scenario_prob, "pass_demos",
-            pass_scenario_prob_start, "flat", load_buffer,
-            start_level, blue_heuristic, goal_reward_solo,
+            None, warm_chain, total_steps, algo,
+            pass_scenario_prob, demo_dir,
+            pass_scenario_prob_start, "flat", "auto",
+            5, blue_heuristic, goal_reward_solo, tgt_std, nr_s,
         )
         jobs.append((label, job))
         print(f"Submitted {label}: job {job.job_id}")
-    print(f"{len(jobs)} Gen-11 job(s) submitted [asymmetric payoff: "
-          f"pass-goal +10 vs solo-goal +{goal_reward_solo}, "
-          f"opponent=heuristic, pass_scenario_prob={pass_scenario_prob}]")
+    print(f"{len(jobs)} Gen-12 job(s) submitted [redesigned scenarios; "
+          f"b adds exploration (sigma-target + noise repetition); "
+          f"init={warm_chain}]")
 
 
 if __name__ == "__main__":

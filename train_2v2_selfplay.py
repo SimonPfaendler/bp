@@ -29,7 +29,7 @@ from stable_baselines3.common.callbacks import (
 )
 
 from masac import MASAC
-from masac_policy import MASACPolicy
+from masac_policy import MASACPolicy, N_AGENTS, SINGLE_ACT_DIM
 from pair_vec_env import (
     DummyPairVecEnv,
     JointDummyPairVecEnv,
@@ -39,6 +39,7 @@ from pair_vec_env import (
 from ssl_rl_2v2_selfplay import SSL2v2SelfPlayEnv
 from demo_buffer import DemoMixReplayBuffer, build_demo_buffer, load_buffer_into
 from deepsets_extractor import DeepSetsExtractor
+from exploration import NoiseRepeatSAC, unified_target_entropy
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -551,7 +552,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           demo_dir=None, demo_reinject_every=500_000, demo_ratio=0.25,
           bc_coef=0.5, pass_scenario_prob_start=None, net="flat",
           start_level=None, load_buffer="auto", blue_heuristic=None,
-          goal_reward_solo=None):
+          goal_reward_solo=None, target_action_std=None,
+          noise_repeat_s=None, noise_repeat_max=16):
     assert algo in ("masac", "sac"), algo
     assert blue_heuristic in (None, "attacker"), blue_heuristic
     assert net in ("flat", "deepsets", "deepsets_mean"), net
@@ -589,6 +591,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             "start_level": start_level,
             "blue_heuristic": blue_heuristic,
             "goal_reward_solo": goal_reward_solo,
+            "target_action_std": target_action_std,
+            "noise_repeat_s": noise_repeat_s,
         },
     )
 
@@ -659,13 +663,30 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     use_demos = demo_dir is not None
     rb_class = DemoMixReplayBuffer if use_demos else None
     rb_kwargs = {"demo_ratio": demo_ratio} if use_demos else None
+
+    # Entropy target from a target action std instead of -|A|. -|A| is not
+    # reachable for every policy (that is how alpha ratcheted to 114 on the
+    # scratch MASAC run); a sigma-based target is achievable by construction
+    # and keeps a defined amount of exploration alive instead of letting
+    # alpha sink to its floor, where the policy stops exploring altogether.
+    act_dim = SINGLE_ACT_DIM * (N_AGENTS if algo == "masac" else 1)
+    ent_target = (
+        unified_target_entropy(act_dim, target_action_std)
+        if target_action_std is not None else "auto"
+    )
+    if target_action_std is not None:
+        print(
+            f"Unified entropy target: sigma={target_action_std} -> "
+            f"H={ent_target:.2f} (auto would be {-float(act_dim):.2f})"
+        )
     if algo == "masac":
         model = MASAC(
             policy=MASACPolicy, env=env, verbose=1, device="cuda",
             tensorboard_log=log_dir, seed=seed,
             train_freq=48, gradient_steps=96, batch_size=2048,
             buffer_size=1_000_000, learning_rate=3e-4,
-            learning_starts=20000, ent_coef="auto_0.05", target_entropy="auto",
+            learning_starts=20000, ent_coef="auto_0.05",
+            target_entropy=ent_target,
             # Warmup ALSO for scratch runs: without it the fresh centralized
             # critic diverged (q_mean 1.6e6) — 25% demo states per batch mean
             # the target queries Q(s', pi(s')) at state-action pairs the
@@ -683,15 +704,31 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         # Blue and MASAC does not, the issue is in the custom MASAC stack,
         # not in env/reward/kick.
         from stable_baselines3 import SAC
-        model = SAC(
+        # NoiseRepeatSAC only overrides action SELECTION during rollouts;
+        # the update is stock SAC, so demo mixing, BC and the LR split are
+        # untouched. Without --noise_repeat_s it IS stock SAC.
+        sac_cls = NoiseRepeatSAC if noise_repeat_s is not None else SAC
+        extra = (
+            dict(noise_repeat_s=noise_repeat_s,
+                 noise_repeat_max=noise_repeat_max)
+            if noise_repeat_s is not None else {}
+        )
+        model = sac_cls(
             policy="MlpPolicy", env=env, verbose=1, device="cuda",
             tensorboard_log=log_dir, seed=seed,
             train_freq=48, gradient_steps=96, batch_size=2048,
             buffer_size=1_000_000, learning_rate=3e-4,
-            learning_starts=10000, ent_coef="auto_0.05", target_entropy="auto",
+            learning_starts=10000, ent_coef="auto_0.05",
+            target_entropy=ent_target,
             policy_kwargs=policy_kwargs, gamma=0.99,
             replay_buffer_class=rb_class, replay_buffer_kwargs=rb_kwargs,
+            **extra,
         )
+        if noise_repeat_s is not None:
+            print(
+                f"Noise repetition active: k ~ Zeta(s={noise_repeat_s}), "
+                f"capped at {noise_repeat_max} steps"
+            )
     if init_load and os.path.exists(init_load):
         print(f"Transferring policy weights from {init_load}")
         old_model = _load_any(init_load)
@@ -944,6 +981,19 @@ if __name__ == "__main__":
                              "holds the goal-ball line. Gives a fixed, "
                              "non-exploitable evaluation baseline and a "
                              "persistently blocked shot lane.")
+    parser.add_argument("--target_action_std", type=float, default=None,
+                        help="Entropy target from a target action std "
+                             "(FlashSAC uses 0.15) instead of -|A|. Keeps a "
+                             "defined amount of exploration alive; omit for "
+                             "SB3's 'auto'.")
+    parser.add_argument("--noise_repeat_s", type=float, default=None,
+                        help="Zeta exponent for noise repetition: the "
+                             "sampled action noise is held for k ~ Zeta(s) "
+                             "steps, making multi-step manoeuvres (a pass) "
+                             "discoverable. ~2.0 is a reasonable start; "
+                             "omit to disable (stock SAC). SAC only.")
+    parser.add_argument("--noise_repeat_max", type=int, default=16,
+                        help="Cap on the noise hold length in steps.")
     parser.add_argument("--goal_reward_solo", type=float, default=None,
                         help="Reward for a goal WITHOUT a preceding pass "
                              "(a goal after a pass always gives 10.0). "
@@ -968,4 +1018,7 @@ if __name__ == "__main__":
         net=args.net, start_level=args.start_level,
         load_buffer=args.load_buffer, blue_heuristic=args.blue_heuristic,
         goal_reward_solo=args.goal_reward_solo,
+        target_action_std=args.target_action_std,
+        noise_repeat_s=args.noise_repeat_s,
+        noise_repeat_max=args.noise_repeat_max,
     )

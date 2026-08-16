@@ -216,8 +216,13 @@ def tiktaka_actions(env, state):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--frozen", required=True,
-                        help="Frozen blue checkpoint (= next gen's opponent)")
+    parser.add_argument("--frozen", default=None,
+                        help="Frozen blue checkpoint (= next gen's opponent). "
+                             "Omit when using --blue_heuristic.")
+    parser.add_argument("--blue_heuristic", default=None, choices=["attacker"],
+                        help="Hand-coded blue team as the opponent instead of "
+                             "a checkpoint. Demos should be recorded against "
+                             "the same opponent the agent will train against.")
     parser.add_argument("--n_success", type=int, default=300)
     parser.add_argument("--max_attempts", type=int, default=3000)
     parser.add_argument("--max_ep_steps", type=int, default=400)
@@ -228,11 +233,21 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
+    if not args.frozen and not args.blue_heuristic:
+        parser.error("give either --frozen <checkpoint> or --blue_heuristic")
     env = SSL2v2SelfPlayEnv(
         reward_type="dense",
         render_mode="human" if args.render else None,
-        frozen_path=args.frozen,
+        # The heuristic drives blue at the command stage and ignores any
+        # frozen model, so the two are mutually exclusive.
+        frozen_path=None if args.blue_heuristic else args.frozen,
+        blue_heuristic=args.blue_heuristic,
         pass_scenario_prob=1.0,
+    )
+    print(
+        "Opponent: "
+        + (f"heuristic({args.blue_heuristic})" if args.blue_heuristic
+           else args.frozen)
     )
     env.set_curriculum_level(5)
 
@@ -287,7 +302,7 @@ def main():
             record = {
                 "scenario": "pass",
                 "variant": variant,
-                "frozen_path": args.frozen,
+                "frozen_path": args.frozen or f"heuristic:{args.blue_heuristic}",
                 "n_steps": len(steps),
                 "outcome": "scored_after_pass",
                 "passes": info.get("passes", 0),

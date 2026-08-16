@@ -1093,14 +1093,21 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                    shot lanes, mate free BEHIND — back-pass draws the
                    ball-chasing blues, carrier sprints free, return pass,
                    finish. Two-pass give-and-go.
+          pressed: chaos geometry with only the blocked shot lane enforced.
+                   The three above fix the whole relative topology, so
+                   their states barely overlap with chaos spawns; this one
+                   trains the concept in open-play geometry and is the
+                   bridge the staged->chaos transfer was missing.
         """
         self._episode_scenario = "pass"
-        variant = int(rng.integers(0, 3))
+        variant = int(rng.integers(0, 4))
         if variant == 0:
             return self._pass_corner_frame(pos, rng, max_x)
         if variant == 1:
             return self._pass_counter_frame(pos, rng, max_x)
-        return self._pass_tiktaka_frame(pos, rng, max_x)
+        if variant == 2:
+            return self._pass_tiktaka_frame(pos, rng, max_x)
+        return self._pass_pressed_frame(pos, rng, max_x)
 
     @staticmethod
     def _ball_in_front(rng, cx, cy, direction):
@@ -1108,6 +1115,34 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         overlapping spawns get ejected by the physics engine."""
         off = float(rng.uniform(0.14, 0.18))
         return cx + off * float(direction[0]), cy + off * float(direction[1])
+
+    def _clip_field(self, x, y, margin=0.15):
+        mx = self.field.length / 2.0 - margin
+        my = self.field.width / 2.0 - margin
+        return float(np.clip(x, -mx, mx)), float(np.clip(y, -my, my))
+
+    def _carrier_start(self, rng, cx, cy, to_goal,
+                       jitter_deg=45.0, loose_prob=0.3):
+        """Carrier heading + ball placement for a staged pass spawn.
+
+        The staged variants used to place the ball at the dribbler with the
+        carrier facing the goal EXACTLY, every time, while chaos spawns a
+        loose ball with randomly oriented robots. Those two state
+        distributions barely overlap, which is the most likely reason
+        passing learned in the staged scenarios never showed up in chaos.
+        Jittering the heading and loosening the ball part of the time
+        closes that gap from the staged side — the policy also has to win
+        the ball first in a pass situation, exactly as it must in chaos.
+        """
+        base = math.degrees(math.atan2(to_goal[1], to_goal[0]))
+        theta = base + float(rng.uniform(-jitter_deg, jitter_deg))
+        if rng.random() < loose_prob:
+            ang = float(rng.uniform(-math.pi, math.pi))
+            d = float(rng.uniform(0.30, 0.75))
+            bx, by = cx + d * math.cos(ang), cy + d * math.sin(ang)
+        else:
+            bx, by = self._ball_in_front(rng, cx, cy, to_goal)
+        return theta, self._clip_field(bx, by)
 
     def _pass_corner_frame(self, pos, rng, max_x):
         self._episode_pass_variant = "corner"
@@ -1121,8 +1156,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         goal = np.array([-max_x, 0.0])
         to_goal = goal - np.array([cx, cy])
         to_goal = to_goal / np.linalg.norm(to_goal)
-        theta_carrier = math.degrees(math.atan2(to_goal[1], to_goal[0]))
-        bx, by = self._ball_in_front(rng, cx, cy, to_goal)
+        theta_carrier, (bx, by) = self._carrier_start(rng, cx, cy, to_goal)
         pos.ball = Ball(x=bx, y=by)
 
         yellows = [None, None]
@@ -1163,8 +1197,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         goal = np.array([-max_x, 0.0])
         to_goal = goal - np.array([cx, cy])
         to_goal = to_goal / np.linalg.norm(to_goal)
-        theta_carrier = math.degrees(math.atan2(to_goal[1], to_goal[0]))
-        bx, by = self._ball_in_front(rng, cx, cy, to_goal)
+        theta_carrier, (bx, by) = self._carrier_start(rng, cx, cy, to_goal)
         pos.ball = Ball(x=bx, y=by)
 
         yellows = [None, None]
@@ -1207,8 +1240,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         goal = np.array([-max_x, 0.0])
         to_goal = goal - np.array([cx, cy])
         to_goal = to_goal / np.linalg.norm(to_goal)
-        theta_carrier = math.degrees(math.atan2(to_goal[1], to_goal[0]))
-        bx, by = self._ball_in_front(rng, cx, cy, to_goal)
+        theta_carrier, (bx, by) = self._carrier_start(rng, cx, cy, to_goal)
         pos.ball = Ball(x=bx, y=by)
 
         yellows = [None, None]
@@ -1233,5 +1265,74 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         pos.robots_blue[1] = Robot(
             x=b2x, y=b2y,
             theta=math.degrees(math.atan2(cy - b2y, cx - b2x)),
+        )
+        return pos
+
+    def _pass_pressed_frame(self, pos, rng, max_x):
+        """Chaos geometry with ONE property enforced: the shot lane is
+        blocked while the mate is free.
+
+        corner/counter/tiktaka fix the entire relative topology and only
+        jitter positions by roughly half a metre, so their states hardly
+        overlap with chaos spawns — which is why passing learned there
+        never transferred. This variant keeps chaos-like randomness
+        (free positions, random headings, frequently a loose ball) and
+        guarantees only what the CONCEPT needs. It is the bridge between
+        the staged templates and open play.
+        """
+        self._episode_pass_variant = "pressed"
+        carrier_idx = int(rng.integers(0, 2))
+        mate_idx = 1 - carrier_idx
+
+        cx = float(rng.uniform(-max_x + 1.0, 2.0))
+        cy = float(rng.uniform(-2.2, 2.2))
+        goal = np.array([-max_x, 0.0])
+        to_goal = goal - np.array([cx, cy])
+        to_goal = to_goal / np.linalg.norm(to_goal)
+
+        # Wider heading jitter and more loose balls than the templates.
+        theta_carrier, (bx, by) = self._carrier_start(
+            rng, cx, cy, to_goal, jitter_deg=90.0, loose_prob=0.4,
+        )
+        pos.ball = Ball(x=bx, y=by)
+
+        yellows = [None, None]
+        yellows[carrier_idx] = Robot(x=cx, y=cy, theta=theta_carrier)
+        # Mate anywhere with a random heading, just not on top of the
+        # carrier — "free" is created by the blues, not by placing him.
+        mx, my = cx, cy
+        for _ in range(20):
+            mx = float(rng.uniform(-max_x + 0.5, 2.5))
+            my = float(rng.uniform(-2.3, 2.3))
+            if math.hypot(mx - cx, my - cy) > 1.0:
+                break
+        yellows[mate_idx] = Robot(
+            x=mx, y=my, theta=float(rng.uniform(-180, 180)),
+        )
+        pos.robots_yellow[0] = yellows[0]
+        pos.robots_yellow[1] = yellows[1]
+
+        # The enforced property: a blue on the ball->goal lane, with a
+        # little lateral slop so it is not a perfectly centred wall.
+        lane = goal - np.array([bx, by])
+        lane_len = float(np.linalg.norm(lane))
+        lane = lane / max(lane_len, 1e-6)
+        perp = np.array([-lane[1], lane[0]])
+        bdist = float(rng.uniform(0.5, max(0.6, min(1.5, lane_len - 0.4))))
+        off = float(rng.uniform(-0.25, 0.25))
+        blx, bly = self._clip_field(
+            bx + bdist * lane[0] + off * perp[0],
+            by + bdist * lane[1] + off * perp[1],
+            margin=0.3,
+        )
+        pos.robots_blue[0] = Robot(
+            x=blx, y=bly,
+            theta=math.degrees(math.atan2(cy - bly, cx - blx)),
+        )
+        # Second blue: fully random, exactly like a chaos spawn.
+        pos.robots_blue[1] = Robot(
+            x=float(rng.uniform(-max_x + 0.5, 1.0)),
+            y=float(rng.uniform(-2.3, 2.3)),
+            theta=float(rng.uniform(-180, 180)),
         )
         return pos

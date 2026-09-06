@@ -62,113 +62,69 @@ def main():
     # schedule, making any SAC-vs-MASAC comparison at that checkpoint an
     # apples-to-oranges mid-schedule-vs-finished comparison.
 
-    # GENERATION 10 — training against the HAND-CODED blue team.
-    # Blue 0 chases and shoots, blue 1 holds the goal-ball line
-    # (blue_attacker_heuristic_2v2 / blue_defender_heuristic_2v2).
+    # GENERATION 13 — Gen 11 repeated, this time with the incentive it was
+    # supposed to test actually observable.
     #
-    # Two reasons this differs from every previous generation:
-    #  1) Fixed yardstick. Every frozen opponent so far was a different
-    #     checkpoint, so success rates were never comparable across
-    #     generations. Against a fixed heuristic they are, exactly like the
-    #     1v1 project's "72% vs heuristic baseline".
-    #  2) A defender that HOLDS POSITION. In self-play both blues chase the
-    #     ball (mirrored solo equilibrium), leaving the goal open, which is
-    #     why the solo route stayed profitable. A dedicated defender blocks
-    #     the direct shot lane in ordinary chaos episodes, not just in the
-    #     staged pass scenarios. That is the structural "make solo
-    #     unattractive" lever, for free from the opponent design.
+    # Gen 11 gave a goal after a pass +10 and a solo goal +3, and concluded
+    # "the bottleneck is not incentive" because ~54 goals per window still
+    # contained only 2 after a pass. That conclusion does not follow: the
+    # payoff is gated on `passes_in_episode > 0`, which appeared in NO obs
+    # slot. Verified by mutating passes_in_episode / current_step /
+    # last_yellow_carrier / blue_touched_since_yellow on a live env: 0 of 104
+    # obs values changed. Two physically identical goal states carried
+    # terminal reward 11 or 4 with no observable difference, so the critic
+    # could only regress to their frequency-weighted mean (~3.3). The
+    # incentive was never representable, hence never tested.
     #
-    # Caveat for the thesis (see BP 5.4): a static heuristic caps the
-    # strategic ceiling and invites exploitation. This is a CONDITION and an
-    # evaluator, not a replacement for self-play.
+    # Repaired in the env (obs 52 -> 56, appended last):
+    #   has_passed, i_am_last_carrier, blue_touched_since_yellow  -> the
+    #     +10/+3 goal split and the +3 pass bonus become functions of
+    #     observed state
+    #   time_remaining -> the time penalty scales with current_step and
+    #     truncation costs -1, in a finite-horizon MDP with no clock feature
+    #   plus norm_ball_v: ball speed was divided by the ROBOT max (4.035)
+    #     and clipped at 1.2, so every kick above 4.84 m/s looked identical
+    #     while kicks span 3-6 m/s — the receiver could not judge an
+    #     incoming pass in the top 40% of the kick range
     #
-    # SAC (not MASAC): the stronger and better-understood arm, and it makes
-    # the comparison against the earlier SAC-vs-frozen curves meaningful.
-    # TWO ARMS, because warm-vs-scratch is itself the test of the attractor
-    # hypothesis (Gen 7 erosion + Gen 8 solo-solves-pass-scenarios):
-    #   10a warm    — can an existing solo player be re-educated by a
-    #                 permanently blocked shot lane? Answer in one chunk.
-    #   10b scratch — does cooperation emerge when the policy learns from
-    #                 the start in a world where solo does not reliably pay?
-    #                 Needs ~3 chunks (5a scratch took 3.3M for success .30),
-    #                 so it is the long pole — start it now, chain it via
-    #                 init = newest _final with start_level=None.
-    # Everything else identical between arms, so the difference is the init.
-    # 140727 = Gen-7 chunk 2: the strongest player overall (chaos success
-    # 0.40, best ever) and simultaneously the most pass-eroded one
-    # (scenario_pass passes 0.16, scored_after_pass 0). That makes it the
-    # sharpest possible warm test: if a permanently blocked shot lane can
-    # re-educate THIS policy, the effect is real.
-    # Chunk 2 of the warm arm. Chunk 1 (20260809-220118) was still improving
-    # at cutoff (success .12 -> .14 inside the log window, Q healthy at
-    # q_mean 2.0), so this continues it rather than restarting.
-    # load_buffer="auto" now: chunk 1's buffer was collected against THIS
-    # heuristic, so it is valid (chunk 1 had to drop the old one, which came
-    # from a different opponent). That also enables learning_starts=0.
+    # Warm start survives the layout change: _fit_param keeps the old weight
+    # columns and zero-inits the appended ones, so the net is function-
+    # identical at init. The replay buffer cannot migrate (the new dims are
+    # not recoverable from stored 52-dim obs) — one slot of refill is the
+    # unavoidable price, hence load_buffer="off".
+    #
+    # 13a isolates the repair; 13b adds the asymmetric payoff on top, so the
+    # pair answers "was Gen 11's null result an artefact of unobservability?"
     warm_chain = "models/2v2_selfplay_SAC_vsheur_dense_seed822_20260809-220118_final.zip"
-    champion_solo = "models/2v2_selfplay_SAC_dense_seed822_20260801-140727_final.zip"
-    # 10b restart: the first attempt could not promote because the heuristic
-    # blues were active at level 1, which is designed around PASSIVE blues
-    # (success 0.0 at blue_goal_rate 0.41 after 2.9M). The env now engages
-    # the heuristic only from level 2 up. The Q blow-up (critic_loss 2.7e3)
-    # was downstream of that: with no grounded success signal the fresh
-    # critic had nothing to anchor against while 25% demo states pulled it
-    # off-distribution. Scratch MASAC on level 1 with passive blues was
-    # stable, so the level fix should be enough without target clipping.
     reward_type = "dense"
     n_pairs = 24
     seed = 822
     total_steps = 3_000_000
     algo = "sac"
-    pass_scenario_prob = 0.35         # fixed — no anneal (erosion lesson)
+    pass_scenario_prob = 0.35
     pass_scenario_prob_start = None
     blue_heuristic = "attacker"
-
-    # GENERATION 12 — scenario redesign + exploration, A/B.
-    #
-    # Gen 11 showed the payoff is NOT the binding constraint: with a
-    # pass-goal worth 11 and a solo goal worth 4, roughly 54 goals per
-    # window still contained exactly 2 that followed a pass. The agent
-    # forgoes 2.75x reward because it cannot find or execute the pass, so
-    # the remaining levers are discoverability and state coverage.
-    #
-    # Both arms get the redesigned scenarios (env-side, unavoidable):
-    # jittered carrier heading, a loose ball in ~30% of spawns, and the new
-    # `pressed` variant — chaos geometry with only the blocked shot lane
-    # enforced. The three old templates fixed the entire relative topology
-    # (blocker offset from the lane: 0.03 m) and always started the carrier
-    # in possession facing the goal, while chaos starts with a loose ball
-    # and random headings. Those distributions barely overlapped, which is
-    # the most likely reason staged passing never transferred.
-    #
-    # 12b adds the exploration package on top, so the arms differ only in
-    # that. alpha has been pinned at its 0.005 floor in nearly every run,
-    # i.e. the policy barely explores, and the residual noise is redrawn
-    # every step (jitter). A pass is a multi-step manoeuvre and is never
-    # discovered that way. Measured on identical weights, noise repetition
-    # lifts action autocorrelation from 0.02 to 0.55.
-    goal_reward_solo = 3.0
-    demo_dir = "pass_demos_v2"        # regenerated for the 4-variant mix
+    demo_dir = "pass_demos_v3"        # regenerated at the 56-dim layout
 
     runs = [
-        # (label, target_action_std, noise_repeat_s)
-        ("12a_scenarios_only", None, None),
-        ("12b_scenarios_plus_exploration", 0.15, 2.0),
+        # (label, goal_reward_solo)
+        ("13a_obsfix_symmetric", None),
+        ("13b_obsfix_asymmetric", 3.0),
     ]
 
     jobs = []
-    for label, tgt_std, nr_s in runs:
+    for label, solo in runs:
         job = executor.submit(
             run_experiment, reward_type, seed, n_pairs,
             None, warm_chain, total_steps, algo,
             pass_scenario_prob, demo_dir,
-            pass_scenario_prob_start, "flat", "auto",
-            5, blue_heuristic, goal_reward_solo, tgt_std, nr_s,
+            pass_scenario_prob_start, "flat", "off",
+            5, blue_heuristic, solo, None, None,
         )
         jobs.append((label, job))
         print(f"Submitted {label}: job {job.job_id}")
-    print(f"{len(jobs)} Gen-12 job(s) submitted [redesigned scenarios; "
-          f"b adds exploration (sigma-target + noise repetition); "
+    print(f"{len(jobs)} Gen-13 job(s) submitted [obs repair 52->56; "
+          f"b adds the asymmetric payoff, now representable; "
           f"init={warm_chain}]")
 
 

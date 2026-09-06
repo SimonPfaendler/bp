@@ -83,6 +83,29 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
     return _init
 
 
+def _fit_param(old, new_shape):
+    """Adapt one old parameter to a grown input layer.
+
+    Appending observation dims only widens the FIRST Linear's weight along
+    its last axis. Copying the old columns and zero-initialising the new
+    ones makes the network function-IDENTICAL to the old one at init, so an
+    obs-layout change costs no accumulated weights. Returns None when the
+    shapes are not such an append-only growth, in which case the caller
+    falls back to skipping the whole module.
+    """
+    if tuple(old.shape) == tuple(new_shape):
+        return old
+    if (
+        old.dim() == len(new_shape)
+        and tuple(old.shape[:-1]) == tuple(new_shape[:-1])
+        and new_shape[-1] > old.shape[-1]
+    ):
+        grown = torch.zeros(tuple(new_shape), dtype=old.dtype)
+        grown[..., : old.shape[-1]] = old
+        return grown
+    return None
+
+
 def _load_any(path):
     """Load a checkpoint that may be a stock-SAC run or a MASAC iteration.
 
@@ -745,14 +768,28 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         for k, v in old_state.items():
             groups.setdefault(k.split(".")[0], []).append((k, v))
         for prefix, items in groups.items():
-            ok = all(
-                k in new_state and new_state[k].shape == v.shape
-                for k, v in items
-            )
+            fitted, ok, n_grown = {}, True, 0
+            for k, v in items:
+                if k not in new_state:
+                    ok = False
+                    break
+                f = _fit_param(v, new_state[k].shape)
+                if f is None:
+                    ok = False
+                    break
+                if tuple(v.shape) != tuple(new_state[k].shape):
+                    n_grown += 1
+                fitted[k] = f
             if ok:
-                for k, v in items:
-                    new_state[k] = v
+                for k, f in fitted.items():
+                    new_state[k] = f
                     transferred.append(k)
+                if n_grown:
+                    print(
+                        f"  Module '{prefix}': {n_grown} tensor(s) widened "
+                        f"for appended obs dims (old columns kept, new "
+                        f"columns zero-init -> identical function at init)"
+                    )
             else:
                 skipped.extend(k for k, _ in items)
                 print(f"  Skipping module '{prefix}' (shape mismatch)")
@@ -809,7 +846,23 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
                     _buf = pickle.load(_f)
                 saved_n_envs = getattr(_buf, "n_envs", None)
                 cur_n_envs = model.replay_buffer.n_envs
-                if saved_n_envs == cur_n_envs:
+                # Obs layout must match too. Appending obs dims changes the
+                # stored observation width, and the old code only compared
+                # n_envs — loading a 52-dim buffer into a 56-dim one would
+                # corrupt silently rather than fail.
+                saved_obs_shape = tuple(
+                    getattr(_buf, "observations", np.zeros((0,))).shape[2:]
+                )
+                cur_obs_shape = tuple(model.replay_buffer.observations.shape[2:])
+                if saved_obs_shape != cur_obs_shape:
+                    print(
+                        f"Skipping buffer load: obs layout changed "
+                        f"{saved_obs_shape} -> {cur_obs_shape}. The buffer "
+                        f"cannot be migrated (the appended dims are not "
+                        f"recoverable from stored 52-dim obs); this slot "
+                        f"refills from scratch."
+                    )
+                elif saved_n_envs == cur_n_envs:
                     if use_demos:
                         # Copy data in place — plain load_replay_buffer would
                         # replace the instance and drop the DemoMix behavior.

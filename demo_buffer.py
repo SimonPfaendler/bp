@@ -62,6 +62,18 @@ def build_demo_buffer(demos: dict, template: ReplayBuffer) -> ReplayBuffer:
     sized to fit them all (no FIFO eviction). `template` supplies the obs/
     action spaces, device and n_envs so shapes match the main buffer."""
     n = demos["obs"].shape[0]
+    # Fail loudly on a stale demo dir. Demo .pkl files store the obs layout
+    # they were recorded with; appending obs dims makes older sets silently
+    # incompatible, and a wrong-width add() would corrupt the demo channel
+    # that the whole DQfD-style setup depends on.
+    demo_shape = tuple(demos["obs"].shape[1:])
+    want_shape = tuple(template.observation_space.shape)
+    if demo_shape != want_shape:
+        raise ValueError(
+            f"Demo obs layout {demo_shape} != env obs layout {want_shape}. "
+            f"Regenerate the demos with generate_pass_demos.py against the "
+            f"current env (obs dims were appended)."
+        )
     n_envs = template.n_envs
     n_chunks = n // n_envs
     size = max(n_chunks * n_envs, n_envs)

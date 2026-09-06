@@ -119,6 +119,16 @@ def blue_defender_heuristic_2v2(env, robot, yellows) -> np.ndarray:
 
 SINGLE_OBS_DIM_BASE = 52  # world-frame layout, see _egocentric_obs docstring
 ROLE_INDEX_DIM = 2
+# Episode-scoped state the REWARD depends on but the 52-dim layout never
+# exposed. Verified empirically: mutating passes_in_episode / current_step /
+# last_yellow_carrier / blue_touched_since_yellow changed 0 of 104 obs values,
+# i.e. the MDP was not Markov w.r.t. the observation — two physically
+# identical goal states carried terminal reward 11 or 4 (Gen-11 asymmetric
+# payoff) with no observable difference, so the critic could only regress to
+# their frequency-weighted mean (~3.3 at 2 pass-goals in 54).
+# Appended AFTER the role-index block so the frozen-opponent truncation
+# `blue_obs[..., :frozen_obs_dim]` still yields exactly the legacy layout.
+EPISODE_STATE_DIM = 4
 SINGLE_ACT_DIM = 6
 N_YELLOW = 2
 N_BLUE = 2
@@ -174,6 +184,13 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # _build_commands stage. Mutually exclusive with frozen_path.
         self.blue_heuristic = blue_heuristic
 
+        # Ball speed needs its own scale. norm_v divides by the ROBOT max
+        # (4.035 m/s) and clips at NORM_BOUNDS=1.2, while kicks run 3-6 m/s
+        # (_robot_command), so every kick above 4.84 m/s produced an
+        # identical observation — the top ~40% of the kick range was
+        # unobservable, including for the receiver judging an incoming pass.
+        self.max_ball_v = 6.5
+
         # Asymmetric terminal payoff. A goal that FOLLOWS a completed pass is
         # worth `goal_reward`; a solo goal only `goal_reward_solo`. This is a
         # change to the payoff STRUCTURE that defines the equilibrium, not
@@ -201,7 +218,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.single_obs_dim = (
             SINGLE_OBS_DIM_BASE + ROLE_INDEX_DIM if role_index
             else SINGLE_OBS_DIM_BASE
-        )
+        ) + EPISODE_STATE_DIM
 
         # OOB curriculum: skip robot-OOB termination during the first
         # `oob_grace_steps` per-env steps so early-stage agents get more
@@ -464,6 +481,39 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
     def _frame_to_observations(self):
         return self._stacked_obs_yellow()
 
+    def norm_ball_v(self, v):
+        """Ball speed scaled by a BALL max, not the robot max.
+
+        norm_v divides by max_v=4.035 and clips at NORM_BOUNDS=1.2, so every
+        kick above 4.84 m/s mapped to the same value while kicks span 3-6 m/s.
+        The receiver of a pass could not tell a 5 m/s ball from a 6 m/s one.
+        """
+        return float(np.clip(
+            v / self.max_ball_v, -self.NORM_BOUNDS, self.NORM_BOUNDS
+        ))
+
+    def _episode_state_obs(self, is_yellow, idx) -> np.ndarray:
+        """The episode-scoped variables the reward function reads.
+
+        Order: has_passed, i_am_last_carrier, blue_touched_since_yellow,
+        time_remaining. The first three are yellow-team concepts (the pass
+        bookkeeping only tracks yellow), so blue gets zeros for them and
+        shares only the clock.
+        """
+        time_remaining = 1.0 - min(
+            1.0, self.current_step / float(self.max_steps)
+        )
+        if not is_yellow:
+            return np.array(
+                [0.0, 0.0, 0.0, time_remaining], dtype=np.float32
+            )
+        return np.array([
+            1.0 if self.passes_in_episode > 0 else 0.0,
+            1.0 if self.last_yellow_carrier == idx else 0.0,
+            1.0 if self.blue_touched_since_yellow else 0.0,
+            time_remaining,
+        ], dtype=np.float32)
+
     def _egocentric_obs(
         self, self_robot, mate, opp_list,
         attack_goal_x, is_yellow, idx,
@@ -573,8 +623,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 # BALL (5)
                 self.norm_pos(ball.x),                  # 0
                 self.norm_pos(ball.y),                  # 1
-                self.norm_v(ball.v_x),                  # 2
-                self.norm_v(ball.v_y),                  # 3
+                self.norm_ball_v(ball.v_x),             # 2
+                self.norm_ball_v(ball.v_y),             # 3
                 dist_ball_goal / max_dist,              # 4
                 # SELF (13)
                 self.norm_pos(self_robot.x),            # 5
@@ -654,6 +704,13 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             role = np.zeros(ROLE_INDEX_DIM, dtype=np.float32)
             role[idx] = 1.0
             obs = np.concatenate([obs, role]).astype(np.float32)
+
+        # Appended LAST so `blue_obs[..., :frozen_obs_dim]` still hands a
+        # legacy 52-dim (or 54-dim role-index) opponent exactly its own
+        # layout, and so a warm start can zero-init only the new columns.
+        obs = np.concatenate(
+            [obs, self._episode_state_obs(is_yellow, idx)]
+        ).astype(np.float32)
         return obs
 
     # ---------- dribble enforcement (both teams) ----------

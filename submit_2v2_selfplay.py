@@ -62,39 +62,42 @@ def main():
     # schedule, making any SAC-vs-MASAC comparison at that checkpoint an
     # apples-to-oranges mid-schedule-vs-finished comparison.
 
-    # GENERATION 13 — Gen 11 repeated, this time with the incentive it was
-    # supposed to test actually observable.
+    # GENERATION 14 — demo ablation. ONE variable, isolated.
     #
-    # Gen 11 gave a goal after a pass +10 and a solo goal +3, and concluded
-    # "the bottleneck is not incentive" because ~54 goals per window still
-    # contained only 2 after a pass. That conclusion does not follow: the
-    # payoff is gated on `passes_in_episode > 0`, which appeared in NO obs
-    # slot. Verified by mutating passes_in_episode / current_step /
-    # last_yellow_carrier / blue_touched_since_yellow on a live env: 0 of 104
-    # obs values changed. Two physically identical goal states carried
-    # terminal reward 11 or 4 with no observable difference, so the critic
-    # could only regress to their frequency-weighted mean (~3.3). The
-    # incentive was never representable, hence never tested.
+    # Reading all ten 2v2-vsheur runs end to end, the best policy is four
+    # weeks old: 20260811-132942 finished at success .214 / scenario_pass
+    # .508 / chaos .078. Everything after it is worse, monotonically, down
+    # to Gen 13 at .068 / .186 / .017. Three things changed in between:
+    #   1. asymmetric payoff       (47b40a8, 11.08) — isolated by 161843,
+    #      which alone dropped success .214 -> .113
+    #   2. scenario redesign       (9c6204a, 16.08) — heading jitter +-45deg,
+    #      loose ball 30%, new `pressed` variant at +-90deg / 40%
+    #   3. demo mixing + BC loss   (9c6204a, 16.08) — 25% of every batch
+    # 2 and 3 landed in the SAME commit and have never been separated.
     #
-    # Repaired in the env (obs 52 -> 56, appended last):
-    #   has_passed, i_am_last_carrier, blue_touched_since_yellow  -> the
-    #     +10/+3 goal split and the +3 pass bonus become functions of
-    #     observed state
-    #   time_remaining -> the time penalty scales with current_step and
-    #     truncation costs -1, in a finite-horizon MDP with no clock feature
-    #   plus norm_ball_v: ball speed was divided by the ROBOT max (4.035)
-    #     and clipped at 1.2, so every kick above 4.84 m/s looked identical
-    #     while kicks span 3-6 m/s — the receiver could not judge an
-    #     incoming pass in the top 40% of the kick range
+    # Gen 13a already restored the symmetric payoff (undoing 1) and still
+    # only reached .068, so the residual regression is in 2 and/or 3.
     #
-    # Warm start survives the layout change: _fit_param keeps the old weight
-    # columns and zero-inits the appended ones, so the net is function-
-    # identical at init. The replay buffer cannot migrate (the new dims are
-    # not recoverable from stored 52-dim obs) — one slot of refill is the
-    # unavoidable price, hence load_buffer="off".
+    # Why demos are the prime suspect: 132942 is the ONLY run without them.
+    # bc_loss sits at ~.015 in every later run, i.e. the BC term converged
+    # long ago and teaches nothing new, while 25% of every batch keeps being
+    # drawn from a fixed, never-evicted distribution. For an off-policy
+    # critic that is a permanent distribution shift, not a warmup aid.
+    # Consistent with that, actor_loss (~ alpha*log_pi - Q) degraded from
+    # -2.42 in 132942 to -0.35 in Gen 13a: the actor finds lower-Q actions.
     #
-    # 13a isolates the repair; 13b adds the asymmetric payoff on top, so the
-    # pair answers "was Gen 11's null result an artefact of unobservability?"
+    # 14a = no demos, 14b = demos. Everything else identical, so the pair
+    # measures the demo effect alone. 14a doubles as the control against
+    # 132942: if it returns to ~.2 the regression is the demos, if it stays
+    # at ~.07 it is the scenario redesign, which is then the next ablation.
+    #
+    # Symmetric payoff in BOTH arms (goal_reward_solo=None): Gen 13 showed
+    # the asymmetric variant is strictly worse (.050 vs .068) even once it
+    # became representable, so it stays out until the regression is found.
+    #
+    # load_buffer="off" in both: the 56-dim layout cannot load any stored
+    # 52-dim buffer anyway, and keeping it equal across arms matters more
+    # than the refill cost.
     warm_chain = "models/2v2_selfplay_SAC_vsheur_dense_seed822_20260809-220118_final.zip"
     reward_type = "dense"
     n_pairs = 24
@@ -104,28 +107,26 @@ def main():
     pass_scenario_prob = 0.35
     pass_scenario_prob_start = None
     blue_heuristic = "attacker"
-    demo_dir = "pass_demos_v3"        # regenerated at the 56-dim layout
 
     runs = [
-        # (label, goal_reward_solo)
-        ("13a_obsfix_symmetric", None),
-        ("13b_obsfix_asymmetric", 3.0),
+        # (label, demo_dir)
+        ("14a_nodemos", None),
+        ("14b_demos", "pass_demos_v3"),
     ]
 
     jobs = []
-    for label, solo in runs:
+    for label, demos in runs:
         job = executor.submit(
             run_experiment, reward_type, seed, n_pairs,
             None, warm_chain, total_steps, algo,
-            pass_scenario_prob, demo_dir,
+            pass_scenario_prob, demos,
             pass_scenario_prob_start, "flat", "off",
-            5, blue_heuristic, solo, None, None,
+            5, blue_heuristic, None, None, None,
         )
         jobs.append((label, job))
         print(f"Submitted {label}: job {job.job_id}")
-    print(f"{len(jobs)} Gen-13 job(s) submitted [obs repair 52->56; "
-          f"b adds the asymmetric payoff, now representable; "
-          f"init={warm_chain}]")
+    print(f"{len(jobs)} Gen-14 job(s) submitted [demo ablation: a=none, "
+          f"b=pass_demos_v3; symmetric payoff both; init={warm_chain}]")
 
 
 if __name__ == "__main__":

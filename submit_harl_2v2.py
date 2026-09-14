@@ -75,6 +75,25 @@ def run_experiment(
     # hidden_sizes=[512,512,512], gamma=0.99, batch=1024, use_valuenorm=True
     # (normalises reward targets — important given our +100/-50 outcomes),
     # use_huber_loss=True (robust critic loss for those goal/concede spikes).
+    #
+    # mappo.json (on-policy, no replay buffer). The SB3 comparison point is
+    # 24 envs x [256,256] SAC, so:
+    #   hidden_sizes=[256,256]        same capacity as the SAC actor
+    #   share_param=True              homogeneous yellows, one policy like SB3
+    #   use_recurrent_policy=False    obs is Markov since the episode-state
+    #                                 repair (ece9538) — no RNN needed
+    #   episode_length=400            rollout per update per thread; env
+    #                                 episodes are <=1000 steps, so 400 x 36
+    #                                 threads sees plenty of terminal outcomes
+    #   ppo_epoch=critic_epoch=10, 2 minibatches, clip 0.2, entropy 0.01,
+    #   gamma 0.99 / gae_lambda 0.95  HARL mappo.yaml defaults nudged toward
+    #                                 the football HAPPO config (15 epochs);
+    #                                 no HP search yet
+    #   use_valuenorm + huber         +10 goal spikes over small shaping terms
+    #   use_linear_lr_decay=False     30-min chained segments would restart
+    #                                 the decay at every chain link
+    #   eval_episodes=40              pass/goal rates are small; 20 episodes
+    #                                 quantise them to 0.05
     # CLI flags after --load_config still override (see train.py update_args).
     tuned_cfg = f"{HARL_DIR}/tuned_configs/ssl_2v2/{algo}.json"
     wandb_env = ""
@@ -82,6 +101,9 @@ def run_experiment(
                 "WANDB_MODE", "WANDB_ENTITY"):
         if var in os.environ:
             wandb_env += f"{var}={os.environ[var]} "
+    # update_per_train is a replay-buffer knob. update_args would silently
+    # drop it for MAPPO (no such key), but keep the command honest.
+    off_policy_flags = "--update_per_train 1 " if algo == "hasac" else ""
     cmd = (
         f"cd {HARL_DIR} && "
         f"PYTHONUNBUFFERED=1 BP_DIR={BP_DIR} {wandb_env}{VENV_PY} -u examples/train.py "
@@ -91,7 +113,7 @@ def run_experiment(
         f"--n_rollout_threads {n_rollout_threads} "
         f"--n_eval_rollout_threads {n_eval_rollout_threads} "
         f"--num_env_steps {num_env_steps} "
-        f"--update_per_train 1 "
+        f"{off_policy_flags}"
         f"--curriculum_level {curriculum_level} "
         f"{warmup_flag}{model_dir_flag}{frozen_flag}{heuristic_flag}"
     )
@@ -112,10 +134,9 @@ def main():
         slurm_additional_parameters={"gres": "gpu:1"},
     )
 
-    # HASAC with tuned config (share_param + auto_alpha + valuenorm + huber).
-    # Run-name distinguishes it from the earlier yaml-default run so the
-    # results dir doesn't collide.
-    algo = "hasac"
+    # ALGO=hasac (default) or ALGO=mappo — picks tuned_configs/ssl_2v2/<algo>.json.
+    # Run-name carries the algo so results dirs don't collide.
+    algo = os.environ.get("ALGO", "hasac")
     seeds = [822]
     # 36 train + 8 eval = 44 + main + torch ≈ 48 cores (matches SLURM alloc).
     # update_per_train=2 compensates for the larger n_rollout_threads keeping
@@ -126,7 +147,7 @@ def main():
     curriculum_level = 1
     frozen_path = None
     blue_heuristic = "attacker"   # blue uses the hand-coded attacker
-    exp_name = "ssl2v2_hasac_lvl1_h256_vs_heuristic"
+    exp_name = f"ssl2v2_{algo}_lvl1_h256_vs_heuristic"
     # Chain-from-checkpoint: when MODEL_DIR is set, the run loads actor+
     # critic+value_norm from that path (must be a HARL run's models/ dir),
     # forces curriculum_level=5 (since the loaded policy is already
@@ -136,10 +157,12 @@ def main():
     warmup_steps = None
     if model_dir:
         curriculum_level = 5
-        warmup_steps = 1500
+        # warmup refills the replay buffer — off-policy only. MAPPO has no
+        # buffer, and update_args would drop the flag anyway.
+        warmup_steps = 1500 if algo == "hasac" else None
         # Tag the chained run with the source so checkpoint chain stays readable.
         src = os.path.basename(os.path.dirname(model_dir.rstrip("/")))
-        exp_name = f"ssl2v2_hasac_l5_continue_from_{src}"
+        exp_name = f"ssl2v2_{algo}_l5_continue_from_{src}"
         print(f"Chaining from MODEL_DIR={model_dir}")
         print(f"  curriculum_level forced to 5, warmup_steps={warmup_steps}")
         print(f"  exp_name={exp_name}")

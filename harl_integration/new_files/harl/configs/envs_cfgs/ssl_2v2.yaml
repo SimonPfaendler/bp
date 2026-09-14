@@ -18,3 +18,10 @@ curriculum_level: 1
 curriculum_target_level: 5
 curriculum_threshold: 0.9
 curriculum_window: 200
+
+# --- Level-5 spawn mix and terminal payoff ---
+# Must exist here (and in each tuned_configs json) for a CLI override to take
+# effect: HARL's update_args only replaces keys already present in the config.
+pass_scenario_prob: 0.35            # P(staged pass spawn) instead of chaos at level 5; 0.35 in all SB3 runs.
+goal_reward: 10.0                   # Terminal reward for a goal that follows a completed pass.
+goal_reward_solo: ~                 # Solo-goal reward. ~ = same as goal_reward (symmetric payoff — the ablation winner).

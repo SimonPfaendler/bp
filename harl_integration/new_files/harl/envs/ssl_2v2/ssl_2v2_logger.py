@@ -44,6 +44,7 @@ class SSL2v2Logger(BaseLogger):
         self.roll_success = deque(maxlen=ROLL_WINDOW)
         self.roll_blue_goal = deque(maxlen=ROLL_WINDOW)
         self.roll_passes = deque(maxlen=ROLL_WINDOW)
+        self.roll_passes_strict = deque(maxlen=ROLL_WINDOW)
         self.roll_sap = deque(maxlen=ROLL_WINDOW)
         self.roll_level = deque(maxlen=ROLL_WINDOW)
         self.pass_success = deque(maxlen=SCEN_PASS_WINDOW)
@@ -66,6 +67,7 @@ class SSL2v2Logger(BaseLogger):
             self.roll_success.append(float(info["is_success"]))
             self.roll_blue_goal.append(float(info.get("blue_goal", 0.0)))
             self.roll_passes.append(float(info.get("passes", 0.0)))
+            self.roll_passes_strict.append(float(info.get("passes_strict", 0.0)))
             self.roll_sap.append(float(info.get("scored_after_pass", 0.0)))
             self.roll_level.append(float(info.get("curriculum_level", -1)))
             scen = info.get("scenario")
@@ -94,6 +96,10 @@ class SSL2v2Logger(BaseLogger):
             )
             w.add_scalar(
                 "rollout/passes_per_episode", float(np.mean(self.roll_passes)), step
+            )
+            w.add_scalar(
+                "rollout/passes_strict_per_episode",
+                float(np.mean(self.roll_passes_strict)), step,
             )
             w.add_scalar(
                 "rollout/scored_after_pass_rate", float(np.mean(self.roll_sap)), step
@@ -128,6 +134,7 @@ class SSL2v2Logger(BaseLogger):
         self.eval_yellow_goals = 0
         self.eval_blue_goals = 0
         self.eval_passes_sum = 0
+        self.eval_passes_strict_sum = 0
         self.eval_scored_after_pass = 0
         self.eval_curriculum_levels = []
         self.eval_episode_lens = []
@@ -144,6 +151,7 @@ class SSL2v2Logger(BaseLogger):
         if info0.get("blue_goal", 0) > 0:
             self.eval_blue_goals += 1
         self.eval_passes_sum += int(info0.get("passes", 0))
+        self.eval_passes_strict_sum += int(info0.get("passes_strict", 0))
         if info0.get("scored_after_pass", 0) > 0:
             self.eval_scored_after_pass += 1
         self.eval_curriculum_levels.append(info0.get("curriculum_level", -1))
@@ -164,6 +172,7 @@ class SSL2v2Logger(BaseLogger):
         eval_success_rate = self.eval_yellow_goals / n
         eval_blue_rate = self.eval_blue_goals / n
         eval_passes_per_ep = self.eval_passes_sum / n
+        eval_passes_strict_per_ep = self.eval_passes_strict_sum / n
         eval_scored_after_pass_rate = self.eval_scored_after_pass / n
         eval_curriculum_avg = (
             float(np.mean(self.eval_curriculum_levels))
@@ -175,6 +184,9 @@ class SSL2v2Logger(BaseLogger):
         self.writter.add_scalar("eval/blue_goal_rate", eval_blue_rate, step)
         self.writter.add_scalar("eval/passes_per_episode", eval_passes_per_ep, step)
         self.writter.add_scalar(
+            "eval/passes_strict_per_episode", eval_passes_strict_per_ep, step
+        )
+        self.writter.add_scalar(
             "eval/scored_after_pass_rate", eval_scored_after_pass_rate, step
         )
         self.writter.add_scalar("eval/curriculum_level", eval_curriculum_avg, step)
@@ -182,12 +194,12 @@ class SSL2v2Logger(BaseLogger):
         print(
             f"Eval success_rate={eval_success_rate:.3f} "
             f"blue_goal_rate={eval_blue_rate:.3f} "
-            f"passes/ep={eval_passes_per_ep:.2f} "
+            f"passes/ep={eval_passes_per_ep:.2f} strict={eval_passes_strict_per_ep:.2f} "
             f"avg_reward={eval_avg_rew:.2f} avg_len={eval_avg_len:.1f} "
             f"curriculum_level={eval_curriculum_avg:.1f}"
         )
         # Same column order as the off-policy progress.txt so one parser
-        # reads both.
+        # reads both; passes_strict is appended as the last column.
         self.log_file.write(
             ",".join(map(str, [
                 step,
@@ -198,6 +210,7 @@ class SSL2v2Logger(BaseLogger):
                 eval_passes_per_ep,
                 eval_scored_after_pass_rate,
                 eval_curriculum_avg,
+                eval_passes_strict_per_ep,
             ])) + "\n"
         )
         self.log_file.flush()

@@ -179,6 +179,9 @@ class StatsCallback(BaseCallback):
         self.success_buffer = deque(maxlen=300)
         self.blue_goal_buffer = deque(maxlen=300)
         self.passes_buffer = deque(maxlen=300)
+        # Strict counter (kick-speed release aimed at the receiver + hold);
+        # the loose one above counts fumble + pick-up too.
+        self.passes_strict_buffer = deque(maxlen=300)
         self.scored_after_pass_buffer = deque(maxlen=300)
         # Per-scenario split: the thesis question is whether passing learned
         # in the staged scenario GENERALIZES to chaos spawns — without the
@@ -201,6 +204,8 @@ class StatsCallback(BaseCallback):
                 self.blue_goal_buffer.append(float(infos[i]["blue_goal"]))
             if "passes" in infos[i]:
                 self.passes_buffer.append(float(infos[i]["passes"]))
+            if "passes_strict" in infos[i]:
+                self.passes_strict_buffer.append(float(infos[i]["passes_strict"]))
             if "scored_after_pass" in infos[i]:
                 self.scored_after_pass_buffer.append(
                     float(infos[i]["scored_after_pass"])
@@ -229,6 +234,11 @@ class StatsCallback(BaseCallback):
             self.logger.record(
                 "rollout/passes_per_episode",
                 float(np.mean(self.passes_buffer)),
+            )
+        if self.passes_strict_buffer:
+            self.logger.record(
+                "rollout/passes_strict_per_episode",
+                float(np.mean(self.passes_strict_buffer)),
             )
         if self.scored_after_pass_buffer:
             self.logger.record(

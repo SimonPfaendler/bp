@@ -40,7 +40,7 @@ VENV_PY = _find_venv_py()
 def run_experiment(
     algo, seed, n_rollout_threads, n_eval_rollout_threads,
     num_env_steps, curriculum_level, frozen_path, exp_name,
-    model_dir=None, warmup_steps=None, blue_heuristic=None,
+    model_dir=None, warmup_steps=None, blue_heuristic=None, extra_args="",
 ):
     """Invoke HARL train.py with the ssl_2v2 env via CLI overrides."""
     # HARL's update_args matches CLI args by *leaf* key only — dot-notation
@@ -116,6 +116,7 @@ def run_experiment(
         f"{off_policy_flags}"
         f"--curriculum_level {curriculum_level} "
         f"{warmup_flag}{model_dir_flag}{frozen_flag}{heuristic_flag}"
+        f"{extra_args}"
     )
     os.system(cmd)
 
@@ -154,6 +155,13 @@ def main():
     # L1-competent — no need to redo curriculum), and shrinks warmup to
     # just refill the replay buffer to batch_size.
     model_dir = os.environ.get("MODEL_DIR")
+    # EXTRA_ARGS: any further leaf-key overrides, verbatim, e.g.
+    #   EXTRA_ARGS="--entropy_coef 0.0 --curriculum_target_level 2"
+    # Anything in the tuned json or env yaml is addressable this way, so
+    # one-off experiments need no file edit.
+    extra_args = os.environ.get("EXTRA_ARGS", "").strip()
+    if extra_args:
+        extra_args += " "
     warmup_steps = None
     if model_dir:
         curriculum_level = 5
@@ -173,7 +181,7 @@ def main():
             run_experiment, algo, seed, n_rollout_threads,
             n_eval_rollout_threads, num_env_steps,
             curriculum_level, frozen_path, exp_name,
-            model_dir, warmup_steps, blue_heuristic,
+            model_dir, warmup_steps, blue_heuristic, extra_args,
         )
         jobs.append(job)
     print(f"Submitted {len(jobs)} HARL job(s) [algo={algo}, exp={exp_name}]")

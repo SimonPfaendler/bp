@@ -131,6 +131,14 @@ ROLE_INDEX_DIM = 2
 EPISODE_STATE_DIM = 4
 SINGLE_ACT_DIM = 6
 N_YELLOW = 2
+# Strict pass criteria — measurement everywhere, terminal reward on the L2
+# drill. The loose +3 detector in _calculate_team_reward_and_done fires on
+# fumble + pick-up (replay audit 2026-09-15: 0 of 335 L1 events had the ball
+# heading for the receiver, 70 % left the passer below 0.5 m/s). A strict
+# pass needs a kick-speed release aimed at the receiver, then a real hold.
+STRICT_PASS_MIN_SPEED = 1.0       # m/s at release; kicks are 3-6, roll-offs ~0.3
+STRICT_PASS_MAX_ANGLE_DEG = 30.0  # ball velocity vs. direction to the receiver
+STRICT_PASS_HOLD_STEPS = 4        # receiver keeps possession (0.1 s)
 N_BLUE = 2
 
 
@@ -349,6 +357,9 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.last_yellow_carrier = None
         self.blue_touched_since_yellow = False
         self.passes_in_episode = 0
+        self.passes_strict_in_episode = 0
+        self._release = None         # (passer, ball_v, ball_pos, yellow_pos) at loss of possession
+        self._strict_pending = None  # (receiver, held_steps) after a kicked, aimed release
         self.blue_goal_scored = False
         self.is_dribbling_y = [False, False]
         self.dribble_start_pos_y = [None, None]
@@ -398,6 +409,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 1, self.current_step
             )
             info["passes"] = self.passes_in_episode
+            info["passes_strict"] = self.passes_strict_in_episode
             info["scored_after_pass"] = 1.0 if (
                 self.match_result == 1 and self.passes_in_episode > 0
             ) else 0.0
@@ -838,10 +850,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # ("parked far from the goal mouth"). An active heuristic turns it
         # into a race that a fresh policy loses (observed: success 0.0 at
         # blue_goal_rate 0.41 after 2.9M steps, curriculum never promotes),
-        # so the heuristic only engages from level 2 upward.
+        # so the heuristic only engages from level 3 upward. Level 2 (pass
+        # drill) is staged the same way and keeps the blues parked too.
         heuristic_active = (
             self.blue_heuristic == "attacker"
-            and int(getattr(self, "curriculum_level", 5)) > 1
+            and int(getattr(self, "curriculum_level", 5)) > 2
         )
         if heuristic_active:
             # Blue 0 = aggressive (just chase + shoot), Blue 1 = defensive
@@ -929,6 +942,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
         in_grace = self.total_steps <= self.oob_grace_steps
         progress = self.current_step / self.max_steps
+        level = int(getattr(self, "curriculum_level", 5))
 
         # Time penalty (per step, halved while ball is in defensive half so
         # defense isn't punished). Applied first so terminals also pay it.
@@ -943,6 +957,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         if abs(ball.x) > max_x and abs(ball.y) <= goal_half_width:
             done = True
             if ball.x < 0:  # Yellow scored
+                if level == 2:
+                    # L2 pass drill: the goal is not the objective. End the
+                    # episode neutrally so shooting cannot outcompete passing.
+                    self.match_result = 0
+                    return rewards, done, truncated
                 # Same condition as info["scored_after_pass"], so the reward
                 # and the logged metric can never disagree.
                 rewards += (
@@ -1002,7 +1021,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # Ball→Goal signed delta — shared. Rewards ball moving toward
             # opponent goal (progress toward scoring).
             dist_ball_goal = self._dist_ball_to_goal(ball.x, ball.y)
-            if self.last_dist_ball_goal is not None:
+            if self.last_dist_ball_goal is not None and level != 2:
                 goal_delta = self.last_dist_ball_goal - dist_ball_goal
                 rewards += float(np.clip(goal_delta * 1.0, -0.1, 0.15))
             self.last_dist_ball_goal = dist_ball_goal
@@ -1029,9 +1048,31 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             for b in blues
         )
 
+        has_pass = (ya_has_pass, yb_has_pass)
+
         if blue_has:
             self.blue_touched_since_yellow = True
             self.last_yellow_carrier = None
+            self._release = None
+            self._strict_pending = None
+
+        # Strict pass, stage 2: the receiver of a candidate pass must keep
+        # the ball for STRICT_PASS_HOLD_STEPS consecutive steps. Runs before
+        # the loose detector so the step that opens a candidate is not also
+        # counted as a hold step.
+        strict_event = False
+        if self._strict_pending is not None:
+            recv, held = self._strict_pending
+            if has_pass[recv]:
+                held += 1
+                if held >= STRICT_PASS_HOLD_STEPS:
+                    self.passes_strict_in_episode += 1
+                    strict_event = True
+                    self._strict_pending = None
+                else:
+                    self._strict_pending = (recv, held)
+            else:
+                self._strict_pending = None
 
         current_carrier = None
         if ya_has_pass and not yb_has_pass:
@@ -1047,12 +1088,56 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 prev = yellows[self.last_yellow_carrier]
                 ball_to_prev = math.hypot(ball.x - prev.x, ball.y - prev.y)
                 if ball_to_prev > 0.5:
-                    rewards += 3.0
+                    if level != 2:
+                        rewards += 3.0
                     self.passes_in_episode += 1
+                    # Strict pass, stage 1: was the release a kick aimed at
+                    # this receiver? Then the hold check above takes over.
+                    if self._is_strict_release(current_carrier):
+                        self._strict_pending = (current_carrier, 1)
             self.last_yellow_carrier = current_carrier
             self.blue_touched_since_yellow = False
 
+        # Release bookkeeping, after the detector so the detector still sees
+        # the release that led to this step. The first step after a carrier
+        # loses the ball records ball velocity and both yellows' positions:
+        # that is the kick, judged before anyone knows where the ball ends up.
+        if ya_has_pass or yb_has_pass:
+            self._release = None
+        elif self.last_yellow_carrier is not None and self._release is None:
+            self._release = (
+                self.last_yellow_carrier,
+                (ball.v_x, ball.v_y),
+                (ball.x, ball.y),
+                ((ya.x, ya.y), (yb.x, yb.y)),
+            )
+
+        if level == 2 and strict_event:
+            # L2 pass drill terminal: the strict pass IS the goal.
+            rewards += self.goal_reward
+            rewards += (self.max_steps - self.current_step) * 0.001
+            self.match_result = 1
+            done = True
+
         return rewards, done, truncated
+
+    def _is_strict_release(self, receiver: int) -> bool:
+        """Strict pass, stage 1: did the last release leave the passer at
+        kick speed, heading for `receiver`?"""
+        rel = self._release
+        if rel is None:
+            return False
+        (vx, vy), (bx, by), ypos = rel[1], rel[2], rel[3]
+        speed = math.hypot(vx, vy)
+        if speed < STRICT_PASS_MIN_SPEED:
+            return False
+        tx, ty = ypos[receiver][0] - bx, ypos[receiver][1] - by
+        norm = math.hypot(tx, ty)
+        if norm < 1e-6:
+            return False
+        cos = (vx * tx + vy * ty) / (speed * norm)
+        angle = math.degrees(math.acos(max(-1.0, min(1.0, cos))))
+        return angle < STRICT_PASS_MAX_ANGLE_DEG
 
     # ---------- initial positions ----------
 
@@ -1063,6 +1148,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         (x ≈ -max_x + 1..2.5), both yellows behind the ball facing the goal,
         both blues parked on yellow's home half — clear shot, no static
         obstacle in the way. This is the 1v1 Level-1 trick adapted to 2v2.
+        Level 2: pass drill. Carrier with the ball at the dribbler in the
+        attacking half, mate 1.5-3 m away, both roughly facing each other,
+        blues parked on the far half. The only terminal reward is a strict
+        pass (see _calculate_team_reward_and_done).
         Level 5: chaotic spawn (original setup) — ball anywhere, yellows on
         their own side, blues between yellows and the attack goal.
         Switch happens externally via set_curriculum_level once the rolling
@@ -1103,6 +1192,39 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 y=float(rng.uniform(-2.0, 2.0)),
                 theta=float(rng.uniform(-180, 180)),
             )
+            return pos
+
+        if level == 2:
+            # LEVEL 2 — pass drill. Asks one question: can the pair learn
+            # kick-and-receive at all when nothing else pays? Heading jitter
+            # ±30° so the carrier still has to aim, blues out of the way.
+            self._episode_scenario = "level2"
+            carrier_idx = int(rng.integers(0, 2))
+            mate_idx = 1 - carrier_idx
+            cx = float(rng.uniform(-2.5, -0.5))
+            cy = float(rng.uniform(-1.5, 1.5))
+            ang = float(rng.uniform(-math.pi, math.pi))
+            d = float(rng.uniform(1.5, 3.0))
+            mx, my = self._clip_field(
+                cx + d * math.cos(ang), cy + d * math.sin(ang), margin=0.5
+            )
+            to_mate = np.array([mx - cx, my - cy])
+            to_mate = to_mate / max(1e-6, float(np.linalg.norm(to_mate)))
+            base = math.degrees(math.atan2(to_mate[1], to_mate[0]))
+            theta_c = base + float(rng.uniform(-30.0, 30.0))
+            theta_m = base + 180.0 + float(rng.uniform(-30.0, 30.0))
+            bx, by = self._ball_in_front(rng, cx, cy, to_mate)
+            pos.ball = Ball(x=bx, y=by)
+            yellows = [None, None]
+            yellows[carrier_idx] = Robot(x=cx, y=cy, theta=theta_c)
+            yellows[mate_idx] = Robot(x=mx, y=my, theta=theta_m)
+            pos.robots_yellow[0], pos.robots_yellow[1] = yellows
+            for i in range(2):
+                pos.robots_blue[i] = Robot(
+                    x=float(rng.uniform(1.5, max_x - 0.5)),
+                    y=float(rng.uniform(-2.0, 2.0)),
+                    theta=float(rng.uniform(-180, 180)),
+                )
             return pos
 
         # LEVEL 5 — scenario roll: staged pass situation vs. chaos.

@@ -139,6 +139,15 @@ N_YELLOW = 2
 STRICT_PASS_MIN_SPEED = 1.0       # m/s at release; kicks are 3-6, roll-offs ~0.3
 STRICT_PASS_MAX_ANGLE_DEG = 30.0  # ball velocity vs. direction to the receiver
 STRICT_PASS_HOLD_STEPS = 4        # receiver keeps possession (0.1 s)
+# L2 pass drill. Under exploration the strict pass (+10) never occurs — a
+# random policy kicks 0.3x per episode and 0 of 45 kicks were received — and
+# the approach shaping charges every kick ~-0.6 while the ball flies off, so
+# a from-scratch run learned to hold the ball and run out the clock. Three
+# fixes, all gated on level 2: approach shaping cannot go negative, the first
+# release pays for a kick-speed ball heading for the mate, and the episode
+# ends 2 s after that first release (one attempt per episode).
+L2_AIMED_KICK_BONUS = 2.0
+L2_RELEASE_WINDOW = 80            # steps after the first release
 N_BLUE = 2
 
 
@@ -360,6 +369,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.passes_strict_in_episode = 0
         self._release = None         # (passer, ball_v, ball_pos, yellow_pos) at loss of possession
         self._strict_pending = None  # (receiver, held_steps) after a kicked, aimed release
+        self._l2_release_step = None  # L2 drill: step of the first release
         self.blue_goal_scored = False
         self.is_dribbling_y = [False, False]
         self.dribble_start_pos_y = [None, None]
@@ -1013,9 +1023,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # Rewards moving toward the ball, penalizes moving away.
             if self.last_dist_to_ball is None:
                 self.last_dist_to_ball = [dist_a, dist_b]
+            # On the L2 drill only the approach is rewarded; the ball moving
+            # away is what a kick looks like from the kicker's side.
+            lo = 0.0 if level == 2 else -0.05
             for i in range(2):
                 delta = self.last_dist_to_ball[i] - dists[i]
-                rewards[i] += float(np.clip(delta * 0.5, -0.05, 0.05))
+                rewards[i] += float(np.clip(delta * 0.5, lo, 0.05))
             self.last_dist_to_ball = [dist_a, dist_b]
 
             # Ball→Goal signed delta — shared. Rewards ball moving toward
@@ -1111,12 +1124,28 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 (ball.x, ball.y),
                 ((ya.x, ya.y), (yb.x, yb.y)),
             )
+            if level == 2 and self._l2_release_step is None:
+                # L2 stage 1: the first release pays for a kick-speed ball
+                # heading for the mate, received or not. This is the signal
+                # that exists under exploration; the +10 below does not.
+                self._l2_release_step = self.current_step
+                if self._is_strict_release(1 - self.last_yellow_carrier):
+                    rewards += L2_AIMED_KICK_BONUS
 
         if level == 2 and strict_event:
             # L2 pass drill terminal: the strict pass IS the goal.
             rewards += self.goal_reward
             rewards += (self.max_steps - self.current_step) * 0.001
             self.match_result = 1
+            done = True
+        elif (
+            level == 2
+            and self._l2_release_step is not None
+            and self.current_step - self._l2_release_step >= L2_RELEASE_WINDOW
+        ):
+            # One attempt per episode: no strict pass within the window
+            # after the first release ends the episode neutrally.
+            self.match_result = 0
             done = True
 
         return rewards, done, truncated

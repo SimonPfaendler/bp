@@ -61,7 +61,8 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
                 curriculum_start_level=None, blue_heuristic=None,
-                goal_reward_solo=None, curriculum_target_level=5):
+                goal_reward_solo=None, curriculum_target_level=5,
+                pass_gate="loose"):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
@@ -80,6 +81,9 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
             # The env promotes itself to this level at 90 % rolling success.
             # Drill runs pin it to the start level so they stay on the drill.
             curriculum_target_level=curriculum_target_level,
+            # "strict": goal_reward, the +3 bonus and has_passed listen to
+            # the strict pass counter instead of the loose one.
+            pass_gate=pass_gate,
         )
         env.reset(seed=seed)
         return env
@@ -185,6 +189,9 @@ class StatsCallback(BaseCallback):
         # Strict counter (kick-speed release aimed at the receiver + hold);
         # the loose one above counts fumble + pick-up too.
         self.passes_strict_buffer = deque(maxlen=300)
+        self.sasp_buffer = deque(maxlen=300)   # scored after a STRICT pass
+        self.pass_strict = deque(maxlen=200)
+        self.chaos_strict = deque(maxlen=300)
         self.scored_after_pass_buffer = deque(maxlen=300)
         # Per-scenario split: the thesis question is whether passing learned
         # in the staged scenario GENERALIZES to chaos spawns — without the
@@ -213,7 +220,13 @@ class StatsCallback(BaseCallback):
                 self.scored_after_pass_buffer.append(
                     float(infos[i]["scored_after_pass"])
                 )
+            if "scored_after_strict_pass" in infos[i]:
+                self.sasp_buffer.append(float(infos[i]["scored_after_strict_pass"]))
             scen = infos[i].get("scenario")
+            if scen == "pass":
+                self.pass_strict.append(float(infos[i].get("passes_strict", 0.0)))
+            elif scen == "chaos":
+                self.chaos_strict.append(float(infos[i].get("passes_strict", 0.0)))
             if scen == "pass":
                 self.pass_success.append(float(infos[i].get("is_success", 0.0)))
                 self.pass_passes.append(float(infos[i].get("passes", 0.0)))
@@ -242,6 +255,21 @@ class StatsCallback(BaseCallback):
             self.logger.record(
                 "rollout/passes_strict_per_episode",
                 float(np.mean(self.passes_strict_buffer)),
+            )
+        if self.sasp_buffer:
+            self.logger.record(
+                "rollout/scored_after_strict_pass_rate",
+                float(np.mean(self.sasp_buffer)),
+            )
+        if self.pass_strict:
+            self.logger.record(
+                "scenario_pass/passes_strict_per_episode",
+                float(np.mean(self.pass_strict)),
+            )
+        if self.chaos_strict:
+            self.logger.record(
+                "scenario_chaos/passes_strict_per_episode",
+                float(np.mean(self.chaos_strict)),
             )
         if self.scored_after_pass_buffer:
             self.logger.record(
@@ -564,11 +592,11 @@ class PassScenarioScheduleCallback(BaseCallback):
 def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   pass_scenario_prob=0.0, curriculum_start_level=None,
                   blue_heuristic=None, goal_reward_solo=None,
-                  curriculum_target_level=5):
+                  curriculum_target_level=5, pass_gate="loose"):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob,
                     curriculum_start_level, blue_heuristic, goal_reward_solo,
-                    curriculum_target_level)
+                    curriculum_target_level, pass_gate)
         for i in range(n_envs)
     ]
     if algo == "masac":
@@ -591,7 +619,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           bc_coef=0.5, pass_scenario_prob_start=None, net="flat",
           start_level=None, load_buffer="auto", blue_heuristic=None,
           goal_reward_solo=None, target_action_std=None,
-          noise_repeat_s=None, noise_repeat_max=16, target_level=None):
+          noise_repeat_s=None, noise_repeat_max=16, target_level=None,
+          pass_gate="loose"):
     assert algo in ("masac", "sac"), algo
     assert blue_heuristic in (None, "attacker"), blue_heuristic
     assert net in ("flat", "deepsets", "deepsets_mean"), net
@@ -673,6 +702,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         blue_heuristic=blue_heuristic,
         goal_reward_solo=goal_reward_solo,
         curriculum_target_level=effective_target_level,
+        pass_gate=pass_gate,
     )
     if goal_reward_solo is not None:
         print(
@@ -1049,6 +1079,10 @@ if __name__ == "__main__":
     parser.add_argument("--start_level", type=int, default=None,
                         help="Curriculum start level. Default: auto — 5 with "
                              "--init_path (warm start), 1 from scratch.")
+    parser.add_argument("--pass_gate", default="loose", choices=["loose", "strict"],
+                        help="Which pass counter gates goal_reward, the +3 "
+                             "bonus and has_passed. 'strict' = kick-speed, "
+                             "aimed, held. Combine with --goal_reward_solo.")
     parser.add_argument("--target_level", type=int, default=None,
                         help="Curriculum target level. Default 5. Set equal "
                              "to --start_level to stay on a drill (2 or 3).")
@@ -1100,4 +1134,5 @@ if __name__ == "__main__":
         noise_repeat_s=args.noise_repeat_s,
         noise_repeat_max=args.noise_repeat_max,
         target_level=args.target_level,
+        pass_gate=args.pass_gate,
     )

@@ -10,6 +10,7 @@ def run_experiment(
     pass_scenario_prob_start=None, net="flat", load_buffer="auto",
     start_level=None, blue_heuristic=None, goal_reward_solo=None,
     target_action_std=None, noise_repeat_s=None, target_level=None,
+    pass_gate=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -39,6 +40,8 @@ def run_experiment(
         cmd += f" --noise_repeat_s {noise_repeat_s}"
     if target_level is not None:
         cmd += f" --target_level {target_level}"
+    if pass_gate is not None:
+        cmd += f" --pass_gate {pass_gate}"
     os.system(cmd)
 
 
@@ -85,6 +88,15 @@ def main():
     #                      pass; this run asks whether that survives once
     #                      solo play is possible again, or erodes like every
     #                      L5 run before it. Watch passes_strict_per_episode.
+    #   LEVEL=4            the L3 drill with the blue heuristic active — the
+    #                      pass has to come off under pressure. From L3.
+    #   LEVEL=5 PASS_GATE=strict SOLO=<x>
+    #                      the full game with the payoff gated on the STRICT
+    #                      counter: goal after a strict pass = 10, solo goal =
+    #                      SOLO (default 10 = symmetric), +3 for a strict
+    #                      pass instead of a loose one. SOLO=2 is the honest
+    #                      rerun of the asymmetric-payoff test, which used
+    #                      to pay "goal after a fumble".
     #
     # start_level == target_level pins the run to the drill; without it both
     # the callback and the env promote to L5 at 90 % success, which L3 can
@@ -100,7 +112,10 @@ def main():
     # and selfplay/live_success_rate (success == strict pass on L2,
     # == goal after strict pass on L3).
     level = int(os.environ.get("LEVEL", "2"))
-    assert level in (2, 3, 5), level
+    assert level in (2, 3, 4, 5), level
+    pass_gate = os.environ.get("PASS_GATE")            # None -> loose
+    solo = os.environ.get("SOLO")                      # None -> symmetric
+    goal_reward_solo = float(solo) if solo is not None else None
     pass_scenario_prob = 0.35 if level == 5 else 0.0
     init_path = os.environ.get("INIT_PATH")  # None = from scratch
     reward_type = "dense"
@@ -115,10 +130,12 @@ def main():
         None, init_path, total_steps, algo,
         pass_scenario_prob, None,
         None, "flat", "off",
-        level, blue_heuristic, None, None, None, level,
+        level, blue_heuristic, goal_reward_solo, None, None, level,
+        pass_gate,
     )
-    print(f"Submitted Gen-15 SAC drill L{level}: job {job.job_id} "
-          f"[init={init_path or 'scratch'}, start=target={level}]")
+    print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} "
+          f"[init={init_path or 'scratch'}, start=target={level}, "
+          f"pass_gate={pass_gate or 'loose'}, solo={goal_reward_solo}]")
 
 
 if __name__ == "__main__":

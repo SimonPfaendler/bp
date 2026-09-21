@@ -180,6 +180,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         pass_scenario_prob=0.0,
         goal_reward=10.0,
         goal_reward_solo=None,
+        pass_gate="loose",
     ):
         super().__init__(
             field_type=1,
@@ -229,6 +230,15 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             float(goal_reward_solo) if goal_reward_solo is not None
             else float(goal_reward)
         )
+        # Which pass counter the payoff listens to. "loose" is the historical
+        # detector (carrier switch, ball >= 0.5 m from the previous carrier),
+        # which the replay audit showed to fire on fumble + pick-up — so the
+        # earlier asymmetric-payoff test paid "goal after a fumble". "strict"
+        # gates goal_reward, the +3 pass bonus and the has_passed observation
+        # on the strict counter instead (kick-speed, aimed, held). Default
+        # stays "loose" so existing runs and checkpoints keep their meaning.
+        assert pass_gate in ("loose", "strict"), pass_gate
+        self.pass_gate = pass_gate
         # Frozen-model input dim (filled on lazy-load). If older than current
         # obs (e.g. v3 trained without role-index), we strip role-index dims
         # before predict so the same policy class can act as blue.
@@ -430,6 +440,9 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             info["scored_after_pass"] = 1.0 if (
                 self.match_result == 1 and self.passes_in_episode > 0
             ) else 0.0
+            info["scored_after_strict_pass"] = 1.0 if (
+                self.match_result == 1 and self.passes_strict_in_episode > 0
+            ) else 0.0
             info["scenario"] = self._episode_scenario
             if self._episode_scenario == "pass":
                 info["pass_variant"] = getattr(
@@ -521,6 +534,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             v / self.max_ball_v, -self.NORM_BOUNDS, self.NORM_BOUNDS
         ))
 
+    def _has_passed(self) -> bool:
+        """Did a pass happen this episode, by the counter pass_gate selects."""
+        if self.pass_gate == "strict":
+            return self.passes_strict_in_episode > 0
+        return self.passes_in_episode > 0
+
     def _episode_state_obs(self, is_yellow, idx) -> np.ndarray:
         """The episode-scoped variables the reward function reads.
 
@@ -537,7 +556,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 [0.0, 0.0, 0.0, time_remaining], dtype=np.float32
             )
         return np.array([
-            1.0 if self.passes_in_episode > 0 else 0.0,
+            1.0 if self._has_passed() else 0.0,
             1.0 if self.last_yellow_carrier == idx else 0.0,
             1.0 if self.blue_touched_since_yellow else 0.0,
             time_remaining,
@@ -869,6 +888,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # blue_goal_rate 0.41 after 2.9M steps, curriculum never promotes),
         # so the heuristic only engages from level 4 upward. Levels 2 and 3
         # (pass drills) are staged the same way and keep the blues parked.
+        # Level 4 is the L3 drill with the blues let loose: they start from
+        # their parking zone, so the pass has to come off under pressure.
         heuristic_active = (
             self.blue_heuristic == "attacker"
             and int(getattr(self, "curriculum_level", 5)) > 3
@@ -960,7 +981,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         in_grace = self.total_steps <= self.oob_grace_steps
         progress = self.current_step / self.max_steps
         level = int(getattr(self, "curriculum_level", 5))
-        drill = level in (2, 3)
+        drill = level in (2, 3, 4)
+        finish_drill = level in (3, 4)   # L4 = L3 with active blues
 
         # Time penalty (per step, halved while ball is in defensive half so
         # defense isn't punished). Applied first so terminals also pay it.
@@ -976,7 +998,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             done = True
             if ball.x < 0:  # Yellow scored
                 if drill and not (
-                    level == 3 and self.passes_strict_in_episode > 0
+                    finish_drill and self.passes_strict_in_episode > 0
                 ):
                     # Pass drills: a goal that does not follow a strict pass
                     # is not the objective. End the episode neutrally so
@@ -985,10 +1007,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                     # branch below and is the success terminal.
                     self.match_result = 0
                     return rewards, done, truncated
-                # Same condition as info["scored_after_pass"], so the reward
-                # and the logged metric can never disagree.
+                # pass_gate="loose": same condition as
+                # info["scored_after_pass"]; "strict": same condition as
+                # info["scored_after_strict_pass"]. Reward and logged metric
+                # can never disagree.
                 rewards += (
-                    self.goal_reward if self.passes_in_episode > 0
+                    self.goal_reward if self._has_passed()
                     else self.goal_reward_solo
                 )
                 rewards += (self.max_steps - self.current_step) * 0.001
@@ -1048,7 +1072,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # opponent goal (progress toward scoring).
             dist_ball_goal = self._dist_ball_to_goal(ball.x, ball.y)
             goal_shaping = not drill or (
-                level == 3 and self.passes_strict_in_episode > 0
+                finish_drill and self.passes_strict_in_episode > 0
             )
             if self.last_dist_ball_goal is not None and goal_shaping:
                 goal_delta = self.last_dist_ball_goal - dist_ball_goal
@@ -1117,7 +1141,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 prev = yellows[self.last_yellow_carrier]
                 ball_to_prev = math.hypot(ball.x - prev.x, ball.y - prev.y)
                 if ball_to_prev > 0.5:
-                    if not drill:
+                    if not drill and self.pass_gate == "loose":
                         rewards += 3.0
                     self.passes_in_episode += 1
                     # Strict pass, stage 1: was the release a kick aimed at
@@ -1148,13 +1172,18 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 if self._is_strict_release(1 - self.last_yellow_carrier):
                     rewards += DRILL_AIMED_KICK_BONUS
 
+        if strict_event and not drill and self.pass_gate == "strict":
+            # Full game, strict gate: the pass bonus moves from the loose
+            # detector to the strict one.
+            rewards += 3.0
+
         if level == 2 and strict_event:
             # L2 pass drill terminal: the strict pass IS the goal.
             rewards += self.goal_reward
             rewards += (self.max_steps - self.current_step) * 0.001
             self.match_result = 1
             done = True
-        elif level == 3 and strict_event and self._l3_pass_step is None:
+        elif finish_drill and strict_event and self._l3_pass_step is None:
             # L3: the strict pass pays once and the episode goes on — the
             # receiver now has L3_SHOT_WINDOW steps to finish.
             rewards += L3_PASS_REWARD
@@ -1171,7 +1200,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             self.match_result = 0
             done = True
         elif (
-            level == 3
+            finish_drill
             and self._l3_pass_step is not None
             and self.current_step - self._l3_pass_step >= L3_SHOT_WINDOW
         ):
@@ -1238,6 +1267,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         Level 3: pass + finish. Mate in shooting range, carrier 1.5-3 m
         upfield of it, blues parked. The strict pass pays once, the goal that
         follows it is the terminal.
+        Level 4: the L3 drill with the blue heuristic active.
         Level 5: chaotic spawn (original setup) — ball anywhere, yellows on
         their own side, blues between yellows and the attack goal.
         Switch happens externally via set_curriculum_level once the rolling
@@ -1297,12 +1327,15 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 pos, rng, max_x, carrier_idx, cx, cy, mx, my
             )
 
-        if level == 3:
+        if level in (3, 4):
             # LEVEL 3 — pass + finish. Same drill, but the mate stands in
             # shooting range (the L1 ball zone) and the carrier upfield of
             # it, so the pass is a forward or square ball and the goal is
             # reachable right after the reception.
-            self._episode_scenario = "level3"
+            # LEVEL 4 — identical spawn and rewards, but the blue heuristic
+            # is active (see _build_commands): blue 0 hunts the ball, blue 1
+            # drops onto the shot line. The bridge between the drills and L5.
+            self._episode_scenario = f"level{level}"
             carrier_idx = int(rng.integers(0, 2))
             mx = float(rng.uniform(-max_x + 1.0, -max_x + 2.3))
             my = float(rng.uniform(-1.2, 1.2))
@@ -1313,9 +1346,32 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 mx + d * math.cos(ang), my + d * math.sin(ang), margin=0.5
             )
             cx = min(cx, 0.5)  # stay clear of the parked blues
-            return self._drill_frame(
+            pos = self._drill_frame(
                 pos, rng, max_x, carrier_idx, cx, cy, mx, my
             )
+            if level == 4:
+                # From the parking zone the blues never arrive inside a
+                # ~90-step attempt (the L3 policy scored .90 on L4 with them
+                # there). Put the hunter 2-3 m from the carrier, on the side
+                # away from the mate, and the second blue in front of the
+                # goal. Drawn AFTER the shared tail so L3 spawns stay as
+                # they were.
+                away = math.atan2(cy - my, cx - mx)
+                a_h = away + float(rng.uniform(-math.radians(60.0), math.radians(60.0)))
+                d_h = float(rng.uniform(2.0, 3.0))
+                hx, hy = self._clip_field(
+                    cx + d_h * math.cos(a_h), cy + d_h * math.sin(a_h), margin=0.3
+                )
+                pos.robots_blue[0] = Robot(
+                    x=hx, y=hy,
+                    theta=math.degrees(math.atan2(cy - hy, cx - hx)),
+                )
+                pos.robots_blue[1] = Robot(
+                    x=float(rng.uniform(-max_x + 0.35, -max_x + 0.7)),
+                    y=float(rng.uniform(-0.4, 0.4)),
+                    theta=0.0,
+                )
+            return pos
 
         # LEVEL 5 — scenario roll: staged pass situation vs. chaos.
         if rng.random() < self.pass_scenario_prob:

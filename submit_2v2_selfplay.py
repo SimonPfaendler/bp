@@ -9,7 +9,7 @@ def run_experiment(
     pass_scenario_prob=0.0, demo_dir=None,
     pass_scenario_prob_start=None, net="flat", load_buffer="auto",
     start_level=None, blue_heuristic=None, goal_reward_solo=None,
-    target_action_std=None, noise_repeat_s=None,
+    target_action_std=None, noise_repeat_s=None, target_level=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -37,6 +37,8 @@ def run_experiment(
         cmd += f" --target_action_std {target_action_std}"
     if noise_repeat_s is not None:
         cmd += f" --noise_repeat_s {noise_repeat_s}"
+    if target_level is not None:
+        cmd += f" --target_level {target_level}"
     os.system(cmd)
 
 
@@ -62,71 +64,53 @@ def main():
     # schedule, making any SAC-vs-MASAC comparison at that checkpoint an
     # apples-to-oranges mid-schedule-vs-finished comparison.
 
-    # GENERATION 14 — demo ablation. ONE variable, isolated.
+    # GENERATION 15 — independent SAC on the pass drills, from scratch.
     #
-    # Reading all ten 2v2-vsheur runs end to end, the best policy is four
-    # weeks old: 20260811-132942 finished at success .214 / scenario_pass
-    # .508 / chaos .078. Everything after it is worse, monotonically, down
-    # to Gen 13 at .068 / .186 / .017. Three things changed in between:
-    #   1. asymmetric payoff       (47b40a8, 11.08) — isolated by 161843,
-    #      which alone dropped success .214 -> .113
-    #   2. scenario redesign       (9c6204a, 16.08) — heading jitter +-45deg,
-    #      loose ball 30%, new `pressed` variant at +-90deg / 40%
-    #   3. demo mixing + BC loss   (9c6204a, 16.08) — 25% of every batch
-    # 2 and 3 landed in the SAME commit and have never been separated.
+    # The strict pass counter (kick-speed release, aimed at the mate, held by
+    # the receiver) showed that no SAC run ever passed: the best checkpoint,
+    # 20260811-141655, replayed in the env of its time scores .245 overall and
+    # .55 in the staged pass scenario with 3 strict passes and 0 goals after
+    # a strict pass in 200 episodes — a soloist. The only thing that produced
+    # real passes so far is the drill curriculum (MAPPO: 0 -> .57 strict
+    # passes/episode on L2 within 8M steps), and that is a property of the
+    # task, not of the algorithm. This generation puts SAC on the same task.
     #
-    # Gen 13a already restored the symmetric payoff (undoing 1) and still
-    # only reached .068, so the residual regression is in 2 and/or 3.
+    #   LEVEL=2 (default)  pass drill, from scratch. Terminal = strict pass.
+    #   LEVEL=3            pass + finish. Chain it from the L2 result:
+    #                      LEVEL=3 INIT_PATH=models/<L2 run>_final.zip
     #
-    # Why demos are the prime suspect: 132942 is the ONLY run without them.
-    # bc_loss sits at ~.015 in every later run, i.e. the BC term converged
-    # long ago and teaches nothing new, while 25% of every batch keeps being
-    # drawn from a fixed, never-evicted distribution. For an off-policy
-    # critic that is a permanent distribution shift, not a warmup aid.
-    # Consistent with that, actor_loss (~ alpha*log_pi - Q) degraded from
-    # -2.42 in 132942 to -0.35 in Gen 13a: the actor finds lower-Q actions.
+    # start_level == target_level pins the run to the drill; without it both
+    # the callback and the env promote to L5 at 90 % success, which L3 can
+    # reach. Blues are parked and passive on both drills whatever
+    # blue_heuristic says; it is set for parity with the L5 runs to come.
     #
-    # 14a = no demos, 14b = demos. Everything else identical, so the pair
-    # measures the demo effect alone. 14a doubles as the control against
-    # 132942: if it returns to ~.2 the regression is the demos, if it stays
-    # at ~.07 it is the scenario redesign, which is then the next ablation.
+    # No warm start from the L5 checkpoints: they are 52-dim, lose ~60 % of
+    # their strength under today's ball-speed normalisation (.245 -> .095),
+    # and bring the solo habit along. load_buffer="off": an L2 buffer holds
+    # L2 rewards and would poison an L3 critic.
     #
-    # Symmetric payoff in BOTH arms (goal_reward_solo=None): Gen 13 showed
-    # the asymmetric variant is strictly worse (.050 vs .068) even once it
-    # became representable, so it stays out until the regression is found.
-    #
-    # load_buffer="off" in both: the 56-dim layout cannot load any stored
-    # 52-dim buffer anyway, and keeping it equal across arms matters more
-    # than the refill cost.
-    warm_chain = "models/2v2_selfplay_SAC_vsheur_dense_seed822_20260809-220118_final.zip"
+    # Compare against the MAPPO runs on rollout/passes_strict_per_episode
+    # and selfplay/live_success_rate (success == strict pass on L2,
+    # == goal after strict pass on L3).
+    level = int(os.environ.get("LEVEL", "2"))
+    assert level in (2, 3), level
+    init_path = os.environ.get("INIT_PATH")  # None = from scratch
     reward_type = "dense"
     n_pairs = 24
     seed = 822
     total_steps = 3_000_000
     algo = "sac"
-    pass_scenario_prob = 0.35
-    pass_scenario_prob_start = None
     blue_heuristic = "attacker"
 
-    runs = [
-        # (label, demo_dir)
-        ("14a_nodemos", None),
-        ("14b_demos", "pass_demos_v3"),
-    ]
-
-    jobs = []
-    for label, demos in runs:
-        job = executor.submit(
-            run_experiment, reward_type, seed, n_pairs,
-            None, warm_chain, total_steps, algo,
-            pass_scenario_prob, demos,
-            pass_scenario_prob_start, "flat", "off",
-            5, blue_heuristic, None, None, None,
-        )
-        jobs.append((label, job))
-        print(f"Submitted {label}: job {job.job_id}")
-    print(f"{len(jobs)} Gen-14 job(s) submitted [demo ablation: a=none, "
-          f"b=pass_demos_v3; symmetric payoff both; init={warm_chain}]")
+    job = executor.submit(
+        run_experiment, reward_type, seed, n_pairs,
+        None, init_path, total_steps, algo,
+        0.0, None,
+        None, "flat", "off",
+        level, blue_heuristic, None, None, None, level,
+    )
+    print(f"Submitted Gen-15 SAC drill L{level}: job {job.job_id} "
+          f"[init={init_path or 'scratch'}, start=target={level}]")
 
 
 if __name__ == "__main__":

@@ -61,7 +61,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
                 curriculum_start_level=None, blue_heuristic=None,
-                goal_reward_solo=None):
+                goal_reward_solo=None, curriculum_target_level=5):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
@@ -77,6 +77,9 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
             # env then spawns L5 scenarios whose stats sit as stale values
             # in the scenario_* logs for the whole L1 phase.
             curriculum_start_level=curriculum_start_level,
+            # The env promotes itself to this level at 90 % rolling success.
+            # Drill runs pin it to the start level so they stay on the drill.
+            curriculum_target_level=curriculum_target_level,
         )
         env.reset(seed=seed)
         return env
@@ -560,10 +563,12 @@ class PassScenarioScheduleCallback(BaseCallback):
 
 def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   pass_scenario_prob=0.0, curriculum_start_level=None,
-                  blue_heuristic=None, goal_reward_solo=None):
+                  blue_heuristic=None, goal_reward_solo=None,
+                  curriculum_target_level=5):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob,
-                    curriculum_start_level, blue_heuristic, goal_reward_solo)
+                    curriculum_start_level, blue_heuristic, goal_reward_solo,
+                    curriculum_target_level)
         for i in range(n_envs)
     ]
     if algo == "masac":
@@ -586,7 +591,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           bc_coef=0.5, pass_scenario_prob_start=None, net="flat",
           start_level=None, load_buffer="auto", blue_heuristic=None,
           goal_reward_solo=None, target_action_std=None,
-          noise_repeat_s=None, noise_repeat_max=16):
+          noise_repeat_s=None, noise_repeat_max=16, target_level=None):
     assert algo in ("masac", "sac"), algo
     assert blue_heuristic in (None, "attacker"), blue_heuristic
     assert net in ("flat", "deepsets", "deepsets_mean"), net
@@ -646,6 +651,11 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         else (5 if init_load else 1)
     )
 
+    # Curriculum target. Default 5 (the full game). The pass drills (levels
+    # 2 and 3) pin it to the start level: L3 is solvable to >90 %, and the
+    # promotion would otherwise drop a drill run straight into L5.
+    effective_target_level = 5 if target_level is None else int(target_level)
+
     # Optional pass-scenario schedule: start heavily staged, anneal to the
     # target prob over the run (bridge from staged passing to chaos).
     use_pass_schedule = pass_scenario_prob_start is not None
@@ -662,6 +672,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         curriculum_start_level=effective_start_level,
         blue_heuristic=blue_heuristic,
         goal_reward_solo=goal_reward_solo,
+        curriculum_target_level=effective_target_level,
     )
     if goal_reward_solo is not None:
         print(
@@ -954,7 +965,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         # see pass scenarios from step 0; from-scratch runs (e.g. the
         # deepsets arm, which cannot transfer weights) need the L1 phase.
         CurriculumCallback(
-            start_level=effective_start_level, target_level=5, threshold=0.9,
+            start_level=effective_start_level,
+            target_level=effective_target_level, threshold=0.9,
         ),
         CheckpointCallback(
             save_freq=20000, save_path=MODEL_DIR,
@@ -1037,6 +1049,9 @@ if __name__ == "__main__":
     parser.add_argument("--start_level", type=int, default=None,
                         help="Curriculum start level. Default: auto — 5 with "
                              "--init_path (warm start), 1 from scratch.")
+    parser.add_argument("--target_level", type=int, default=None,
+                        help="Curriculum target level. Default 5. Set equal "
+                             "to --start_level to stay on a drill (2 or 3).")
     parser.add_argument("--blue_heuristic", default=None,
                         choices=["attacker"],
                         help="Hand-coded blue team instead of a frozen "
@@ -1084,4 +1099,5 @@ if __name__ == "__main__":
         target_action_std=args.target_action_std,
         noise_repeat_s=args.noise_repeat_s,
         noise_repeat_max=args.noise_repeat_max,
+        target_level=args.target_level,
     )

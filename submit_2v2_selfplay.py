@@ -78,6 +78,13 @@ def main():
     #   LEVEL=2 (default)  pass drill, from scratch. Terminal = strict pass.
     #   LEVEL=3            pass + finish. Chain it from the L2 result:
     #                      LEVEL=3 INIT_PATH=models/<L2 run>_final.zip
+    #   LEVEL=5            CONTROL: the unmodified full game (solo goal pays
+    #                      in full, loose +3 on, ball-chasing blues, 35 %
+    #                      staged pass scenarios) from the L3 result. L3
+    #                      reached .99 strict passes / .93 goals after a
+    #                      pass; this run asks whether that survives once
+    #                      solo play is possible again, or erodes like every
+    #                      L5 run before it. Watch passes_strict_per_episode.
     #
     # start_level == target_level pins the run to the drill; without it both
     # the callback and the env promote to L5 at 90 % success, which L3 can
@@ -93,7 +100,8 @@ def main():
     # and selfplay/live_success_rate (success == strict pass on L2,
     # == goal after strict pass on L3).
     level = int(os.environ.get("LEVEL", "2"))
-    assert level in (2, 3), level
+    assert level in (2, 3, 5), level
+    pass_scenario_prob = 0.35 if level == 5 else 0.0
     init_path = os.environ.get("INIT_PATH")  # None = from scratch
     reward_type = "dense"
     n_pairs = 24
@@ -105,7 +113,7 @@ def main():
     job = executor.submit(
         run_experiment, reward_type, seed, n_pairs,
         None, init_path, total_steps, algo,
-        0.0, None,
+        pass_scenario_prob, None,
         None, "flat", "off",
         level, blue_heuristic, None, None, None, level,
     )

@@ -175,6 +175,31 @@ RESTART_BALL_MARGIN = 0.2
 RESTART_ROBOT_MARGIN = 0.3
 RESTART_BALL_OOB_PENALTY = 0.5    # charged to the team only if yellow put it out
 RESTART_ROBOT_OOB_PENALTY = 0.5   # charged to the robot that left
+# Rule-faithful restarts: a ball over the sideline is a throw-in for the team
+# that did not touch it last, a ball over a goal line a goal kick for the
+# defending team, or a corner for the attackers if the defenders put it out.
+# The taking team gets the ball at rest, the other team is moved
+# RESTART_CLEAR_DIST away and held still until the ball is in play (moved
+# RESTART_IN_PLAY_DIST) or RESTART_FREEZE_STEPS have passed. Without this a
+# clearance put the ball back where it left, next to the blue hunter, and a
+# missed blue shot left it beside the yellow goal.
+RESTART_CLEAR_DIST = 0.5
+RESTART_IN_PLAY_DIST = 0.05
+RESTART_FREEZE_STEPS = 40
+# Reverse curriculum on level 5 (difficulty in [0, 1]): the spawn is the
+# per-entity interpolation between the L4 drill frame (0: carrier with the
+# ball, mate in the zone, hunter 2-3 m off) and the chaos frame (1), both
+# drawn from the same RNG stream. Staged, easiest first — measured on the
+# L4 checkpoint, moving only one group 40 % of the way toward chaos leaves
+# goals after a strict pass at .85 (keeper) / .75 (hunter) but .00 (mate)
+# / .07 (ball) / .00 (carrier), so the three thirds of d move, in order,
+# the blues, then the mate, then ball + carrier. Each env promotes itself
+# by difficulty_step once the rolling rate of goals after a strict pass
+# over difficulty_window episodes clears difficulty_threshold. The staged
+# pass scenarios are not rolled while a difficulty is set. A chained run
+# must be started at the difficulty the previous one reached (log
+# curriculum/difficulty); checkpoints do not carry it.
+CURRICULUM_PHASES = 3
 # Under restarts="on" nothing accrues per step: no time penalty, no
 # truncation penalty, and the progress terms cannot go negative. Otherwise
 # conceding fast (-5) stays cheaper than defending for 1000 steps (-9 of
@@ -211,6 +236,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         dribble_rule="soft",
         shaping="v1",
         restarts="off",
+        difficulty=None,
+        difficulty_step=0.05,
+        difficulty_threshold=0.6,
+        difficulty_window=200,
     ):
         super().__init__(
             field_type=1,
@@ -286,6 +315,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # See RESTART_* above. "off" keeps the terminal OOB rules.
         assert restarts in ("off", "on"), restarts
         self.restarts = restarts
+        # Reverse curriculum, see the constants above. None = off.
+        self.difficulty = None if difficulty is None else float(difficulty)
+        self.difficulty_step = float(difficulty_step)
+        self.difficulty_threshold = float(difficulty_threshold)
+        self._diff_buffer = _deque(maxlen=int(difficulty_window))
         # Frozen-model input dim (filled on lazy-load). If older than current
         # obs (e.g. v3 trained without role-index), we strip role-index dims
         # before predict so the same policy class can act as blue.
@@ -362,6 +396,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.dribble_foul_in_episode = 0
         self.last_dist_to_goal_y = None     # shaping="team": off-ball progress
         self._restart_pending = False       # restarts="on": reposition after this step
+        self._restart_spec = None           # (kind, taker, x, y) for the ball restart
+        self._freeze = None                 # {team, until, bx, by}: held still after a restart
         self.ball_restarts = 0
         self.robot_restarts = 0
         self.is_dribbling_b = [False, False]
@@ -450,6 +486,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.dribble_foul_in_episode = 0
         self.last_dist_to_goal_y = None     # shaping="team": off-ball progress
         self._restart_pending = False       # restarts="on": reposition after this step
+        self._restart_spec = None           # (kind, taker, x, y) for the ball restart
+        self._freeze = None                 # {team, until, bx, by}: held still after a restart
         self.ball_restarts = 0
         self.robot_restarts = 0
         self.is_dribbling_b = [False, False]
@@ -538,6 +576,24 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                     self._success_buffer.clear()
                     self._curriculum_promoted = True
             info["curriculum_level"] = self.curriculum_level
+            if self.difficulty is not None:
+                # Reverse curriculum: promote on goals after a strict pass.
+                self._diff_buffer.append(info["scored_after_strict_pass"])
+                if (
+                    self.difficulty < 1.0
+                    and len(self._diff_buffer) >= self._diff_buffer.maxlen
+                ):
+                    rate = sum(self._diff_buffer) / len(self._diff_buffer)
+                    if rate >= self.difficulty_threshold:
+                        self.difficulty = float(min(
+                            1.0, round(self.difficulty + self.difficulty_step, 6)
+                        ))
+                        self._diff_buffer.clear()
+                        print(
+                            f"[env] difficulty -> {self.difficulty:.2f} "
+                            f"(goals after strict pass {rate:.2f})"
+                        )
+                info["difficulty"] = self.difficulty
             info["episode"] = {
                 "r": self.ep_reward,
                 "l": self.ep_length,
@@ -1017,6 +1073,16 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 self.frame.robots_blue[1], blue_action[1],
                 self.must_release_b[1], yellow=False,
             ))
+        frozen = self._frozen_team() if self._freeze is not None else None
+        if frozen is not None:
+            # Restart in progress: the non-taking team stands still.
+            lo = 0 if frozen == "y" else 2
+            for k in (lo, lo + 1):
+                c = cmds[k]
+                cmds[k] = Robot(
+                    yellow=c.yellow, id=c.id, v_x=0.0, v_y=0.0, v_theta=0.0,
+                    kick_v_x=0.0, dribbler=False,
+                )
         return cmds
 
     def _blue_heuristic_command(self, robot, personality="aggressive") -> Robot:
@@ -1132,13 +1198,18 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # No exits: out of bounds costs a little and play goes on from
             # a restart (see RESTART_* and _do_restart).
             if abs(ball.x) > max_x or abs(ball.y) > max_y:
-                if (
+                yellow_last = (
                     self.last_yellow_carrier is not None
                     and not self.blue_touched_since_yellow
-                ):
+                )
+                blue_last = self.blue_touched_since_yellow
+                if yellow_last:
                     rewards -= RESTART_BALL_OOB_PENALTY
                 self.ball_restarts += 1
                 self._restart_pending = True
+                self._restart_spec = self._classify_ball_out(
+                    ball, max_x, max_y, yellow_last, blue_last
+                )
             for i, r in enumerate(yellows):
                 if abs(r.x) > max_x or abs(r.y) > max_y:
                     rewards[i] -= RESTART_ROBOT_OOB_PENALTY
@@ -1386,6 +1457,47 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         angle = math.degrees(math.acos(max(-1.0, min(1.0, cos))))
         return angle < STRICT_PASS_MAX_ANGLE_DEG
 
+    def _classify_ball_out(self, ball, max_x, max_y, yellow_last, blue_last):
+        """Which restart a ball out of bounds is, and where it is taken.
+        Returns (kind, taker, x, y); taker None = nobody touched it yet."""
+        sgn = 1.0 if ball.y >= 0 else -1.0
+        if abs(ball.x) > max_x:
+            if ball.x < 0:  # over blue's goal line: yellow attacks here
+                if yellow_last:
+                    return ("goal_kick", "b", -max_x + 0.5, float(np.clip(ball.y, -1.0, 1.0)))
+                if blue_last:
+                    return ("corner", "y", -max_x + RESTART_BALL_MARGIN, sgn * (max_y - RESTART_BALL_MARGIN))
+            else:  # over yellow's goal line
+                if blue_last:
+                    return ("goal_kick", "y", max_x - 0.5, float(np.clip(ball.y, -1.0, 1.0)))
+                if yellow_last:
+                    return ("corner", "b", max_x - RESTART_BALL_MARGIN, sgn * (max_y - RESTART_BALL_MARGIN))
+        else:  # sideline
+            x = float(np.clip(ball.x, -max_x + RESTART_BALL_MARGIN, max_x - RESTART_BALL_MARGIN))
+            if yellow_last:
+                return ("throw_in", "b", x, sgn * (max_y - RESTART_BALL_MARGIN))
+            if blue_last:
+                return ("throw_in", "y", x, sgn * (max_y - RESTART_BALL_MARGIN))
+        return (
+            "neutral", None,
+            float(np.clip(ball.x, -max_x + RESTART_BALL_MARGIN, max_x - RESTART_BALL_MARGIN)),
+            float(np.clip(ball.y, -max_y + RESTART_BALL_MARGIN, max_y - RESTART_BALL_MARGIN)),
+        )
+
+    def _frozen_team(self):
+        """Team held still after a restart, until the ball is in play."""
+        f = self._freeze
+        if f is None:
+            return None
+        b = self.frame.ball
+        if (
+            self.current_step >= f["until"]
+            or math.hypot(b.x - f["bx"], b.y - f["by"]) >= RESTART_IN_PLAY_DIST
+        ):
+            self._freeze = None
+            return None
+        return f["team"]
+
     def _do_restart(self):
         """restarts="on": put whatever is out of bounds back on the field and
         restart play from rest. rsim.reset takes a full frame, so the current
@@ -1396,20 +1508,42 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         max_y = self.field.width / 2.0
         cur = self.frame
         pos = Frame()
-        bx = float(np.clip(cur.ball.x, -max_x + RESTART_BALL_MARGIN, max_x - RESTART_BALL_MARGIN))
-        by = float(np.clip(cur.ball.y, -max_y + RESTART_BALL_MARGIN, max_y - RESTART_BALL_MARGIN))
+        spec = self._restart_spec
+        self._restart_spec = None
+        if spec is not None:
+            _kind, taker, bx, by = spec
+        else:
+            taker = None
+            bx = float(np.clip(cur.ball.x, -max_x + RESTART_BALL_MARGIN, max_x - RESTART_BALL_MARGIN))
+            by = float(np.clip(cur.ball.y, -max_y + RESTART_BALL_MARGIN, max_y - RESTART_BALL_MARGIN))
         pos.ball = Ball(x=bx, y=by, v_x=0.0, v_y=0.0)
-        for team_in, team_out in (
-            (cur.robots_yellow, pos.robots_yellow),
-            (cur.robots_blue, pos.robots_blue),
+        other = {"y": "b", "b": "y"}.get(taker)
+        for key, team_in, team_out in (
+            ("y", cur.robots_yellow, pos.robots_yellow),
+            ("b", cur.robots_blue, pos.robots_blue),
         ):
             for i in range(2):
                 r = team_in[i]
-                team_out[i] = Robot(
-                    x=float(np.clip(r.x, -max_x + RESTART_ROBOT_MARGIN, max_x - RESTART_ROBOT_MARGIN)),
-                    y=float(np.clip(r.y, -max_y + RESTART_ROBOT_MARGIN, max_y - RESTART_ROBOT_MARGIN)),
-                    theta=float(r.theta),
-                )
+                x = float(np.clip(r.x, -max_x + RESTART_ROBOT_MARGIN, max_x - RESTART_ROBOT_MARGIN))
+                y = float(np.clip(r.y, -max_y + RESTART_ROBOT_MARGIN, max_y - RESTART_ROBOT_MARGIN))
+                if key == other:
+                    # The non-taking team keeps its distance from the ball.
+                    dx, dy = x - bx, y - by
+                    dist = math.hypot(dx, dy)
+                    if dist < RESTART_CLEAR_DIST:
+                        if dist < 1e-6:
+                            dx, dy, dist = 1.0, 0.0, 1.0
+                        x = bx + dx / dist * RESTART_CLEAR_DIST
+                        y = by + dy / dist * RESTART_CLEAR_DIST
+                        x = float(np.clip(x, -max_x + RESTART_ROBOT_MARGIN, max_x - RESTART_ROBOT_MARGIN))
+                        y = float(np.clip(y, -max_y + RESTART_ROBOT_MARGIN, max_y - RESTART_ROBOT_MARGIN))
+                team_out[i] = Robot(x=x, y=y, theta=float(r.theta))
+        self._freeze = None
+        if other is not None:
+            self._freeze = dict(
+                team=other, until=self.current_step + RESTART_FREEZE_STEPS,
+                bx=bx, by=by,
+            )
         self.rsim.reset(pos)
         self.frame = self.rsim.get_frame()
         self.last_frame = self.frame
@@ -1572,6 +1706,9 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 )
             return pos
 
+        if self.difficulty is not None:
+            return self._curriculum_frame()
+
         # LEVEL 5 — scenario roll: staged pass situation vs. chaos.
         if rng.random() < self.pass_scenario_prob:
             return self._pass_scenario_frame(pos, rng, max_x)
@@ -1602,6 +1739,66 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             theta=float(rng.uniform(-180, 180)),
         )
         return pos
+
+    def _curriculum_frame(self):
+        """Reverse curriculum: the L4 frame and the chaos frame from the same
+        RNG stream, interpolated per entity by self.difficulty. Both are drawn
+        through _get_initial_positions_frame with the level switched, so the
+        existing spawn code stays untouched."""
+        d = float(np.clip(self.difficulty, 0.0, 1.0))
+        saved = (self.curriculum_level, self.pass_scenario_prob, self.difficulty)
+        try:
+            self.difficulty = None
+            self.curriculum_level = 4
+            f0 = self._get_initial_positions_frame()
+            self.curriculum_level = 5
+            self.pass_scenario_prob = 0.0
+            f1 = self._get_initial_positions_frame()
+        finally:
+            self.curriculum_level, self.pass_scenario_prob, self.difficulty = saved
+        self._episode_scenario = "curriculum"
+
+        # Phase progress: blues in the first third of d, the mate in the
+        # second, ball + carrier in the last (see CURRICULUM_PHASES).
+        def phase(k):
+            return float(np.clip((d - k / CURRICULUM_PHASES) * CURRICULUM_PHASES, 0.0, 1.0))
+
+        g_opp, g_mate, g_ball = phase(0), phase(1), phase(2)
+        b0 = f0.ball
+        carrier = int(np.argmin([
+            math.hypot(f0.robots_yellow[i].x - b0.x, f0.robots_yellow[i].y - b0.y)
+            for i in range(2)
+        ]))
+        weights = {
+            ("robots_yellow", carrier): g_ball,
+            ("robots_yellow", 1 - carrier): g_mate,
+            ("robots_blue", 0): g_opp,
+            ("robots_blue", 1): g_opp,
+        }
+
+        def lerp(a, b, g):
+            return (1.0 - g) * a + g * b
+
+        def lerp_deg(a, b, g):
+            return a + g * ((b - a + 180.0) % 360.0 - 180.0)
+
+        pos = Frame()
+        pos.ball = Ball(x=lerp(b0.x, f1.ball.x, g_ball), y=lerp(b0.y, f1.ball.y, g_ball))
+        # Insert in index order: the simulator reads the robot dicts in
+        # insertion order, so inserting the carrier first would swap ids.
+        for team in ("robots_yellow", "robots_blue"):
+            for i in range(2):
+                g = weights[(team, i)]
+                r0, r1 = getattr(f0, team)[i], getattr(f1, team)[i]
+                getattr(pos, team)[i] = Robot(
+                    x=lerp(r0.x, r1.x, g), y=lerp(r0.y, r1.y, g),
+                    theta=lerp_deg(r0.theta, r1.theta, g),
+                )
+        return pos
+
+    def set_difficulty(self, d):
+        self.difficulty = None if d is None else float(np.clip(d, 0.0, 1.0))
+        self._diff_buffer.clear()
 
     def _pass_scenario_frame(self, pos, rng, max_x):
         """Staged pass situation — one of three variants, so the policy has

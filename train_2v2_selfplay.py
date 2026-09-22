@@ -63,7 +63,8 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
                 curriculum_start_level=None, blue_heuristic=None,
                 goal_reward_solo=None, curriculum_target_level=5,
                 pass_gate="loose", dribble_rule="soft", shaping="v1",
-                restarts="off"):
+                restarts="off", difficulty=None, difficulty_threshold=0.6,
+                difficulty_step=0.05):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
@@ -94,6 +95,11 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
             # "on": ball/robot out of bounds restarts play instead of ending
             # the episode — closes the two documented episodic exits.
             restarts=restarts,
+            # Reverse curriculum on L5: L4 spawn at 0, chaos at 1, each env
+            # promotes itself on goals after a strict pass.
+            difficulty=difficulty,
+            difficulty_threshold=difficulty_threshold,
+            difficulty_step=difficulty_step,
         )
         env.reset(seed=seed)
         return env
@@ -202,6 +208,7 @@ class StatsCallback(BaseCallback):
         self.sasp_buffer = deque(maxlen=300)   # scored after a STRICT pass
         self.foul_buffer = deque(maxlen=300)   # strict dribbling rule fouls
         self.ball_oob_buffer = deque(maxlen=300)   # restarts="on": events/episode
+        self.difficulty_buffer = deque(maxlen=100)   # reverse curriculum
         self.robot_oob_buffer = deque(maxlen=300)
         self.pass_strict = deque(maxlen=200)
         self.chaos_strict = deque(maxlen=300)
@@ -237,6 +244,8 @@ class StatsCallback(BaseCallback):
                 self.sasp_buffer.append(float(infos[i]["scored_after_strict_pass"]))
             if "dribble_foul" in infos[i]:
                 self.foul_buffer.append(float(infos[i]["dribble_foul"]))
+            if "difficulty" in infos[i]:
+                self.difficulty_buffer.append(float(infos[i]["difficulty"]))
             if "ball_restarts" in infos[i]:
                 self.ball_oob_buffer.append(float(infos[i]["ball_restarts"]))
                 self.robot_oob_buffer.append(float(infos[i]["robot_restarts"]))
@@ -277,6 +286,10 @@ class StatsCallback(BaseCallback):
         if self.foul_buffer:
             self.logger.record(
                 "rollout/dribble_foul_rate", float(np.mean(self.foul_buffer))
+            )
+        if self.difficulty_buffer:
+            self.logger.record(
+                "curriculum/difficulty", float(np.mean(self.difficulty_buffer))
             )
         if self.ball_oob_buffer:
             self.logger.record(
@@ -622,12 +635,13 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   pass_scenario_prob=0.0, curriculum_start_level=None,
                   blue_heuristic=None, goal_reward_solo=None,
                   curriculum_target_level=5, pass_gate="loose",
-                  dribble_rule="soft", shaping="v1", restarts="off"):
+                  dribble_rule="soft", shaping="v1", restarts="off",
+                  difficulty=None, difficulty_threshold=0.6, difficulty_step=0.05):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob,
                     curriculum_start_level, blue_heuristic, goal_reward_solo,
                     curriculum_target_level, pass_gate, dribble_rule, shaping,
-                    restarts)
+                    restarts, difficulty, difficulty_threshold, difficulty_step)
         for i in range(n_envs)
     ]
     if algo == "masac":
@@ -652,7 +666,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           goal_reward_solo=None, target_action_std=None,
           noise_repeat_s=None, noise_repeat_max=16, target_level=None,
           pass_gate="loose", dribble_rule="soft", shaping="v1",
-          restarts="off"):
+          restarts="off", difficulty=None, difficulty_threshold=0.6,
+          difficulty_step=0.05):
     assert algo in ("masac", "sac"), algo
     assert blue_heuristic in (None, "attacker"), blue_heuristic
     assert net in ("flat", "deepsets", "deepsets_mean"), net
@@ -738,6 +753,9 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         dribble_rule=dribble_rule,
         shaping=shaping,
         restarts=restarts,
+        difficulty=difficulty,
+        difficulty_threshold=difficulty_threshold,
+        difficulty_step=difficulty_step,
     )
     if goal_reward_solo is not None:
         print(
@@ -1130,6 +1148,16 @@ if __name__ == "__main__":
                         help="'on': ball/robot out of bounds restarts play "
                              "from rest instead of ending the episode; only "
                              "goals and the clock terminate.")
+    parser.add_argument("--difficulty", type=float, default=None,
+                        help="Reverse curriculum on L5: start difficulty in "
+                             "[0, 1] (0 = L4 spawn, 1 = chaos; thirds move the "
+                             "blues, the mate, then ball+carrier). Off if unset. "
+                             "Chained runs: pass the difficulty the previous "
+                             "run reached (curriculum/difficulty).")
+    parser.add_argument("--difficulty_threshold", type=float, default=0.6,
+                        help="Rolling rate of goals after a strict pass that "
+                             "promotes difficulty by --difficulty_step.")
+    parser.add_argument("--difficulty_step", type=float, default=0.05)
     parser.add_argument("--target_level", type=int, default=None,
                         help="Curriculum target level. Default 5. Set equal "
                              "to --start_level to stay on a drill (2 or 3).")
@@ -1184,4 +1212,6 @@ if __name__ == "__main__":
         pass_gate=args.pass_gate,
         dribble_rule=args.dribble_rule, shaping=args.shaping,
         restarts=args.restarts,
+        difficulty=args.difficulty, difficulty_threshold=args.difficulty_threshold,
+        difficulty_step=args.difficulty_step,
     )

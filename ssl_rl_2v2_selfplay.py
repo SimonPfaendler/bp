@@ -164,6 +164,23 @@ L3_SHOT_WINDOW = 200              # steps after the strict pass (5 s)
 # forced release itself cannot count as the foul.
 DRIBBLE_BAN_ARM_DIST = 0.25
 DRIBBLE_FOUL_PENALTY = 2.0
+# restarts="on": no exits. A ball or robot out of bounds no longer ends the
+# episode — the ball is put back 0.2 m inside at the point it left, a robot
+# 0.3 m inside, everything at rest (rsim.reset with the current frame), and
+# play goes on. Two runs from the L4 checkpoint had found the episodic exits:
+# clearing the ball out (-0.5) and driving the off-ball robot off the field
+# (-2), both cheaper than conceding (-5) for a policy that cannot win the
+# ball. With restarts the only terminals are goals and the clock.
+RESTART_BALL_MARGIN = 0.2
+RESTART_ROBOT_MARGIN = 0.3
+RESTART_BALL_OOB_PENALTY = 0.5    # charged to the team only if yellow put it out
+RESTART_ROBOT_OOB_PENALTY = 0.5   # charged to the robot that left
+# Under restarts="on" nothing accrues per step: no time penalty, no
+# truncation penalty, and the progress terms cannot go negative. Otherwise
+# conceding fast (-5) stays cheaper than defending for 1000 steps (-9 of
+# time penalty and negative shaping while blue attacks) — the same exit in a
+# third guise. What remains costs only with a cause: a goal against, a ball
+# or robot out, a foul.
 N_BLUE = 2
 
 
@@ -193,6 +210,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         pass_gate="loose",
         dribble_rule="soft",
         shaping="v1",
+        restarts="off",
     ):
         super().__init__(
             field_type=1,
@@ -265,6 +283,9 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # time penalty already exists).
         assert shaping in ("v1", "team"), shaping
         self.shaping = shaping
+        # See RESTART_* above. "off" keeps the terminal OOB rules.
+        assert restarts in ("off", "on"), restarts
+        self.restarts = restarts
         # Frozen-model input dim (filled on lazy-load). If older than current
         # obs (e.g. v3 trained without role-index), we strip role-index dims
         # before predict so the same policy class can act as blue.
@@ -340,6 +361,9 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self._dribble_foul = False
         self.dribble_foul_in_episode = 0
         self.last_dist_to_goal_y = None     # shaping="team": off-ball progress
+        self._restart_pending = False       # restarts="on": reposition after this step
+        self.ball_restarts = 0
+        self.robot_restarts = 0
         self.is_dribbling_b = [False, False]
         self.dribble_start_pos_b = [None, None]
         self.must_release_b = [False, False]
@@ -425,6 +449,9 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self._dribble_foul = False
         self.dribble_foul_in_episode = 0
         self.last_dist_to_goal_y = None     # shaping="team": off-ball progress
+        self._restart_pending = False       # restarts="on": reposition after this step
+        self.ball_restarts = 0
+        self.robot_restarts = 0
         self.is_dribbling_b = [False, False]
         self.dribble_start_pos_b = [None, None]
         self.must_release_b = [False, False]
@@ -458,6 +485,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         obs = self._stacked_obs_yellow()
 
         reward, done, truncated = self._calculate_team_reward_and_done()
+        if self._restart_pending:
+            self._restart_pending = False
+            if not (done or truncated):
+                self._do_restart()
+                obs = self._stacked_obs_yellow()
         self.ep_reward += float(reward.mean())
         self.ep_length += 1
 
@@ -475,6 +507,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 self.match_result == 1 and self.passes_in_episode > 0
             ) else 0.0
             info["dribble_foul"] = float(self.dribble_foul_in_episode)
+            info["ball_restarts"] = self.ball_restarts
+            info["robot_restarts"] = self.robot_restarts
             info["scored_after_strict_pass"] = 1.0 if (
                 self.match_result == 1 and self.passes_strict_in_episode > 0
             ) else 0.0
@@ -1059,7 +1093,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # defense isn't punished). Applied first so terminals also pay it.
         # Scaled 10x down together with the terminal rewards so the
         # terminal:shaping ratio matches the original design.
-        if self.reward_type == "dense":
+        if self.reward_type == "dense" and self.restarts != "on":
             if ball.x < 0:
                 rewards -= 0.002 * (1.0 + 2.0 * progress)
             else:
@@ -1094,6 +1128,28 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 self.blue_goal_scored = True
             return rewards, done, truncated
 
+        if self.restarts == "on":
+            # No exits: out of bounds costs a little and play goes on from
+            # a restart (see RESTART_* and _do_restart).
+            if abs(ball.x) > max_x or abs(ball.y) > max_y:
+                if (
+                    self.last_yellow_carrier is not None
+                    and not self.blue_touched_since_yellow
+                ):
+                    rewards -= RESTART_BALL_OOB_PENALTY
+                self.ball_restarts += 1
+                self._restart_pending = True
+            for i, r in enumerate(yellows):
+                if abs(r.x) > max_x or abs(r.y) > max_y:
+                    rewards[i] -= RESTART_ROBOT_OOB_PENALTY
+                    self.robot_restarts += 1
+                    self._restart_pending = True
+            for r in blues:
+                if abs(r.x) > max_x or abs(r.y) > max_y:
+                    self._restart_pending = True
+            if self._restart_pending:
+                return rewards, done, truncated
+
         # Ball OOB without a goal: small penalty.
         if (abs(ball.x) > max_x or abs(ball.y) > max_y) and not in_grace:
             done = True
@@ -1127,7 +1183,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
         if self.current_step >= self.max_steps:
             truncated = True
-            rewards -= 1.0
+            if self.restarts != "on":
+                rewards -= 1.0
             self.match_result = -1
             return rewards, done, truncated
 
@@ -1145,7 +1202,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             team_shaping = self.shaping == "team" and not drill
             # On the pass drills only the approach is rewarded; the ball
             # moving away is what a kick looks like from the kicker's side.
-            lo = 0.0 if (drill or team_shaping) else -0.05
+            no_exits = self.restarts == "on"
+            lo = 0.0 if (drill or team_shaping or no_exits) else -0.05
             closer = 0 if dist_a <= dist_b else 1
             for i in range(2):
                 if team_shaping and i != closer:
@@ -1173,7 +1231,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             )
             if self.last_dist_ball_goal is not None and goal_shaping:
                 goal_delta = self.last_dist_ball_goal - dist_ball_goal
-                rewards += float(np.clip(goal_delta * 1.0, -0.1, 0.15))
+                lo_goal = 0.0 if no_exits else -0.1
+                rewards += float(np.clip(goal_delta * 1.0, lo_goal, 0.15))
             self.last_dist_ball_goal = dist_ball_goal
 
             # Anti-passivity: whenever a Yellow holds the ball, small negative
@@ -1326,6 +1385,47 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         cos = (vx * tx + vy * ty) / (speed * norm)
         angle = math.degrees(math.acos(max(-1.0, min(1.0, cos))))
         return angle < STRICT_PASS_MAX_ANGLE_DEG
+
+    def _do_restart(self):
+        """restarts="on": put whatever is out of bounds back on the field and
+        restart play from rest. rsim.reset takes a full frame, so the current
+        positions are copied and only the offenders move; every velocity is
+        zeroed by the simulator, as at a real restart. Shaping memories and
+        dribble bookkeeping start over so the teleport is not scored."""
+        max_x = self.field.length / 2.0
+        max_y = self.field.width / 2.0
+        cur = self.frame
+        pos = Frame()
+        bx = float(np.clip(cur.ball.x, -max_x + RESTART_BALL_MARGIN, max_x - RESTART_BALL_MARGIN))
+        by = float(np.clip(cur.ball.y, -max_y + RESTART_BALL_MARGIN, max_y - RESTART_BALL_MARGIN))
+        pos.ball = Ball(x=bx, y=by, v_x=0.0, v_y=0.0)
+        for team_in, team_out in (
+            (cur.robots_yellow, pos.robots_yellow),
+            (cur.robots_blue, pos.robots_blue),
+        ):
+            for i in range(2):
+                r = team_in[i]
+                team_out[i] = Robot(
+                    x=float(np.clip(r.x, -max_x + RESTART_ROBOT_MARGIN, max_x - RESTART_ROBOT_MARGIN)),
+                    y=float(np.clip(r.y, -max_y + RESTART_ROBOT_MARGIN, max_y - RESTART_ROBOT_MARGIN)),
+                    theta=float(r.theta),
+                )
+        self.rsim.reset(pos)
+        self.frame = self.rsim.get_frame()
+        self.last_frame = self.frame
+        self.last_dist_ball_goal = None
+        self.last_dist_to_ball = None
+        self.last_ball_pos = None
+        self.last_dist_to_goal_y = None
+        self._release = None
+        self._strict_pending = None
+        for lst, val in (
+            (self.is_dribbling_y, False), (self.must_release_y, False),
+            (self.dribble_start_pos_y, None), (self.dribble_ban_y, None),
+            (self.is_dribbling_b, False), (self.must_release_b, False),
+            (self.dribble_start_pos_b, None),
+        ):
+            lst[0] = lst[1] = val
 
     # ---------- initial positions ----------
 

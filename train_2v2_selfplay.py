@@ -62,7 +62,8 @@ os.makedirs(LOG_DIR, exist_ok=True)
 def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
                 curriculum_start_level=None, blue_heuristic=None,
                 goal_reward_solo=None, curriculum_target_level=5,
-                pass_gate="loose", dribble_rule="soft", shaping="v1"):
+                pass_gate="loose", dribble_rule="soft", shaping="v1",
+                restarts="off"):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
@@ -90,6 +91,9 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
             # anti-passivity charge. See the env constants / __init__.
             dribble_rule=dribble_rule,
             shaping=shaping,
+            # "on": ball/robot out of bounds restarts play instead of ending
+            # the episode — closes the two documented episodic exits.
+            restarts=restarts,
         )
         env.reset(seed=seed)
         return env
@@ -197,6 +201,8 @@ class StatsCallback(BaseCallback):
         self.passes_strict_buffer = deque(maxlen=300)
         self.sasp_buffer = deque(maxlen=300)   # scored after a STRICT pass
         self.foul_buffer = deque(maxlen=300)   # strict dribbling rule fouls
+        self.ball_oob_buffer = deque(maxlen=300)   # restarts="on": events/episode
+        self.robot_oob_buffer = deque(maxlen=300)
         self.pass_strict = deque(maxlen=200)
         self.chaos_strict = deque(maxlen=300)
         self.scored_after_pass_buffer = deque(maxlen=300)
@@ -231,6 +237,9 @@ class StatsCallback(BaseCallback):
                 self.sasp_buffer.append(float(infos[i]["scored_after_strict_pass"]))
             if "dribble_foul" in infos[i]:
                 self.foul_buffer.append(float(infos[i]["dribble_foul"]))
+            if "ball_restarts" in infos[i]:
+                self.ball_oob_buffer.append(float(infos[i]["ball_restarts"]))
+                self.robot_oob_buffer.append(float(infos[i]["robot_restarts"]))
             scen = infos[i].get("scenario")
             if scen == "pass":
                 self.pass_strict.append(float(infos[i].get("passes_strict", 0.0)))
@@ -268,6 +277,13 @@ class StatsCallback(BaseCallback):
         if self.foul_buffer:
             self.logger.record(
                 "rollout/dribble_foul_rate", float(np.mean(self.foul_buffer))
+            )
+        if self.ball_oob_buffer:
+            self.logger.record(
+                "rollout/ball_oob_per_episode", float(np.mean(self.ball_oob_buffer))
+            )
+            self.logger.record(
+                "rollout/robot_oob_per_episode", float(np.mean(self.robot_oob_buffer))
             )
         if self.sasp_buffer:
             self.logger.record(
@@ -606,11 +622,12 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   pass_scenario_prob=0.0, curriculum_start_level=None,
                   blue_heuristic=None, goal_reward_solo=None,
                   curriculum_target_level=5, pass_gate="loose",
-                  dribble_rule="soft", shaping="v1"):
+                  dribble_rule="soft", shaping="v1", restarts="off"):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob,
                     curriculum_start_level, blue_heuristic, goal_reward_solo,
-                    curriculum_target_level, pass_gate, dribble_rule, shaping)
+                    curriculum_target_level, pass_gate, dribble_rule, shaping,
+                    restarts)
         for i in range(n_envs)
     ]
     if algo == "masac":
@@ -634,7 +651,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           start_level=None, load_buffer="auto", blue_heuristic=None,
           goal_reward_solo=None, target_action_std=None,
           noise_repeat_s=None, noise_repeat_max=16, target_level=None,
-          pass_gate="loose", dribble_rule="soft", shaping="v1"):
+          pass_gate="loose", dribble_rule="soft", shaping="v1",
+          restarts="off"):
     assert algo in ("masac", "sac"), algo
     assert blue_heuristic in (None, "attacker"), blue_heuristic
     assert net in ("flat", "deepsets", "deepsets_mean"), net
@@ -719,6 +737,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         pass_gate=pass_gate,
         dribble_rule=dribble_rule,
         shaping=shaping,
+        restarts=restarts,
     )
     if goal_reward_solo is not None:
         print(
@@ -1107,6 +1126,10 @@ if __name__ == "__main__":
                         help="'team': approach term only for the closer yellow, "
                              "no kick penalty, off-ball progress toward the "
                              "goal, no anti-passivity charge. Full game only.")
+    parser.add_argument("--restarts", default="off", choices=["off", "on"],
+                        help="'on': ball/robot out of bounds restarts play "
+                             "from rest instead of ending the episode; only "
+                             "goals and the clock terminate.")
     parser.add_argument("--target_level", type=int, default=None,
                         help="Curriculum target level. Default 5. Set equal "
                              "to --start_level to stay on a drill (2 or 3).")
@@ -1160,4 +1183,5 @@ if __name__ == "__main__":
         target_level=args.target_level,
         pass_gate=args.pass_gate,
         dribble_rule=args.dribble_rule, shaping=args.shaping,
+        restarts=args.restarts,
     )

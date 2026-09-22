@@ -10,7 +10,7 @@ def run_experiment(
     pass_scenario_prob_start=None, net="flat", load_buffer="auto",
     start_level=None, blue_heuristic=None, goal_reward_solo=None,
     target_action_std=None, noise_repeat_s=None, target_level=None,
-    pass_gate=None, dribble_rule=None, shaping=None,
+    pass_gate=None, dribble_rule=None, shaping=None, restarts=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -46,6 +46,8 @@ def run_experiment(
         cmd += f" --dribble_rule {dribble_rule}"
     if shaping is not None:
         cmd += f" --shaping {shaping}"
+    if restarts is not None:
+        cmd += f" --restarts {restarts}"
     os.system(cmd)
 
 
@@ -111,8 +113,15 @@ def main():
     #                      negative (v1 pulled both to the ball and charged
     #                      every kick), off-ball progress toward the goal,
     #                      no anti-passivity charge. Full game only.
+    #   RESTARTS=on        ball/robot out of bounds restarts play from rest
+    #                      instead of ending the episode. Closes the two exits
+    #                      the L4 checkpoint found on L5: clearing the ball
+    #                      out (A') and driving the off-ball robot off the
+    #                      field (Step 1: 82 % of episodes). Only goals and
+    #                      the clock terminate.
     #   Step-1 experiment: LEVEL=5 PASS_GATE=strict SOLO=2 DRIBBLE=strict
     #                      SHAPING=team INIT_PATH=<L4 checkpoint>
+    #   Step-1b:           the same plus RESTARTS=on
     #
     # start_level == target_level pins the run to the drill; without it both
     # the callback and the env promote to L5 at 90 % success, which L3 can
@@ -134,6 +143,7 @@ def main():
     goal_reward_solo = float(solo) if solo is not None else None
     dribble_rule = os.environ.get("DRIBBLE")          # None -> soft
     shaping = os.environ.get("SHAPING")               # None -> v1
+    restarts = os.environ.get("RESTARTS")             # None -> off
     pass_scenario_prob = 0.35 if level == 5 else 0.0
     init_path = os.environ.get("INIT_PATH")  # None = from scratch
     reward_type = "dense"
@@ -149,12 +159,13 @@ def main():
         pass_scenario_prob, None,
         None, "flat", "off",
         level, blue_heuristic, goal_reward_solo, None, None, level,
-        pass_gate, dribble_rule, shaping,
+        pass_gate, dribble_rule, shaping, restarts,
     )
     print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} "
           f"[init={init_path or 'scratch'}, start=target={level}, "
           f"pass_gate={pass_gate or 'loose'}, solo={goal_reward_solo}, "
-          f"dribble={dribble_rule or 'soft'}, shaping={shaping or 'v1'}]")
+          f"dribble={dribble_rule or 'soft'}, shaping={shaping or 'v1'}, "
+          f"restarts={restarts or 'off'}]")
 
 
 if __name__ == "__main__":

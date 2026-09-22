@@ -62,7 +62,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
                 curriculum_start_level=None, blue_heuristic=None,
                 goal_reward_solo=None, curriculum_target_level=5,
-                pass_gate="loose"):
+                pass_gate="loose", dribble_rule="soft", shaping="v1"):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
@@ -84,6 +84,12 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
             # "strict": goal_reward, the +3 bonus and has_passed listen to
             # the strict pass counter instead of the loose one.
             pass_gate=pass_gate,
+            # "strict": the excessive-dribbling rule with teeth (foul ends the
+            # episode). "team": approach term for the closer yellow only, no
+            # kick penalty, off-ball progress toward the goal, no
+            # anti-passivity charge. See the env constants / __init__.
+            dribble_rule=dribble_rule,
+            shaping=shaping,
         )
         env.reset(seed=seed)
         return env
@@ -190,6 +196,7 @@ class StatsCallback(BaseCallback):
         # the loose one above counts fumble + pick-up too.
         self.passes_strict_buffer = deque(maxlen=300)
         self.sasp_buffer = deque(maxlen=300)   # scored after a STRICT pass
+        self.foul_buffer = deque(maxlen=300)   # strict dribbling rule fouls
         self.pass_strict = deque(maxlen=200)
         self.chaos_strict = deque(maxlen=300)
         self.scored_after_pass_buffer = deque(maxlen=300)
@@ -222,6 +229,8 @@ class StatsCallback(BaseCallback):
                 )
             if "scored_after_strict_pass" in infos[i]:
                 self.sasp_buffer.append(float(infos[i]["scored_after_strict_pass"]))
+            if "dribble_foul" in infos[i]:
+                self.foul_buffer.append(float(infos[i]["dribble_foul"]))
             scen = infos[i].get("scenario")
             if scen == "pass":
                 self.pass_strict.append(float(infos[i].get("passes_strict", 0.0)))
@@ -255,6 +264,10 @@ class StatsCallback(BaseCallback):
             self.logger.record(
                 "rollout/passes_strict_per_episode",
                 float(np.mean(self.passes_strict_buffer)),
+            )
+        if self.foul_buffer:
+            self.logger.record(
+                "rollout/dribble_foul_rate", float(np.mean(self.foul_buffer))
             )
         if self.sasp_buffer:
             self.logger.record(
@@ -592,11 +605,12 @@ class PassScenarioScheduleCallback(BaseCallback):
 def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   pass_scenario_prob=0.0, curriculum_start_level=None,
                   blue_heuristic=None, goal_reward_solo=None,
-                  curriculum_target_level=5, pass_gate="loose"):
+                  curriculum_target_level=5, pass_gate="loose",
+                  dribble_rule="soft", shaping="v1"):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob,
                     curriculum_start_level, blue_heuristic, goal_reward_solo,
-                    curriculum_target_level, pass_gate)
+                    curriculum_target_level, pass_gate, dribble_rule, shaping)
         for i in range(n_envs)
     ]
     if algo == "masac":
@@ -620,7 +634,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           start_level=None, load_buffer="auto", blue_heuristic=None,
           goal_reward_solo=None, target_action_std=None,
           noise_repeat_s=None, noise_repeat_max=16, target_level=None,
-          pass_gate="loose"):
+          pass_gate="loose", dribble_rule="soft", shaping="v1"):
     assert algo in ("masac", "sac"), algo
     assert blue_heuristic in (None, "attacker"), blue_heuristic
     assert net in ("flat", "deepsets", "deepsets_mean"), net
@@ -703,6 +717,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         goal_reward_solo=goal_reward_solo,
         curriculum_target_level=effective_target_level,
         pass_gate=pass_gate,
+        dribble_rule=dribble_rule,
+        shaping=shaping,
     )
     if goal_reward_solo is not None:
         print(
@@ -1083,6 +1099,14 @@ if __name__ == "__main__":
                         help="Which pass counter gates goal_reward, the +3 "
                              "bonus and has_passed. 'strict' = kick-speed, "
                              "aimed, held. Combine with --goal_reward_solo.")
+    parser.add_argument("--dribble_rule", default="soft", choices=["soft", "strict"],
+                        help="'strict': after 1 m of dribbling the same robot "
+                             "may not touch the ball again until another robot "
+                             "has; doing so is a foul (episode over, -2).")
+    parser.add_argument("--shaping", default="v1", choices=["v1", "team"],
+                        help="'team': approach term only for the closer yellow, "
+                             "no kick penalty, off-ball progress toward the "
+                             "goal, no anti-passivity charge. Full game only.")
     parser.add_argument("--target_level", type=int, default=None,
                         help="Curriculum target level. Default 5. Set equal "
                              "to --start_level to stay on a drill (2 or 3).")
@@ -1135,4 +1159,5 @@ if __name__ == "__main__":
         noise_repeat_max=args.noise_repeat_max,
         target_level=args.target_level,
         pass_gate=args.pass_gate,
+        dribble_rule=args.dribble_rule, shaping=args.shaping,
     )

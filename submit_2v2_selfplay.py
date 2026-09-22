@@ -10,7 +10,7 @@ def run_experiment(
     pass_scenario_prob_start=None, net="flat", load_buffer="auto",
     start_level=None, blue_heuristic=None, goal_reward_solo=None,
     target_action_std=None, noise_repeat_s=None, target_level=None,
-    pass_gate=None,
+    pass_gate=None, dribble_rule=None, shaping=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -42,6 +42,10 @@ def run_experiment(
         cmd += f" --target_level {target_level}"
     if pass_gate is not None:
         cmd += f" --pass_gate {pass_gate}"
+    if dribble_rule is not None:
+        cmd += f" --dribble_rule {dribble_rule}"
+    if shaping is not None:
+        cmd += f" --shaping {shaping}"
     os.system(cmd)
 
 
@@ -97,6 +101,18 @@ def main():
     #                      pass instead of a loose one. SOLO=2 is the honest
     #                      rerun of the asymmetric-payoff test, which used
     #                      to pay "goal after a fumble".
+    #   DRIBBLE=strict     the excessive-dribbling rule with teeth: after 1 m
+    #                      the ball must go and the same robot may not touch
+    #                      it until someone else has (foul = episode over).
+    #                      Solo dribbling from midfield stops being possible;
+    #                      the reason to pass comes from the rules of the
+    #                      game, not from the reward.
+    #   SHAPING=team       approach term only for the closer yellow and never
+    #                      negative (v1 pulled both to the ball and charged
+    #                      every kick), off-ball progress toward the goal,
+    #                      no anti-passivity charge. Full game only.
+    #   Step-1 experiment: LEVEL=5 PASS_GATE=strict SOLO=2 DRIBBLE=strict
+    #                      SHAPING=team INIT_PATH=<L4 checkpoint>
     #
     # start_level == target_level pins the run to the drill; without it both
     # the callback and the env promote to L5 at 90 % success, which L3 can
@@ -116,6 +132,8 @@ def main():
     pass_gate = os.environ.get("PASS_GATE")            # None -> loose
     solo = os.environ.get("SOLO")                      # None -> symmetric
     goal_reward_solo = float(solo) if solo is not None else None
+    dribble_rule = os.environ.get("DRIBBLE")          # None -> soft
+    shaping = os.environ.get("SHAPING")               # None -> v1
     pass_scenario_prob = 0.35 if level == 5 else 0.0
     init_path = os.environ.get("INIT_PATH")  # None = from scratch
     reward_type = "dense"
@@ -131,11 +149,12 @@ def main():
         pass_scenario_prob, None,
         None, "flat", "off",
         level, blue_heuristic, goal_reward_solo, None, None, level,
-        pass_gate,
+        pass_gate, dribble_rule, shaping,
     )
     print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} "
           f"[init={init_path or 'scratch'}, start=target={level}, "
-          f"pass_gate={pass_gate or 'loose'}, solo={goal_reward_solo}]")
+          f"pass_gate={pass_gate or 'loose'}, solo={goal_reward_solo}, "
+          f"dribble={dribble_rule or 'soft'}, shaping={shaping or 'v1'}]")
 
 
 if __name__ == "__main__":

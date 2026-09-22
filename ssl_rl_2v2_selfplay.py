@@ -154,6 +154,16 @@ DRILL_RELEASE_WINDOW = 80         # steps after the first release
 # pass stays neutral, as on L2, so only the whole chain pays.
 L3_PASS_REWARD = 4.0
 L3_SHOT_WINDOW = 200              # steps after the strict pass (5 s)
+# dribble_rule="strict": SSL's excessive-dribbling rule with teeth. After
+# max_dribble_dist the ball has to go and the SAME robot may not touch it
+# again until another robot has — touching it is a foul (free kick for the
+# opponent; in this episodic MDP: episode over, DRIBBLE_FOUL_PENALTY). The
+# default "soft" rule only forces a 0.01 m/s nudge and lets the robot re-take
+# the ball 10 cm later, which is why solo dribbling from midfield was ever
+# possible. The ban arms once the ball is DRIBBLE_BAN_ARM_DIST away, so the
+# forced release itself cannot count as the foul.
+DRIBBLE_BAN_ARM_DIST = 0.25
+DRIBBLE_FOUL_PENALTY = 2.0
 N_BLUE = 2
 
 
@@ -181,6 +191,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         goal_reward=10.0,
         goal_reward_solo=None,
         pass_gate="loose",
+        dribble_rule="soft",
+        shaping="v1",
     ):
         super().__init__(
             field_type=1,
@@ -239,6 +251,20 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # stays "loose" so existing runs and checkpoints keep their meaning.
         assert pass_gate in ("loose", "strict"), pass_gate
         self.pass_gate = pass_gate
+        # See DRIBBLE_BAN_ARM_DIST above. Yellow only: blue's heuristic never
+        # dribbles a metre and bypasses _robot_command anyway.
+        assert dribble_rule in ("soft", "strict"), dribble_rule
+        self.dribble_rule = dribble_rule
+        # shaping="team" (full game only, drills keep their own design):
+        # the robot->ball approach term goes to the closer yellow only and
+        # cannot go negative (v1 pulls BOTH to the ball and charges the
+        # kicker while the ball flies off — anti-spacing, anti-pass); the
+        # other yellow gets potential-based progress toward the attack goal
+        # while the team has the ball (the run into the zone); the
+        # anti-passivity charge is off (waiting for the mate is fine, the
+        # time penalty already exists).
+        assert shaping in ("v1", "team"), shaping
+        self.shaping = shaping
         # Frozen-model input dim (filled on lazy-load). If older than current
         # obs (e.g. v3 trained without role-index), we strip role-index dims
         # before predict so the same policy class can act as blue.
@@ -310,6 +336,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.is_dribbling_y = [False, False]
         self.dribble_start_pos_y = [None, None]
         self.must_release_y = [False, False]
+        self.dribble_ban_y = [None, None]   # strict rule: None | "pending" | "armed"
+        self._dribble_foul = False
+        self.dribble_foul_in_episode = 0
+        self.last_dist_to_goal_y = None     # shaping="team": off-ball progress
         self.is_dribbling_b = [False, False]
         self.dribble_start_pos_b = [None, None]
         self.must_release_b = [False, False]
@@ -391,6 +421,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.is_dribbling_y = [False, False]
         self.dribble_start_pos_y = [None, None]
         self.must_release_y = [False, False]
+        self.dribble_ban_y = [None, None]   # strict rule: None | "pending" | "armed"
+        self._dribble_foul = False
+        self.dribble_foul_in_episode = 0
+        self.last_dist_to_goal_y = None     # shaping="team": off-ball progress
         self.is_dribbling_b = [False, False]
         self.dribble_start_pos_b = [None, None]
         self.must_release_b = [False, False]
@@ -440,6 +474,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             info["scored_after_pass"] = 1.0 if (
                 self.match_result == 1 and self.passes_in_episode > 0
             ) else 0.0
+            info["dribble_foul"] = float(self.dribble_foul_in_episode)
             info["scored_after_strict_pass"] = 1.0 if (
                 self.match_result == 1 and self.passes_strict_in_episode > 0
             ) else 0.0
@@ -640,7 +675,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             )
         else:
             dribble_meter = 0.0
-        must_release_flag = 1.0 if must_release[idx] else 0.0
+        # The strict-rule ban shares this slot: both mean "you must not
+        # touch the ball", and the obs layout stays as it is.
+        banned = is_yellow and self.dribble_ban_y[idx] is not None
+        must_release_flag = 1.0 if (must_release[idx] or banned) else 0.0
 
         # Mate
         mate_theta = math.radians(mate.theta)
@@ -765,9 +803,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
     def _update_dribble_state(self):
         ball = self.frame.ball
+        yellows = (self.frame.robots_yellow[0], self.frame.robots_yellow[1])
         teams = (
             (
-                (self.frame.robots_yellow[0], self.frame.robots_yellow[1]),
+                yellows,
                 self.is_dribbling_y,
                 self.dribble_start_pos_y,
                 self.must_release_y,
@@ -799,10 +838,40 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                         if dd > self.max_dribble_dist:
                             must_release[i] = True
                             is_dribbling[i] = False
+                            if robots is yellows and self.dribble_rule == "strict":
+                                self.dribble_ban_y[i] = "pending"
                 else:
                     if not must_release[i]:
                         is_dribbling[i] = False
                         dribble_start[i] = None
+
+        if self.dribble_rule == "strict":
+            # Strict rule, yellow only. A banned robot may not touch the ball
+            # until another robot has. The ban arms once the ball is clear of
+            # the forced release; an armed touch is the foul.
+            # Keyed by team/index — the frame's Robot.yellow/id fields are
+            # not reliable identifiers.
+            contact = {}
+            for i, r in enumerate(yellows):
+                d = math.hypot(r.x - ball.x, r.y - ball.y)
+                contact[("y", i)] = (d < self.robot_ball_contact) or bool(r.infrared)
+            for i in range(N_BLUE):
+                r = self.frame.robots_blue[i]
+                d = math.hypot(r.x - ball.x, r.y - ball.y)
+                contact[("b", i)] = (d < self.robot_ball_contact) or bool(r.infrared)
+            for i, r in enumerate(yellows):
+                ban = self.dribble_ban_y[i]
+                if ban is None:
+                    continue
+                if any(v for k, v in contact.items() if k != ("y", i)):
+                    self.dribble_ban_y[i] = None
+                    continue
+                dist = math.hypot(r.x - ball.x, r.y - ball.y)
+                if ban == "pending" and dist >= DRIBBLE_BAN_ARM_DIST:
+                    self.dribble_ban_y[i] = ban = "armed"
+                if ban == "armed" and contact[("y", i)]:
+                    self._dribble_foul = True
+                    self.dribble_ban_y[i] = None
 
     # ---------- command building ----------
 
@@ -876,11 +945,13 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         cmds = []
         cmds.append(self._robot_command(
             self.frame.robots_yellow[0], yellow_action[0],
-            self.must_release_y[0], yellow=True,
+            self.must_release_y[0] or self.dribble_ban_y[0] is not None,
+            yellow=True,
         ))
         cmds.append(self._robot_command(
             self.frame.robots_yellow[1], yellow_action[1],
-            self.must_release_y[1], yellow=True,
+            self.must_release_y[1] or self.dribble_ban_y[1] is not None,
+            yellow=True,
         ))
         # Level 1 is a STAGED SCORING CHANCE and presupposes passive blues
         # ("parked far from the goal mouth"). An active heuristic turns it
@@ -1043,6 +1114,17 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                     done = True
                     return rewards, done, truncated
 
+        if self._dribble_foul:
+            # Strict dribbling rule: free kick for the opponent. Episodic
+            # stand-in: possession lost, episode over, priced like a robot
+            # leaving the field so it is never a cheap exit.
+            self._dribble_foul = False
+            self.dribble_foul_in_episode += 1
+            done = True
+            rewards -= DRIBBLE_FOUL_PENALTY
+            self.match_result = -1
+            return rewards, done, truncated
+
         if self.current_step >= self.max_steps:
             truncated = True
             rewards -= 1.0
@@ -1060,13 +1142,28 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # Rewards moving toward the ball, penalizes moving away.
             if self.last_dist_to_ball is None:
                 self.last_dist_to_ball = [dist_a, dist_b]
+            team_shaping = self.shaping == "team" and not drill
             # On the pass drills only the approach is rewarded; the ball
             # moving away is what a kick looks like from the kicker's side.
-            lo = 0.0 if drill else -0.05
+            lo = 0.0 if (drill or team_shaping) else -0.05
+            closer = 0 if dist_a <= dist_b else 1
             for i in range(2):
+                if team_shaping and i != closer:
+                    continue
                 delta = self.last_dist_to_ball[i] - dists[i]
                 rewards[i] += float(np.clip(delta * 0.5, lo, 0.05))
             self.last_dist_to_ball = [dist_a, dist_b]
+
+            if team_shaping:
+                # Off-ball yellow: potential-based progress toward the attack
+                # goal while the team has the ball — the run into the zone.
+                gx = -self.field.length / 2.0
+                d_goal = [math.hypot(r.x - gx, r.y) for r in (ya, yb)]
+                if self.last_dist_to_goal_y is not None and (ya_has or yb_has):
+                    j = 1 - closer
+                    prog = self.last_dist_to_goal_y[j] - d_goal[j]
+                    rewards[j] += float(np.clip(prog * 0.5, -0.05, 0.05))
+                self.last_dist_to_goal_y = d_goal
 
             # Ball→Goal signed delta — shared. Rewards ball moving toward
             # opponent goal (progress toward scoring).
@@ -1081,8 +1178,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
             # Anti-passivity: whenever a Yellow holds the ball, small negative
             # per step. Prevents "hold ball, don't shoot" degenerate policy.
+            # Off under shaping="team": waiting for the mate is the point.
             if ya_has or yb_has:
-                rewards -= 0.003
+                if not team_shaping:
+                    rewards -= 0.003
                 self.team_possession_steps += 1
 
             self.last_ball_pos = (ball.x, ball.y)

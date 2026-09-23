@@ -1307,8 +1307,13 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             self.match_result = -1
             return rewards, done, truncated
         # Yellow robot OOB: heavy penalty (deters escape). Blue OOB ends
-        # the episode without yellow penalty.
-        if not in_grace:
+        # the episode without yellow penalty. Not under restarts="on": there
+        # an excursion is charged above and the robot is driven back while
+        # play goes on. (Until 03d7d08 the robot restart returned early
+        # above; when the stoppage was dropped this terminal became
+        # reachable again and the excursion was an exit once more: -2.5 and
+        # the episode over, measured as 12 of 30 episodes at d=0.5.)
+        if not in_grace and self.restarts != "on":
             for r in yellows:
                 if abs(r.x) > max_x or abs(r.y) > max_y:
                     done = True

@@ -117,6 +117,46 @@ def blue_defender_heuristic_2v2(env, robot, yellows) -> np.ndarray:
     return move_to_ball(robot, ball, speed=2.0)
 
 
+# blue_heuristic="roles": the two blues never chase the same ball. Blue 0
+# is the hunter (blue_attacker_heuristic_2v2, unchanged), blue 1 the keeper
+# below, who leaves the goal-ball line only for balls inside KEEPER_ZONE of
+# its own goal. The "attacker" pair let the defender chase whenever it was
+# closer to the ball than the nearest yellow, so on a loose ball both blues
+# converged on it (the double chase seen in the replays).
+KEEPER_ZONE = 1.5      # m from the own goal centre
+KEEPER_DEPTH = 1.0     # how far in front of the goal the keeper stands at most
+
+
+def blue_keeper_heuristic_2v2(env, robot, yellows) -> np.ndarray:
+    """Keeper blue: clear the ball on infrared, collect balls inside
+    KEEPER_ZONE, otherwise hold the goal-ball line. When the ball rolls at
+    the goal it moves to where the ball will cross its line instead of
+    where the ball is now. Never chases in open field."""
+    ball = env.frame.ball
+    goal = np.array([-env.field.length / 2.0, 0.0])
+    if robot.infrared:
+        return shoot_at_goal_center(env, robot, team_color="blue")
+    ball_pos = np.array([ball.x, ball.y])
+    to_ball = ball_pos - goal
+    dist_goal_ball = float(np.linalg.norm(to_ball))
+    if dist_goal_ball < KEEPER_ZONE:
+        return move_to_ball(robot, ball, speed=2.0)
+    if dist_goal_ball > 0.01:
+        stand = goal + to_ball / dist_goal_ball * min(KEEPER_DEPTH, dist_goal_ball * 0.4)
+    else:
+        stand = goal + np.array([0.3, 0.0])
+    if ball.v_x < -0.3:
+        # Ball coming at the goal: intercept on the line at the keeper's depth.
+        line_x = goal[0] + KEEPER_DEPTH
+        t = (line_x - ball.x) / ball.v_x
+        if 0.0 < t < 2.0:
+            half = env.field.goal_width / 2.0 + 0.3
+            stand = np.array([line_x, float(np.clip(ball.y + ball.v_y * t, -half, half))])
+    v_x, v_y = move_to_point(robot, stand, speed=2.0)
+    v_theta = turn_to_point(robot, ball_pos)
+    return np.array([v_x, v_y, v_theta, 0.0, 0.0])
+
+
 SINGLE_OBS_DIM_BASE = 52  # world-frame layout, see _egocentric_obs docstring
 ROLE_INDEX_DIM = 2
 # Episode-scoped state the REWARD depends on but the 52-dim layout never
@@ -183,12 +223,18 @@ RESTART_ROBOT_OOB_PENALTY = 0.5   # charged to the robot that left, once per exc
 # Rule-faithful restarts: a ball over the sideline is a throw-in for the team
 # that did not touch it last, a ball over a goal line a goal kick for the
 # defending team, or a corner for the attackers if the defenders put it out.
-# The taking team gets the ball at rest, the other team is moved
-# RESTART_CLEAR_DIST away and held still until the ball is in play (moved
-# RESTART_IN_PLAY_DIST) or RESTART_FREEZE_STEPS have passed. Without this a
-# clearance put the ball back where it left, next to the blue hunter, and a
-# missed blue shot left it beside the yellow goal.
-RESTART_CLEAR_DIST = 0.5
+# The taking team's nearer robot is placed at the restart spot with the
+# ball RESTART_TAKER_OFFSET in front of its dribbler, facing its mate (the
+# drill geometry); the mate stays where it is. The other team is moved
+# RESTART_CLEAR_DIST from the ball and held still until the ball is in play
+# (moved RESTART_IN_PLAY_DIST) or RESTART_FREEZE_STEPS have passed. Without
+# this a clearance put the ball back where it left, next to the blue
+# hunter, and a missed blue shot left it beside the yellow goal; with the
+# ball merely dropped at the spot (first version) the taker still had to
+# win it against a hunter released 0.5 m away. The SSL rule distance is
+# 0.5 m; 1.0 m is a training allowance and stated as such.
+RESTART_CLEAR_DIST = 1.0
+RESTART_TAKER_OFFSET = 0.16
 RESTART_IN_PLAY_DIST = 0.05
 RESTART_FREEZE_STEPS = 40
 # Reverse curriculum on level 5 (difficulty in [0, 1]): the spawn is the
@@ -332,14 +378,14 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # before predict so the same policy class can act as blue.
         self.frozen_obs_dim = None
 
-        # Role-index: one-hot agent identity appended to obs. Breaks the
-        # permutation symmetry between yellow_a/yellow_b so the shared policy
-        # can specialize into roles (carrier/receiver, attacker/defender).
+        # Role-index: one-hot agent identity appended to obs (as the last
+        # two dims). Breaks the permutation symmetry between yellow_a/yellow_b
+        # so the shared policy can specialize into roles (carrier/receiver,
+        # attacker/defender).
         self.role_index = role_index
-        self.single_obs_dim = (
-            SINGLE_OBS_DIM_BASE + ROLE_INDEX_DIM if role_index
-            else SINGLE_OBS_DIM_BASE
-        ) + EPISODE_STATE_DIM
+        self.single_obs_dim = SINGLE_OBS_DIM_BASE + EPISODE_STATE_DIM + (
+            ROLE_INDEX_DIM if role_index else 0
+        )
 
         # OOB curriculum: skip robot-OOB termination during the first
         # `oob_grace_steps` per-env steps so early-stage agents get more
@@ -885,17 +931,20 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             ):
                 obs[slot] = -obs[slot]
 
-        if self.role_index:
-            role = np.zeros(ROLE_INDEX_DIM, dtype=np.float32)
-            role[idx] = 1.0
-            obs = np.concatenate([obs, role]).astype(np.float32)
-
-        # Appended LAST so `blue_obs[..., :frozen_obs_dim]` still hands a
-        # legacy 52-dim (or 54-dim role-index) opponent exactly its own
-        # layout, and so a warm start can zero-init only the new columns.
+        # Appended after the base so `blue_obs[..., :frozen_obs_dim]` still
+        # hands a legacy 52-dim opponent exactly its own layout, and so a
+        # warm start can zero-init only the new columns.
         obs = np.concatenate(
             [obs, self._episode_state_obs(is_yellow, idx)]
         ).astype(np.float32)
+        if self.role_index:
+            # Appended LAST (after the episode state) so that a 56-dim
+            # checkpoint widens into the 58-dim layout by zero-init of the
+            # two trailing columns (train_2v2_selfplay._fit_param) — the
+            # policy starts function-identical and can then diverge per role.
+            role = np.zeros(ROLE_INDEX_DIM, dtype=np.float32)
+            role[idx] = 1.0
+            obs = np.concatenate([obs, role]).astype(np.float32)
         return obs
 
     # ---------- dribble enforcement (both teams) ----------
@@ -1017,10 +1066,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         if self.frozen_model is None:
             return np.zeros((N_BLUE, SINGLE_ACT_DIM), dtype=np.float32)
         blue_obs = self._stacked_obs_blue()
-        # Frozen blue may have been trained with a smaller obs (e.g. v3 has
-        # 38 dims, current env outputs 40 with role-index). Truncate to the
-        # frozen model's expected input dim — role-index lives in the trailing
-        # ROLE_INDEX_DIM slots, so this drops exactly those.
+        # Frozen blue may have been trained with a smaller obs (52 base,
+        # 56 with episode state, 58 with role index). Truncate to the frozen
+        # model's expected input dim — the layout only ever grows at the
+        # end, so the prefix is exactly the older layout.
         if (
             self.frozen_obs_dim is not None
             and self.frozen_obs_dim < blue_obs.shape[-1]
@@ -1061,17 +1110,20 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # Level 4 is the L3 drill with the blues let loose: they start from
         # their parking zone, so the pass has to come off under pressure.
         heuristic_active = (
-            self.blue_heuristic == "attacker"
+            self.blue_heuristic in ("attacker", "roles")
             and int(getattr(self, "curriculum_level", 5)) > 3
         )
         if heuristic_active:
-            # Blue 0 = aggressive (just chase + shoot), Blue 1 = defensive
-            # (chase if closer to ball, else fall back to defensive line).
+            # "attacker": Blue 0 = aggressive (just chase + shoot), Blue 1 =
+            # defensive (chase if closer to ball, else fall back to the
+            # defensive line). "roles": Blue 0 = the same hunter, Blue 1 =
+            # keeper (never chases outside its zone, see KEEPER_ZONE).
+            second = "keeper" if self.blue_heuristic == "roles" else "defensive"
             cmds.append(self._blue_heuristic_command(
                 self.frame.robots_blue[0], personality="aggressive",
             ))
             cmds.append(self._blue_heuristic_command(
-                self.frame.robots_blue[1], personality="defensive",
+                self.frame.robots_blue[1], personality=second,
             ))
         else:
             cmds.append(self._robot_command(
@@ -1119,6 +1171,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         )
         if personality == "defensive":
             cmd = blue_defender_heuristic_2v2(self, robot, yellows)
+        elif personality == "keeper":
+            cmd = blue_keeper_heuristic_2v2(self, robot, yellows)
         else:
             cmd = blue_attacker_heuristic_2v2(self, robot, yellows)
         angle_rad = math.radians(robot.theta)
@@ -1541,28 +1595,63 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             taker = None
             bx = float(np.clip(cur.ball.x, -max_x + RESTART_BALL_MARGIN, max_x - RESTART_BALL_MARGIN))
             by = float(np.clip(cur.ball.y, -max_y + RESTART_BALL_MARGIN, max_y - RESTART_BALL_MARGIN))
-        pos.ball = Ball(x=bx, y=by, v_x=0.0, v_y=0.0)
         other = {"y": "b", "b": "y"}.get(taker)
-        for key, team_in, team_out in (
-            ("y", cur.robots_yellow, pos.robots_yellow),
-            ("b", cur.robots_blue, pos.robots_blue),
-        ):
+        lim_x = max_x - RESTART_ROBOT_MARGIN
+        lim_y = max_y - RESTART_ROBOT_MARGIN
+        clamp = lambda x, y: (float(np.clip(x, -lim_x, lim_x)), float(np.clip(y, -lim_y, lim_y)))
+        new = {}  # (team, idx) -> (x, y, theta)
+        placed = []  # positions already taken, in placement order
+        if taker is not None:
+            # The taking team's nearer robot takes it: it stands at the
+            # spot (clamped to the robot margin, so it is never outside)
+            # facing its mate, with the ball at its dribbler. The mate is
+            # left where it is, so the pass has a real receiver to find.
+            team = cur.robots_yellow if taker == "y" else cur.robots_blue
+            taker_idx = min(range(2), key=lambda i: math.hypot(team[i].x - bx, team[i].y - by))
+            mate = team[1 - taker_idx]
+            tx, ty = clamp(bx, by)
+            # Face the mate's CLAMPED position (it may be outside the field
+            # itself, an excursion is no stoppage): from a spot on the
+            # margin box that direction points along or into the field,
+            # never out of it, so the ball stays >= RESTART_ROBOT_MARGIN
+            # inside — deeper than the RESTART_BALL_MARGIN of every spot.
+            mx, my = clamp(mate.x, mate.y)
+            dx, dy = mx - tx, my - ty
+            if math.hypot(dx, dy) < 2.0 * RESTART_TAKER_OFFSET:
+                dx, dy = -tx, -ty  # mate on top of the spot: face the centre
+            norm = math.hypot(dx, dy) or 1.0
+            dx, dy = dx / norm, dy / norm
+            bx, by = tx + dx * RESTART_TAKER_OFFSET, ty + dy * RESTART_TAKER_OFFSET
+            new[(taker, taker_idx)] = (tx, ty, math.degrees(math.atan2(dy, dx)))
+            placed.append((tx, ty))
+            # The mate must not sit on the taker's new spot.
+            dist = math.hypot(mx - tx, my - ty)
+            if dist < 2.0 * RESTART_TAKER_OFFSET:
+                mx, my = clamp(tx + dx * 2.0 * RESTART_TAKER_OFFSET, ty + dy * 2.0 * RESTART_TAKER_OFFSET)
+            new[(taker, 1 - taker_idx)] = (mx, my, float(mate.theta))
+            placed.append((mx, my))
+        pos.ball = Ball(x=bx, y=by, v_x=0.0, v_y=0.0)
+        for key, team_in in (("y", cur.robots_yellow), ("b", cur.robots_blue)):
             for i in range(2):
+                if (key, i) in new:
+                    continue
                 r = team_in[i]
-                x = float(np.clip(r.x, -max_x + RESTART_ROBOT_MARGIN, max_x - RESTART_ROBOT_MARGIN))
-                y = float(np.clip(r.y, -max_y + RESTART_ROBOT_MARGIN, max_y - RESTART_ROBOT_MARGIN))
-                if key == other:
-                    # The non-taking team keeps its distance from the ball.
-                    dx, dy = x - bx, y - by
-                    dist = math.hypot(dx, dy)
-                    if dist < RESTART_CLEAR_DIST:
-                        if dist < 1e-6:
-                            dx, dy, dist = 1.0, 0.0, 1.0
-                        x = bx + dx / dist * RESTART_CLEAR_DIST
-                        y = by + dy / dist * RESTART_CLEAR_DIST
-                        x = float(np.clip(x, -max_x + RESTART_ROBOT_MARGIN, max_x - RESTART_ROBOT_MARGIN))
-                        y = float(np.clip(y, -max_y + RESTART_ROBOT_MARGIN, max_y - RESTART_ROBOT_MARGIN))
-                team_out[i] = Robot(x=x, y=y, theta=float(r.theta))
+                x, y = clamp(r.x, r.y)
+                if key == other and math.hypot(x - bx, y - by) < RESTART_CLEAR_DIST:
+                    # The non-taking team keeps its distance from the ball:
+                    # the nearest free point on the RESTART_CLEAR_DIST
+                    # circle inside the margin box. A radial push followed
+                    # by a clamp put a robot near the line right back
+                    # beside the ball (and the taker).
+                    x, y = self._clear_spot(x, y, bx, by, max_x, max_y, placed)
+                new[(key, i)] = (x, y, float(r.theta))
+                placed.append((x, y))
+        # Insert in index order: the simulator reads the dicts in insertion
+        # order and would otherwise swap the ids.
+        for key, team_out in (("y", pos.robots_yellow), ("b", pos.robots_blue)):
+            for i in range(2):
+                x, y, theta = new[(key, i)]
+                team_out[i] = Robot(x=x, y=y, theta=theta)
         self._freeze = None
         if other is not None:
             self._freeze = dict(
@@ -1585,6 +1674,29 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             (self.dribble_start_pos_b, None),
         ):
             lst[0] = lst[1] = val
+
+    @staticmethod
+    def _clear_spot(x, y, bx, by, max_x, max_y, occupied=()):
+        """Point RESTART_CLEAR_DIST from the ball, inside the robot margin
+        box and not on top of an already placed robot, closest to (x, y).
+        The ball is at least RESTART_ROBOT_MARGIN inside, so the inward
+        half of the circle always has candidates; the occupancy filter is
+        dropped if it would leave none."""
+        lim_x = max_x - RESTART_ROBOT_MARGIN
+        lim_y = max_y - RESTART_ROBOT_MARGIN
+        cands = []
+        for k in range(36):
+            a = math.radians(10.0 * k)
+            cx = bx + RESTART_CLEAR_DIST * math.cos(a)
+            cy = by + RESTART_CLEAR_DIST * math.sin(a)
+            if abs(cx) <= lim_x and abs(cy) <= lim_y:
+                cands.append((cx, cy))
+        free = [c for c in cands
+                if all(math.hypot(c[0] - ox, c[1] - oy) >= 2.0 * RESTART_TAKER_OFFSET for ox, oy in occupied)]
+        pool = free or cands
+        if not pool:  # cannot happen for a ball inside the margins
+            return (float(np.clip(x, -lim_x, lim_x)), float(np.clip(y, -lim_y, lim_y)))
+        return min(pool, key=lambda c: math.hypot(c[0] - x, c[1] - y))
 
     # ---------- initial positions ----------
 

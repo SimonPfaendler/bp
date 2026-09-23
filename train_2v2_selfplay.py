@@ -64,10 +64,13 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
                 goal_reward_solo=None, curriculum_target_level=5,
                 pass_gate="loose", dribble_rule="soft", shaping="v1",
                 restarts="off", difficulty=None, difficulty_threshold=0.6,
-                difficulty_step=0.05, difficulty_window=50):
+                difficulty_step=0.05, difficulty_window=50, role_index=False):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
+            # One-hot agent id as the last two obs dims: lets the shared
+            # policy play different roles instead of the same thing twice.
+            role_index=role_index,
             # "attacker": blue 0 chases+shoots, blue 1 holds the goal-ball
             # line. Mutually exclusive with frozen_path (see env docstring).
             blue_heuristic=blue_heuristic,
@@ -107,15 +110,19 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
     return _init
 
 
-def _fit_param(old, new_shape):
+def _fit_param(old, new_shape, insert_at=None):
     """Adapt one old parameter to a grown input layer.
 
     Appending observation dims only widens the FIRST Linear's weight along
     its last axis. Copying the old columns and zero-initialising the new
     ones makes the network function-IDENTICAL to the old one at init, so an
-    obs-layout change costs no accumulated weights. Returns None when the
-    shapes are not such an append-only growth, in which case the caller
-    falls back to skipping the whole module.
+    obs-layout change costs no accumulated weights. The zero columns go at
+    the END of the old columns unless `insert_at` says where the old input
+    grew: SB3's ContinuousCritic feeds cat([obs, action]), so its first
+    layer grows in the MIDDLE (at the old obs width) and an end-append
+    would put the old action weights on the new obs dims. Returns None when
+    the shapes are not such a growth, in which case the caller falls back
+    to skipping the whole module.
     """
     if tuple(old.shape) == tuple(new_shape):
         return old
@@ -124,8 +131,14 @@ def _fit_param(old, new_shape):
         and tuple(old.shape[:-1]) == tuple(new_shape[:-1])
         and new_shape[-1] > old.shape[-1]
     ):
+        n_old = old.shape[-1]
+        at = n_old if insert_at is None else int(insert_at)
+        if not 0 <= at <= n_old:
+            return None
         grown = torch.zeros(tuple(new_shape), dtype=old.dtype)
-        grown[..., : old.shape[-1]] = old
+        grown[..., :at] = old[..., :at]
+        if at < n_old:
+            grown[..., at + (new_shape[-1] - n_old):] = old[..., at:]
         return grown
     return None
 
@@ -661,13 +674,13 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   curriculum_target_level=5, pass_gate="loose",
                   dribble_rule="soft", shaping="v1", restarts="off",
                   difficulty=None, difficulty_threshold=0.6, difficulty_step=0.05,
-                  difficulty_window=50):
+                  difficulty_window=50, role_index=False):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob,
                     curriculum_start_level, blue_heuristic, goal_reward_solo,
                     curriculum_target_level, pass_gate, dribble_rule, shaping,
                     restarts, difficulty, difficulty_threshold, difficulty_step,
-                    difficulty_window)
+                    difficulty_window, role_index)
         for i in range(n_envs)
     ]
     if algo == "masac":
@@ -693,9 +706,10 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           noise_repeat_s=None, noise_repeat_max=16, target_level=None,
           pass_gate="loose", dribble_rule="soft", shaping="v1",
           restarts="off", difficulty=None, difficulty_threshold=0.6,
-          difficulty_step=0.05, difficulty_window=50, max_minutes=None):
+          difficulty_step=0.05, difficulty_window=50, max_minutes=None,
+          role_index=False):
     assert algo in ("masac", "sac"), algo
-    assert blue_heuristic in (None, "attacker"), blue_heuristic
+    assert blue_heuristic in (None, "attacker", "roles"), blue_heuristic
     assert net in ("flat", "deepsets", "deepsets_mean"), net
     if net.startswith("deepsets") and algo == "masac":
         raise NotImplementedError(
@@ -783,6 +797,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         difficulty_threshold=difficulty_threshold,
         difficulty_step=difficulty_step,
         difficulty_window=difficulty_window,
+        role_index=role_index,
     )
     if goal_reward_solo is not None:
         print(
@@ -790,9 +805,12 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             f"solo goal +{goal_reward_solo}"
         )
     opponent = (
-        f"heuristic({blue_heuristic}: blue0 aggressive, blue1 defensive)"
+        f"heuristic({blue_heuristic}: blue0 hunter, blue1 "
+        f"{'keeper' if blue_heuristic == 'roles' else 'defensive'})"
         if blue_heuristic else f"frozen={frozen_path}"
     )
+    if role_index:
+        print("Role index on: obs dims 56-57 are the agent's one-hot id")
     print(
         f"2v2 {algo_tag} self-play | opponent={opponent} | seed={seed} | "
         f"envs={n_envs} | vec_slots={env.num_envs} | "
@@ -898,13 +916,29 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         groups = {}
         for k, v in old_state.items():
             groups.setdefault(k.split(".")[0], []).append((k, v))
+        # Widening is only defined for the flat stock-SAC nets: the actor's
+        # first Linear sees the obs alone (new dims are appended), the
+        # critics' first Linear sees cat([obs, action]) (new dims go in
+        # front of the action columns). The deepsets extractor and the
+        # MASAC joint critic grow in the middle of their inputs in other
+        # ways, so a grown tensor there skips the module instead.
+        widen_ok = algo == "sac" and net == "flat"
         for prefix, items in groups.items():
             fitted, ok, n_grown = {}, True, 0
             for k, v in items:
                 if k not in new_state:
                     ok = False
                     break
-                f = _fit_param(v, new_state[k].shape)
+                grown = tuple(v.shape) != tuple(new_state[k].shape)
+                if grown and not widen_ok:
+                    ok = False
+                    break
+                insert_at = (
+                    v.shape[-1] - act_dim
+                    if grown and prefix in ("critic", "critic_target")
+                    else None
+                )
+                f = _fit_param(v, new_state[k].shape, insert_at)
                 if f is None:
                     ok = False
                     break
@@ -1196,12 +1230,20 @@ if __name__ == "__main__":
                         help="Curriculum target level. Default 5. Set equal "
                              "to --start_level to stay on a drill (2 or 3).")
     parser.add_argument("--blue_heuristic", default=None,
-                        choices=["attacker"],
+                        choices=["attacker", "roles"],
                         help="Hand-coded blue team instead of a frozen "
-                             "checkpoint: blue 0 chases and shoots, blue 1 "
-                             "holds the goal-ball line. Gives a fixed, "
-                             "non-exploitable evaluation baseline and a "
-                             "persistently blocked shot lane.")
+                             "checkpoint. attacker: blue 0 chases and "
+                             "shoots, blue 1 holds the goal-ball line but "
+                             "chases too when it is the closer one. roles: "
+                             "blue 0 hunts, blue 1 is a keeper that leaves "
+                             "its line only for balls near its goal, so the "
+                             "two never chase the same ball.")
+    parser.add_argument("--role_index", action="store_true",
+                        help="Append the agent's one-hot id as the last two "
+                             "obs dims (56 -> 58) so the shared policy can "
+                             "take different roles. A 56-dim --init_path is "
+                             "widened with zero columns (identical function "
+                             "at init).")
     parser.add_argument("--target_action_std", type=float, default=None,
                         help="Entropy target from a target action std "
                              "(FlashSAC uses 0.15) instead of -|A|. Keeps a "
@@ -1238,6 +1280,7 @@ if __name__ == "__main__":
         pass_scenario_prob_start=args.pass_scenario_prob_start,
         net=args.net, start_level=args.start_level,
         load_buffer=args.load_buffer, blue_heuristic=args.blue_heuristic,
+        role_index=args.role_index,
         goal_reward_solo=args.goal_reward_solo,
         target_action_std=args.target_action_std,
         noise_repeat_s=args.noise_repeat_s,

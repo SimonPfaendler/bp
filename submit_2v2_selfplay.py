@@ -12,7 +12,7 @@ def run_experiment(
     target_action_std=None, noise_repeat_s=None, target_level=None,
     pass_gate=None, dribble_rule=None, shaping=None, restarts=None,
     difficulty=None, difficulty_threshold=None, difficulty_step=None,
-    difficulty_window=None, max_minutes=None,
+    difficulty_window=None, max_minutes=None, role_index=False,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -58,6 +58,8 @@ def run_experiment(
         cmd += f" --difficulty_step {difficulty_step}"
     if difficulty_window is not None:
         cmd += f" --difficulty_window {difficulty_window}"
+    if role_index:
+        cmd += " --role_index"
     if max_minutes is not None:
         cmd += f" --max_minutes {max_minutes}"
     os.system(cmd)
@@ -186,7 +188,12 @@ def main():
     time_min = os.environ.get("TIME_MIN")
     max_minutes = float(time_min) if time_min else None
     algo = "sac"
-    blue_heuristic = "attacker"
+    # BLUE=roles: blue 0 hunts, blue 1 keeps goal and never joins the chase
+    # (the "attacker" pair double-chased loose balls). ROLE=1: one-hot agent
+    # id appended to the obs so the two yellows can stop doing the same
+    # thing; a 56-dim INIT_PATH is widened with zero columns.
+    blue_heuristic = os.environ.get("BLUE", "attacker")
+    role_index = os.environ.get("ROLE", "0") not in ("", "0", "false", "False")
 
     job = executor.submit(
         run_experiment, reward_type, seed, n_pairs,
@@ -195,13 +202,14 @@ def main():
         None, "flat", "off",
         level, blue_heuristic, goal_reward_solo, None, None, level,
         pass_gate, dribble_rule, shaping, restarts,
-        difficulty, diff_thr, diff_step, diff_win, max_minutes,
+        difficulty, diff_thr, diff_step, diff_win, max_minutes, role_index,
     )
     print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} "
           f"[init={init_path or 'scratch'}, start=target={level}, "
           f"pass_gate={pass_gate or 'loose'}, solo={goal_reward_solo}, "
           f"dribble={dribble_rule or 'soft'}, shaping={shaping or 'v1'}, "
           f"restarts={restarts or 'off'}, difficulty={difficulty}, "
+          f"blue={blue_heuristic}, role_index={role_index}, "
           f"steps={total_steps}, time_min={max_minutes}]")
 
 

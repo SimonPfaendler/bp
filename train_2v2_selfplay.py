@@ -146,6 +146,29 @@ def _load_any(path):
         return MASAC.load(path, device="cpu")
 
 
+class TimeBudgetCallback(BaseCallback):
+    """Stop training gracefully after `minutes` of wall time, so the final
+    save still lands inside a fixed Slurm allocation whatever the node's
+    fps. total_steps then only caps the run."""
+
+    def __init__(self, minutes, verbose=1):
+        super().__init__(verbose)
+        self.budget = float(minutes) * 60.0
+        self.t0 = None
+
+    def _on_training_start(self) -> None:
+        self.t0 = time.time()
+
+    def _on_step(self) -> bool:
+        if time.time() - self.t0 >= self.budget:
+            print(
+                f"[TimeBudget] {self.budget / 60:.0f} min reached at "
+                f"{self.num_timesteps} steps — stopping to save"
+            )
+            return False
+        return True
+
+
 class CurriculumCallback(BaseCallback):
     """Rolling-window curriculum: start at Level 1 (easy scoring chance),
     flip to Level 5 (chaos) once rolling success_rate clears `threshold`.
@@ -670,7 +693,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           noise_repeat_s=None, noise_repeat_max=16, target_level=None,
           pass_gate="loose", dribble_rule="soft", shaping="v1",
           restarts="off", difficulty=None, difficulty_threshold=0.6,
-          difficulty_step=0.05, difficulty_window=50):
+          difficulty_step=0.05, difficulty_window=50, max_minutes=None):
     assert algo in ("masac", "sac"), algo
     assert blue_heuristic in (None, "attacker"), blue_heuristic
     assert net in ("flat", "deepsets", "deepsets_mean"), net
@@ -1060,6 +1083,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             name_prefix=run_name, save_replay_buffer=True,
         ),
     ]
+    if max_minutes is not None:
+        callback_list.append(TimeBudgetCallback(max_minutes))
     # BC auxiliary loss: couple the actor to the demo actions. Works for both
     # algos — the callback unstacks MASAC's joint demo batches per-agent.
     if demos is not None and bc_coef > 0.0:
@@ -1164,6 +1189,9 @@ if __name__ == "__main__":
     parser.add_argument("--difficulty_step", type=float, default=0.05)
     parser.add_argument("--difficulty_window", type=int, default=50,
                         help="Episodes per env in the rolling promotion window.")
+    parser.add_argument("--max_minutes", type=float, default=None,
+                        help="Stop training gracefully after this wall time "
+                             "and save; set below the Slurm limit.")
     parser.add_argument("--target_level", type=int, default=None,
                         help="Curriculum target level. Default 5. Set equal "
                              "to --start_level to stay on a drill (2 or 3).")
@@ -1221,4 +1249,5 @@ if __name__ == "__main__":
         difficulty=args.difficulty, difficulty_threshold=args.difficulty_threshold,
         difficulty_step=args.difficulty_step,
         difficulty_window=args.difficulty_window,
+        max_minutes=args.max_minutes,
     )

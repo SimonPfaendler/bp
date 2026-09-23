@@ -12,7 +12,7 @@ def run_experiment(
     target_action_std=None, noise_repeat_s=None, target_level=None,
     pass_gate=None, dribble_rule=None, shaping=None, restarts=None,
     difficulty=None, difficulty_threshold=None, difficulty_step=None,
-    difficulty_window=None,
+    difficulty_window=None, max_minutes=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -58,6 +58,8 @@ def run_experiment(
         cmd += f" --difficulty_step {difficulty_step}"
     if difficulty_window is not None:
         cmd += f" --difficulty_window {difficulty_window}"
+    if max_minutes is not None:
+        cmd += f" --max_minutes {max_minutes}"
     os.system(cmd)
 
 
@@ -176,7 +178,13 @@ def main():
     reward_type = "dense"
     n_pairs = 24
     seed = 822
-    total_steps = 3_000_000
+    # TOTAL_STEPS caps the run; TIME_MIN stops it gracefully after that many
+    # minutes and saves (3M steps took 20-24 min depending on the node, so
+    # a fixed step count either wastes the slot or gets killed before the
+    # final save). On the 30-min dev partition: TOTAL_STEPS=6000000 TIME_MIN=27.
+    total_steps = int(os.environ.get("TOTAL_STEPS", "3000000"))
+    time_min = os.environ.get("TIME_MIN")
+    max_minutes = float(time_min) if time_min else None
     algo = "sac"
     blue_heuristic = "attacker"
 
@@ -187,13 +195,14 @@ def main():
         None, "flat", "off",
         level, blue_heuristic, goal_reward_solo, None, None, level,
         pass_gate, dribble_rule, shaping, restarts,
-        difficulty, diff_thr, diff_step, diff_win,
+        difficulty, diff_thr, diff_step, diff_win, max_minutes,
     )
     print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} "
           f"[init={init_path or 'scratch'}, start=target={level}, "
           f"pass_gate={pass_gate or 'loose'}, solo={goal_reward_solo}, "
           f"dribble={dribble_rule or 'soft'}, shaping={shaping or 'v1'}, "
-          f"restarts={restarts or 'off'}, difficulty={difficulty}]")
+          f"restarts={restarts or 'off'}, difficulty={difficulty}, "
+          f"steps={total_steps}, time_min={max_minutes}]")
 
 
 if __name__ == "__main__":

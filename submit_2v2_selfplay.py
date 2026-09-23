@@ -12,6 +12,7 @@ def run_experiment(
     target_action_std=None, noise_repeat_s=None, target_level=None,
     pass_gate=None, dribble_rule=None, shaping=None, restarts=None,
     difficulty=None, difficulty_threshold=None, difficulty_step=None,
+    difficulty_window=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -55,6 +56,8 @@ def run_experiment(
         cmd += f" --difficulty_threshold {difficulty_threshold}"
     if difficulty_step is not None:
         cmd += f" --difficulty_step {difficulty_step}"
+    if difficulty_window is not None:
+        cmd += f" --difficulty_window {difficulty_window}"
     os.system(cmd)
 
 
@@ -134,7 +137,8 @@ def main():
     #                      thirds of d move the blues, then the mate, then
     #                      ball + carrier; each env promotes itself by
     #                      DIFF_STEP (0.05) once its rolling rate of goals
-    #                      after a strict pass clears DIFF_THR (0.6). The old
+    #                      after a strict pass over DIFF_WIN (50) episodes
+    #                      clears DIFF_THR (0.6). The old
     #                      staged pass scenarios are off while a difficulty
     #                      is set. When chaining, set DIFF to the value the
     #                      previous run reached (curriculum/difficulty).
@@ -166,6 +170,7 @@ def main():
     difficulty = float(diff) if diff is not None else None
     diff_thr = os.environ.get("DIFF_THR"); diff_thr = float(diff_thr) if diff_thr else None
     diff_step = os.environ.get("DIFF_STEP"); diff_step = float(diff_step) if diff_step else None
+    diff_win = os.environ.get("DIFF_WIN"); diff_win = int(diff_win) if diff_win else None
     pass_scenario_prob = 0.35 if level == 5 else 0.0
     init_path = os.environ.get("INIT_PATH")  # None = from scratch
     reward_type = "dense"
@@ -182,7 +187,7 @@ def main():
         None, "flat", "off",
         level, blue_heuristic, goal_reward_solo, None, None, level,
         pass_gate, dribble_rule, shaping, restarts,
-        difficulty, diff_thr, diff_step,
+        difficulty, diff_thr, diff_step, diff_win,
     )
     print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} "
           f"[init={init_path or 'scratch'}, start=target={level}, "

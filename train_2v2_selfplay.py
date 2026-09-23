@@ -64,7 +64,7 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
                 goal_reward_solo=None, curriculum_target_level=5,
                 pass_gate="loose", dribble_rule="soft", shaping="v1",
                 restarts="off", difficulty=None, difficulty_threshold=0.6,
-                difficulty_step=0.05):
+                difficulty_step=0.05, difficulty_window=50):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
@@ -100,6 +100,7 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
             difficulty=difficulty,
             difficulty_threshold=difficulty_threshold,
             difficulty_step=difficulty_step,
+            difficulty_window=difficulty_window,
         )
         env.reset(seed=seed)
         return env
@@ -636,12 +637,14 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   blue_heuristic=None, goal_reward_solo=None,
                   curriculum_target_level=5, pass_gate="loose",
                   dribble_rule="soft", shaping="v1", restarts="off",
-                  difficulty=None, difficulty_threshold=0.6, difficulty_step=0.05):
+                  difficulty=None, difficulty_threshold=0.6, difficulty_step=0.05,
+                  difficulty_window=50):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob,
                     curriculum_start_level, blue_heuristic, goal_reward_solo,
                     curriculum_target_level, pass_gate, dribble_rule, shaping,
-                    restarts, difficulty, difficulty_threshold, difficulty_step)
+                    restarts, difficulty, difficulty_threshold, difficulty_step,
+                    difficulty_window)
         for i in range(n_envs)
     ]
     if algo == "masac":
@@ -667,7 +670,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           noise_repeat_s=None, noise_repeat_max=16, target_level=None,
           pass_gate="loose", dribble_rule="soft", shaping="v1",
           restarts="off", difficulty=None, difficulty_threshold=0.6,
-          difficulty_step=0.05):
+          difficulty_step=0.05, difficulty_window=50):
     assert algo in ("masac", "sac"), algo
     assert blue_heuristic in (None, "attacker"), blue_heuristic
     assert net in ("flat", "deepsets", "deepsets_mean"), net
@@ -756,6 +759,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         difficulty=difficulty,
         difficulty_threshold=difficulty_threshold,
         difficulty_step=difficulty_step,
+        difficulty_window=difficulty_window,
     )
     if goal_reward_solo is not None:
         print(
@@ -1158,6 +1162,8 @@ if __name__ == "__main__":
                         help="Rolling rate of goals after a strict pass that "
                              "promotes difficulty by --difficulty_step.")
     parser.add_argument("--difficulty_step", type=float, default=0.05)
+    parser.add_argument("--difficulty_window", type=int, default=50,
+                        help="Episodes per env in the rolling promotion window.")
     parser.add_argument("--target_level", type=int, default=None,
                         help="Curriculum target level. Default 5. Set equal "
                              "to --start_level to stay on a drill (2 or 3).")
@@ -1214,4 +1220,5 @@ if __name__ == "__main__":
         restarts=args.restarts,
         difficulty=args.difficulty, difficulty_threshold=args.difficulty_threshold,
         difficulty_step=args.difficulty_step,
+        difficulty_window=args.difficulty_window,
     )

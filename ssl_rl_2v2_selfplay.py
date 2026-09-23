@@ -195,7 +195,9 @@ RESTART_FREEZE_STEPS = 40
 # / .07 (ball) / .00 (carrier), so the three thirds of d move, in order,
 # the blues, then the mate, then ball + carrier. Each env promotes itself
 # by difficulty_step once the rolling rate of goals after a strict pass
-# over difficulty_window episodes clears difficulty_threshold. The staged
+# over difficulty_window episodes clears difficulty_threshold (50 episodes:
+# a 200-episode window let a 24-env, 3M-step segment promote about half the
+# envs once — 0.029 mean difficulty). The staged
 # pass scenarios are not rolled while a difficulty is set. A chained run
 # must be started at the difficulty the previous one reached (log
 # curriculum/difficulty); checkpoints do not carry it.
@@ -239,7 +241,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         difficulty=None,
         difficulty_step=0.05,
         difficulty_threshold=0.6,
-        difficulty_window=200,
+        difficulty_window=50,
     ):
         super().__init__(
             field_type=1,

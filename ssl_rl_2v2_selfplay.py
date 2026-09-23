@@ -174,7 +174,12 @@ DRIBBLE_FOUL_PENALTY = 2.0
 RESTART_BALL_MARGIN = 0.2
 RESTART_ROBOT_MARGIN = 0.3
 RESTART_BALL_OOB_PENALTY = 0.5    # charged to the team only if yellow put it out
-RESTART_ROBOT_OOB_PENALTY = 0.5   # charged to the robot that left
+RESTART_ROBOT_OOB_PENALTY = 0.5   # charged to the robot that left, once per excursion
+# A robot out of bounds is NOT a stoppage. Teleporting it back through
+# rsim.reset zeroed every velocity on the field, and the policy learned to
+# drive out on ball loss to halt blue's attack for -0.5 (robot_oob rose
+# 0.17 -> 0.72 -> 1.16 per episode with blue possession). Instead the
+# robot's command is overridden to drive back inside while play continues.
 # Rule-faithful restarts: a ball over the sideline is a throw-in for the team
 # that did not touch it last, a ball over a goal line a goal kick for the
 # defending team, or a corner for the attackers if the defenders put it out.
@@ -400,6 +405,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self._restart_pending = False       # restarts="on": reposition after this step
         self._restart_spec = None           # (kind, taker, x, y) for the ball restart
         self._freeze = None                 # {team, until, bx, by}: held still after a restart
+        self._outside = {("y", 0): False, ("y", 1): False, ("b", 0): False, ("b", 1): False}
         self.ball_restarts = 0
         self.robot_restarts = 0
         self.is_dribbling_b = [False, False]
@@ -490,6 +496,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self._restart_pending = False       # restarts="on": reposition after this step
         self._restart_spec = None           # (kind, taker, x, y) for the ball restart
         self._freeze = None                 # {team, until, bx, by}: held still after a restart
+        self._outside = {("y", 0): False, ("y", 1): False, ("b", 0): False, ("b", 1): False}
         self.ball_restarts = 0
         self.robot_restarts = 0
         self.is_dribbling_b = [False, False]
@@ -1075,6 +1082,20 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 self.frame.robots_blue[1], blue_action[1],
                 self.must_release_b[1], yellow=False,
             ))
+        if self.restarts == "on" and any(self._outside.values()):
+            # Out of bounds: drive straight back toward the field centre,
+            # no kick, no dribbler, while everyone else plays on.
+            for k, key in enumerate((("y", 0), ("y", 1), ("b", 0), ("b", 1))):
+                if not self._outside[key]:
+                    continue
+                robot = (self.frame.robots_yellow if key[0] == "y"
+                         else self.frame.robots_blue)[key[1]]
+                norm = math.hypot(robot.x, robot.y) or 1.0
+                back = np.array([-robot.x / norm, -robot.y / norm, 0.0, 0.0, -1.0, -1.0],
+                                dtype=np.float32)
+                cmds[k] = self._robot_command(
+                    robot, back, True, yellow=(key[0] == "y")
+                )
         frozen = self._frozen_team() if self._freeze is not None else None
         if frozen is not None:
             # Restart in progress: the non-taking team stands still.
@@ -1212,14 +1233,16 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 self._restart_spec = self._classify_ball_out(
                     ball, max_x, max_y, yellow_last, blue_last
                 )
-            for i, r in enumerate(yellows):
-                if abs(r.x) > max_x or abs(r.y) > max_y:
-                    rewards[i] -= RESTART_ROBOT_OOB_PENALTY
+            # Robots out of bounds: no stoppage. Charge the excursion once
+            # and let _build_commands drive the robot back in.
+            for key, r in ((("y", 0), yellows[0]), (("y", 1), yellows[1]),
+                           (("b", 0), blues[0]), (("b", 1), blues[1])):
+                out = abs(r.x) > max_x or abs(r.y) > max_y
+                if out and not self._outside[key]:
+                    if key[0] == "y":
+                        rewards[key[1]] -= RESTART_ROBOT_OOB_PENALTY
                     self.robot_restarts += 1
-                    self._restart_pending = True
-            for r in blues:
-                if abs(r.x) > max_x or abs(r.y) > max_y:
-                    self._restart_pending = True
+                self._outside[key] = out
             if self._restart_pending:
                 return rewards, done, truncated
 

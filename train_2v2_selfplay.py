@@ -119,37 +119,33 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
     return _init
 
 
-def _fit_param(old, new_shape, insert_at=None):
-    """Adapt one old parameter to a grown input layer.
+def _fit_first_layer(old, new_shape, act_dim, frame_stack=1):
+    """Adapt a first-Linear weight to a grown input.
 
-    Appending observation dims only widens the FIRST Linear's weight along
-    its last axis. Copying the old columns and zero-initialising the new
-    ones makes the network function-IDENTICAL to the old one at init, so an
-    obs-layout change costs no accumulated weights. The zero columns go at
-    the END of the old columns unless `insert_at` says where the old input
-    grew: SB3's ContinuousCritic feeds cat([obs, action]), so its first
-    layer grows in the MIDDLE (at the old obs width) and an end-append
-    would put the old action weights on the new obs dims. Returns None when
-    the shapes are not such a growth, in which case the caller falls back
-    to skipping the whole module.
+    The input grew in one of two ways, or both: observation dims appended
+    (role index, 56 -> 58) and/or frames stacked (VecFrameStack, newest
+    frame LAST). The old obs columns go to the newest frame's block, the
+    old action columns (critics see cat([obs, action])) stay at the end,
+    every new column is zero -> the network is function-IDENTICAL to the
+    old one at init, so an input-layout change costs no accumulated
+    weights. Returns None when the shapes do not fit that pattern, in which
+    case the caller skips the whole module.
     """
-    if tuple(old.shape) == tuple(new_shape):
-        return old
-    if (
-        old.dim() == len(new_shape)
-        and tuple(old.shape[:-1]) == tuple(new_shape[:-1])
-        and new_shape[-1] > old.shape[-1]
-    ):
-        n_old = old.shape[-1]
-        at = n_old if insert_at is None else int(insert_at)
-        if not 0 <= at <= n_old:
-            return None
-        grown = torch.zeros(tuple(new_shape), dtype=old.dtype)
-        grown[..., :at] = old[..., :at]
-        if at < n_old:
-            grown[..., at + (new_shape[-1] - n_old):] = old[..., at:]
-        return grown
-    return None
+    if old.dim() != len(new_shape) or tuple(old.shape[:-1]) != tuple(new_shape[:-1]):
+        return None
+    n_old, n_new = old.shape[-1], int(new_shape[-1])
+    old_obs, new_total = n_old - act_dim, n_new - act_dim
+    if n_new <= n_old or old_obs <= 0 or new_total % frame_stack:
+        return None
+    new_obs = new_total // frame_stack
+    if old_obs > new_obs:
+        return None
+    grown = torch.zeros(tuple(new_shape), dtype=old.dtype)
+    off = new_total - new_obs
+    grown[..., off:off + old_obs] = old[..., :old_obs]
+    if act_dim:
+        grown[..., new_total:] = old[..., old_obs:]
+    return grown
 
 
 def _load_any(path):
@@ -654,6 +650,9 @@ class BCLossCallback(BaseCallback):
             or self.demo_buffer.size() == 0
             or self.num_timesteps < self.learning_starts
             or self.n_calls % self.every != 0
+            # SAC critic warm-up (--critic_warmup_steps): the actor is
+            # frozen, BC must not move it either.
+            or self.num_timesteps < getattr(self.model, "critic_warmup_steps", 0)
         ):
             return True
         # During MASAC's critic warmup the actor must stay frozen — BC moving
@@ -750,8 +749,11 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           restarts="off", difficulty=None, difficulty_threshold=0.6,
           difficulty_step=0.05, difficulty_window=50, max_minutes=None,
           role_index=False, defense_frame_prob=0.0, foul_restart="off",
-          defense_difficulty=1.0):
+          defense_difficulty=1.0, critic_warmup_steps=0, frame_stack=1):
     assert algo in ("masac", "sac"), algo
+    assert int(frame_stack) >= 1, frame_stack
+    if int(frame_stack) > 1:
+        assert algo == "sac" and net == "flat", "frame_stack is wired for the stock-SAC flat net"
     assert blue_heuristic in (None, "attacker", "roles"), blue_heuristic
     assert net in ("flat", "deepsets", "deepsets_mean"), net
     if net.startswith("deepsets") and algo == "masac":
@@ -845,6 +847,17 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         foul_restart=foul_restart,
         defense_difficulty=defense_difficulty,
     )
+    if int(frame_stack) > 1:
+        # The last frame_stack observations side by side, newest LAST,
+        # zeros at the episode start (SB3 StackedObservations). The env
+        # itself stays 58-dim; the model sees 58 * frame_stack. A warm
+        # start from an unstacked checkpoint lands in the newest frame's
+        # block (see _fit_first_layer), so it starts function-identical.
+        from stable_baselines3.common.vec_env import VecFrameStack
+        single = int(env.observation_space.shape[-1])
+        env = VecFrameStack(env, n_stack=int(frame_stack))
+        print(f"Frame stack: {frame_stack} (obs {single} -> "
+              f"{single * int(frame_stack)}, newest frame last)")
     if defense_frame_prob > 0:
         if difficulty is None:
             print("WARNING: --defense_frame_prob has no effect without "
@@ -998,12 +1011,13 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
                 if grown and not widen_ok:
                     ok = False
                     break
-                insert_at = (
-                    v.shape[-1] - act_dim
-                    if grown and prefix in ("critic", "critic_target")
-                    else None
-                )
-                f = _fit_param(v, new_state[k].shape, insert_at)
+                f = v
+                if grown:
+                    f = _fit_first_layer(
+                        v, new_state[k].shape,
+                        act_dim if prefix in ("critic", "critic_target") else 0,
+                        frame_stack,
+                    )
                 if f is None:
                     ok = False
                     break
@@ -1017,8 +1031,9 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
                 if n_grown:
                     print(
                         f"  Module '{prefix}': {n_grown} tensor(s) widened "
-                        f"for appended obs dims (old columns kept, new "
-                        f"columns zero-init -> identical function at init)"
+                        f"for the new input layout (old columns kept in the "
+                        f"newest frame, new columns zero-init -> identical "
+                        f"function at init)"
                     )
             else:
                 skipped.extend(k for k, _ in items)
@@ -1137,21 +1152,37 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     # land in __dict__ and model.save() would try to cloudpickle the closure
     # (which drags in the SubprocVecEnv and fails on AuthenticationString).
     actor_lr, critic_lr, ent_lr = ACTOR_LR, CRITIC_LR, ENT_LR
+    # Critic warm-up: for the first critic_warmup_steps env steps of a
+    # (chained) run the actor and alpha learning rates are 0 and only the
+    # critic trains, on the rollouts of the frozen warm-started policy —
+    # policy evaluation before policy improvement. Every chained segment
+    # so far started with an empty buffer and a critic re-fitting to the
+    # new state distribution while the actor followed it: strict passes
+    # 0.69 -> 0.23 in the first 500k steps, 1.5M steps to recover.
+    warmup = int(critic_warmup_steps)
 
     def _split_lr_update(self, optimizers):
+        warm = self.num_timesteps < warmup
+        a_lr = 0.0 if warm else actor_lr
+        e_lr = 0.0 if warm else ent_lr
         for pg in self.actor.optimizer.param_groups:
-            pg["lr"] = actor_lr
+            pg["lr"] = a_lr
         for pg in self.critic.optimizer.param_groups:
             pg["lr"] = critic_lr
         if getattr(self, "ent_coef_optimizer", None) is not None:
             for pg in self.ent_coef_optimizer.param_groups:
-                pg["lr"] = ent_lr
-        self.logger.record("train/actor_lr", actor_lr)
+                pg["lr"] = e_lr
+        self.logger.record("train/actor_lr", a_lr)
         self.logger.record("train/critic_lr", critic_lr)
+        self.logger.record("train/critic_warmup", float(warm))
 
     type(model)._update_learning_rate = _split_lr_update
+    model.critic_warmup_steps = warmup  # read by BCLossCallback
     print(f"Actor LR: {ACTOR_LR} | Critic LR: {CRITIC_LR} | Critic WD: {CRITIC_WEIGHT_DECAY} "
           f"(enforced via _update_learning_rate override)")
+    if warmup > 0:
+        print(f"Critic warm-up: actor and alpha frozen for the first {warmup} "
+              f"env steps (critic trains on the frozen policy's rollouts)")
 
     # Demo mixing (DQfD-style): scripted pass->goal transitions live in a
     # separate buffer and a fixed fraction is blended into every batch, so the
@@ -1319,6 +1350,15 @@ if __name__ == "__main__":
                         help="With --restarts on: the strict dribbling foul "
                              "is a blue free kick at the spot instead of "
                              "the end of the episode.")
+    parser.add_argument("--critic_warmup_steps", type=int, default=0,
+                        help="Freeze actor and alpha for this many env steps "
+                             "at the start of a (chained) run so the critic "
+                             "re-fits to the new distribution first.")
+    parser.add_argument("--frame_stack", type=int, default=1,
+                        help="Stack the last k observations (newest last) via "
+                             "VecFrameStack; an unstacked --init_path is "
+                             "widened into the newest frame's block. SAC "
+                             "flat net only.")
     parser.add_argument("--role_index", action="store_true",
                         help="Append the agent's one-hot id as the last two "
                              "obs dims (56 -> 58) so the shared policy can "
@@ -1365,6 +1405,8 @@ if __name__ == "__main__":
         defense_frame_prob=args.defense_frame_prob,
         foul_restart=args.foul_restart,
         defense_difficulty=args.defense_difficulty,
+        critic_warmup_steps=args.critic_warmup_steps,
+        frame_stack=args.frame_stack,
         goal_reward_solo=args.goal_reward_solo,
         target_action_std=args.target_action_std,
         noise_repeat_s=args.noise_repeat_s,

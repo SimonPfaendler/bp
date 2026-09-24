@@ -14,6 +14,7 @@ def run_experiment(
     difficulty=None, difficulty_threshold=None, difficulty_step=None,
     difficulty_window=None, max_minutes=None, role_index=False,
     defense_frame_prob=None, foul_restart=None, defense_difficulty=None,
+    critic_warmup_steps=None, frame_stack=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -67,6 +68,10 @@ def run_experiment(
         cmd += f" --foul_restart {foul_restart}"
     if defense_difficulty is not None:
         cmd += f" --defense_difficulty {defense_difficulty}"
+    if critic_warmup_steps is not None:
+        cmd += f" --critic_warmup_steps {critic_warmup_steps}"
+    if frame_stack is not None:
+        cmd += f" --frame_stack {frame_stack}"
     if max_minutes is not None:
         cmd += f" --max_minutes {max_minutes}"
     os.system(cmd)
@@ -211,6 +216,12 @@ def main():
     # defender within 0.3 m of the shot line); 1 = the original frame.
     # SHAPING=team_def: ball->goal term may go negative under restarts.
     def_diff = os.environ.get("DEF_DIFF"); def_diff = float(def_diff) if def_diff else None
+    # CRIT_WARM=250000: actor and alpha frozen for the first 250k env steps
+    # of the segment, the critic re-fits first (every chained segment so far
+    # dipped hard in its first 500k steps). STACK=2: the last two obs side
+    # by side (newest last); the init checkpoint is widened function-identical.
+    crit_warm = os.environ.get("CRIT_WARM"); crit_warm = int(crit_warm) if crit_warm else None
+    stack = os.environ.get("STACK"); stack = int(stack) if stack else None
 
     job = executor.submit(
         run_experiment, reward_type, seed, n_pairs,
@@ -220,7 +231,7 @@ def main():
         level, blue_heuristic, goal_reward_solo, None, None, level,
         pass_gate, dribble_rule, shaping, restarts,
         difficulty, diff_thr, diff_step, diff_win, max_minutes, role_index,
-        def_prob, foul_restart, def_diff,
+        def_prob, foul_restart, def_diff, crit_warm, stack,
     )
     print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} "
           f"[init={init_path or 'scratch'}, start=target={level}, "
@@ -229,6 +240,7 @@ def main():
           f"restarts={restarts or 'off'}, difficulty={difficulty}, "
           f"blue={blue_heuristic}, role_index={role_index}, "
           f"def_prob={def_prob}, foul_restart={foul_restart or 'off'}, def_diff={def_diff}, "
+          f"critic_warmup={crit_warm}, frame_stack={stack}, "
           f"steps={total_steps}, time_min={max_minutes}]")
 
 

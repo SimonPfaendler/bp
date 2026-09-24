@@ -536,6 +536,14 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             self.frozen_obs_dim = int(
                 self.frozen_model.policy.observation_space.shape[-1]
             )
+            if self.frozen_obs_dim > self.single_obs_dim:
+                # A frame-stacked checkpoint (obs = k x single) cannot be
+                # fed the env's single frame; fail here, not on every step.
+                raise ValueError(
+                    f"frozen_path {p} expects {self.frozen_obs_dim}-dim obs, "
+                    f"the env produces {self.single_obs_dim}; frame-stacked "
+                    f"checkpoints are not supported as frozen opponents"
+                )
             return
         if not os.path.isdir(p):
             raise ValueError(

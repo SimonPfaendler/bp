@@ -65,15 +65,18 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
                 pass_gate="loose", dribble_rule="soft", shaping="v1",
                 restarts="off", difficulty=None, difficulty_threshold=0.6,
                 difficulty_step=0.05, difficulty_window=50, role_index=False,
-                defense_frame_prob=0.0, foul_restart="off"):
+                defense_frame_prob=0.0, foul_restart="off",
+                defense_difficulty=1.0):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
             # Share of episodes spawned as a blue attack on the yellow goal
-            # (see DEFENSE_* in the env); "on": the dribbling foul is a
+            # (see DEFENSE_* in the env), graded by defense_difficulty (0
+            # easy .. 1 the original frame); "on": the dribbling foul is a
             # blue free kick instead of the end of the episode.
             defense_frame_prob=defense_frame_prob,
             foul_restart=foul_restart,
+            defense_difficulty=defense_difficulty,
             # One-hot agent id as the last two obs dims: lets the shared
             # policy play different roles instead of the same thing twice.
             role_index=role_index,
@@ -711,14 +714,15 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   dribble_rule="soft", shaping="v1", restarts="off",
                   difficulty=None, difficulty_threshold=0.6, difficulty_step=0.05,
                   difficulty_window=50, role_index=False,
-                  defense_frame_prob=0.0, foul_restart="off"):
+                  defense_frame_prob=0.0, foul_restart="off",
+                  defense_difficulty=1.0):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob,
                     curriculum_start_level, blue_heuristic, goal_reward_solo,
                     curriculum_target_level, pass_gate, dribble_rule, shaping,
                     restarts, difficulty, difficulty_threshold, difficulty_step,
                     difficulty_window, role_index, defense_frame_prob,
-                    foul_restart)
+                    foul_restart, defense_difficulty)
         for i in range(n_envs)
     ]
     if algo == "masac":
@@ -745,7 +749,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           pass_gate="loose", dribble_rule="soft", shaping="v1",
           restarts="off", difficulty=None, difficulty_threshold=0.6,
           difficulty_step=0.05, difficulty_window=50, max_minutes=None,
-          role_index=False, defense_frame_prob=0.0, foul_restart="off"):
+          role_index=False, defense_frame_prob=0.0, foul_restart="off",
+          defense_difficulty=1.0):
     assert algo in ("masac", "sac"), algo
     assert blue_heuristic in (None, "attacker", "roles"), blue_heuristic
     assert net in ("flat", "deepsets", "deepsets_mean"), net
@@ -838,6 +843,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         role_index=role_index,
         defense_frame_prob=defense_frame_prob,
         foul_restart=foul_restart,
+        defense_difficulty=defense_difficulty,
     )
     if defense_frame_prob > 0:
         if difficulty is None:
@@ -846,7 +852,11 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
                   "level-5 curriculum frame only)")
         else:
             print(f"Defensive spawn: {defense_frame_prob:.2f} of the "
-                  f"episodes (not counted for difficulty promotion)")
+                  f"episodes at defense_difficulty {defense_difficulty:.2f} "
+                  f"(not counted for difficulty promotion)")
+    if shaping == "team_def":
+        print("Shaping team_def: ball->goal term may go negative "
+              f"(lower clip {-0.1}) under restarts")
     if foul_restart == "on":
         if restarts != "on":
             print("WARNING: --foul_restart on has no effect without "
@@ -1258,10 +1268,17 @@ if __name__ == "__main__":
                         help="'strict': after 1 m of dribbling the same robot "
                              "may not touch the ball again until another robot "
                              "has; doing so is a foul (episode over, -2).")
-    parser.add_argument("--shaping", default="v1", choices=["v1", "team"],
+    parser.add_argument("--shaping", default="v1", choices=["v1", "team", "team_def"],
                         help="'team': approach term only for the closer yellow, "
                              "no kick penalty, off-ball progress toward the "
-                             "goal, no anti-passivity charge. Full game only.")
+                             "goal, no anti-passivity charge. Full game only. "
+                             "'team_def': 'team' plus the ball->goal term may "
+                             "go negative under --restarts on (blue's progress "
+                             "costs, a block pays at once).")
+    parser.add_argument("--defense_difficulty", type=float, default=1.0,
+                        help="Grades the defensive spawn: 1 = original frame "
+                             "(hunter 0.5-2 m from the ball, defender up to "
+                             "0.8 m off the line), 0 = easy (2-3.5 m, 0.3 m).")
     parser.add_argument("--restarts", default="off", choices=["off", "on"],
                         help="'on': ball/robot out of bounds restarts play "
                              "from rest instead of ending the episode; only "
@@ -1347,6 +1364,7 @@ if __name__ == "__main__":
         role_index=args.role_index,
         defense_frame_prob=args.defense_frame_prob,
         foul_restart=args.foul_restart,
+        defense_difficulty=args.defense_difficulty,
         goal_reward_solo=args.goal_reward_solo,
         target_action_std=args.target_action_std,
         noise_repeat_s=args.noise_repeat_s,

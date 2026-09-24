@@ -262,6 +262,25 @@ FOUL_RESTART_PENALTY = 0.5
 DEFENSE_BALL_OFFSET = (0.5, 2.0)
 DEFENSE_DEFENDER_DIST = (1.0, 3.0)
 DEFENSE_DEFENDER_JITTER = 0.8
+# defense_difficulty in [0, 1] grades that frame: at 1 the ranges above
+# (the geometry the first defensive segment trained on, 13 % of spawns on
+# the shot line); at 0 the hunter starts DEFENSE_BALL_OFFSET_EASY from the
+# ball (1-1.5 s more before the shot) and the defender at most
+# DEFENSE_DEFENDER_JITTER_EASY off the line, so about a third of the
+# spawns block by construction and the critic sees the on/off-line
+# contrast often. Linear interpolation in between; same RNG draws.
+DEFENSE_BALL_OFFSET_EASY = (2.0, 3.5)
+DEFENSE_DEFENDER_JITTER_EASY = 0.3
+# shaping="team_def": "team" with the ball->goal term allowed to go
+# negative under restarts="on" (lower clip -0.1 as without restarts). The
+# clip was zeroed with the restarts because the time penalty plus
+# negative shaping made conceding fast cheaper than defending; the time
+# penalty is gone and the term is potential-based, so over an episode it
+# sums to the distance the ball gained whatever the duration. Without it
+# a block and a non-block differ only by the -5 that comes in 87 % of the
+# defensive spawns anyway; with it the ball bouncing off a defender pays
+# at once, the mechanism the 1v1 agent learned to block from.
+DEF_SHAPING_LO_GOAL = -0.1
 # Reverse curriculum on level 5 (difficulty in [0, 1]): the spawn is the
 # per-entity interpolation between the L4 drill frame (0: carrier with the
 # ball, mate in the zone, hunter 2-3 m off) and the chaos frame (1), both
@@ -320,6 +339,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         difficulty_window=50,
         defense_frame_prob=0.0,
         foul_restart="off",
+        defense_difficulty=1.0,
     ):
         super().__init__(
             field_type=1,
@@ -390,7 +410,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # while the team has the ball (the run into the zone); the
         # anti-passivity charge is off (waiting for the mate is fine, the
         # time penalty already exists).
-        assert shaping in ("v1", "team"), shaping
+        assert shaping in ("v1", "team", "team_def"), shaping
         self.shaping = shaping
         # See RESTART_* above. "off" keeps the terminal OOB rules.
         assert restarts in ("off", "on"), restarts
@@ -405,6 +425,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         assert 0.0 <= self.defense_frame_prob <= 1.0, defense_frame_prob
         assert foul_restart in ("off", "on"), foul_restart
         self.foul_restart = foul_restart
+        self.defense_difficulty = float(np.clip(defense_difficulty, 0.0, 1.0))
         # Frozen-model input dim (filled on lazy-load). If older than current
         # obs (e.g. v3 trained without role-index), we strip role-index dims
         # before predict so the same policy class can act as blue.
@@ -1412,7 +1433,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # Rewards moving toward the ball, penalizes moving away.
             if self.last_dist_to_ball is None:
                 self.last_dist_to_ball = [dist_a, dist_b]
-            team_shaping = self.shaping == "team" and not drill
+            team_shaping = self.shaping in ("team", "team_def") and not drill
             # On the pass drills only the approach is rewarded; the ball
             # moving away is what a kick looks like from the kicker's side.
             no_exits = self.restarts == "on"
@@ -1444,7 +1465,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             )
             if self.last_dist_ball_goal is not None and goal_shaping:
                 goal_delta = self.last_dist_ball_goal - dist_ball_goal
-                lo_goal = 0.0 if no_exits else -0.1
+                lo_goal = (
+                    DEF_SHAPING_LO_GOAL if self.shaping == "team_def"
+                    else (0.0 if no_exits else -0.1)
+                )
                 rewards += float(np.clip(goal_delta * 1.0, lo_goal, 0.15))
             self.last_dist_ball_goal = dist_ball_goal
 
@@ -1966,7 +1990,13 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         hy = float(rng.uniform(-2.0, 2.0))
         to_goal = goal - np.array([hx, hy])
         to_goal = to_goal / max(1e-6, float(np.linalg.norm(to_goal)))
-        off = float(rng.uniform(*DEFENSE_BALL_OFFSET))
+        dd = self.defense_difficulty
+        off_lo = DEFENSE_BALL_OFFSET_EASY[0] + dd * (DEFENSE_BALL_OFFSET[0] - DEFENSE_BALL_OFFSET_EASY[0])
+        off_hi = DEFENSE_BALL_OFFSET_EASY[1] + dd * (DEFENSE_BALL_OFFSET[1] - DEFENSE_BALL_OFFSET_EASY[1])
+        off = float(rng.uniform(off_lo, off_hi))
+        # Keep the ball >= 1 m short of the goal centre so the defender fits
+        # in front of it; never binds at dd = 1 (hunter >= 3 m from the goal).
+        off = min(off, float(np.linalg.norm(goal - np.array([hx, hy]))) - 1.0)
         bx, by = hx + off * float(to_goal[0]), hy + off * float(to_goal[1])
         pos.ball = Ball(x=bx, y=by)
         # Defender on the ball -> goal segment, short of the goal, off the
@@ -1976,7 +2006,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         u = seg / seg_len
         nrm = np.array([-u[1], u[0]])
         along = min(float(rng.uniform(*DEFENSE_DEFENDER_DIST)), seg_len - 0.5)
-        lat = float(rng.uniform(-DEFENSE_DEFENDER_JITTER, DEFENSE_DEFENDER_JITTER))
+        jit = DEFENSE_DEFENDER_JITTER_EASY + dd * (DEFENSE_DEFENDER_JITTER - DEFENSE_DEFENDER_JITTER_EASY)
+        lat = float(rng.uniform(-jit, jit))
         dx = bx + along * float(u[0]) + lat * float(nrm[0])
         dy = by + along * float(u[1]) + lat * float(nrm[1])
         dx, dy = self._clip_field(dx, dy, margin=0.3)

@@ -13,6 +13,7 @@ def run_experiment(
     pass_gate=None, dribble_rule=None, shaping=None, restarts=None,
     difficulty=None, difficulty_threshold=None, difficulty_step=None,
     difficulty_window=None, max_minutes=None, role_index=False,
+    defense_frame_prob=None, foul_restart=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -60,6 +61,10 @@ def run_experiment(
         cmd += f" --difficulty_window {difficulty_window}"
     if role_index:
         cmd += " --role_index"
+    if defense_frame_prob is not None:
+        cmd += f" --defense_frame_prob {defense_frame_prob}"
+    if foul_restart is not None:
+        cmd += f" --foul_restart {foul_restart}"
     if max_minutes is not None:
         cmd += f" --max_minutes {max_minutes}"
     os.system(cmd)
@@ -194,6 +199,12 @@ def main():
     # thing; a 56-dim INIT_PATH is widened with zero columns.
     blue_heuristic = os.environ.get("BLUE", "attacker")
     role_index = os.environ.get("ROLE", "0") not in ("", "0", "false", "False")
+    # DEF_PROB=0.25: a quarter of the episodes spawn as a blue attack on the
+    # yellow goal (the curriculum frame never puts a yellow behind the
+    # ball; measured 60-70 % blue goals from open play after a turnover).
+    # FOUL=on: the dribbling foul is a blue free kick instead of an -2 exit.
+    def_prob = os.environ.get("DEF_PROB"); def_prob = float(def_prob) if def_prob else None
+    foul_restart = os.environ.get("FOUL")                # None -> off
 
     job = executor.submit(
         run_experiment, reward_type, seed, n_pairs,
@@ -203,6 +214,7 @@ def main():
         level, blue_heuristic, goal_reward_solo, None, None, level,
         pass_gate, dribble_rule, shaping, restarts,
         difficulty, diff_thr, diff_step, diff_win, max_minutes, role_index,
+        def_prob, foul_restart,
     )
     print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} "
           f"[init={init_path or 'scratch'}, start=target={level}, "
@@ -210,6 +222,7 @@ def main():
           f"dribble={dribble_rule or 'soft'}, shaping={shaping or 'v1'}, "
           f"restarts={restarts or 'off'}, difficulty={difficulty}, "
           f"blue={blue_heuristic}, role_index={role_index}, "
+          f"def_prob={def_prob}, foul_restart={foul_restart or 'off'}, "
           f"steps={total_steps}, time_min={max_minutes}]")
 
 

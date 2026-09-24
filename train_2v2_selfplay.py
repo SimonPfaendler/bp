@@ -64,10 +64,16 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
                 goal_reward_solo=None, curriculum_target_level=5,
                 pass_gate="loose", dribble_rule="soft", shaping="v1",
                 restarts="off", difficulty=None, difficulty_threshold=0.6,
-                difficulty_step=0.05, difficulty_window=50, role_index=False):
+                difficulty_step=0.05, difficulty_window=50, role_index=False,
+                defense_frame_prob=0.0, foul_restart="off"):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
+            # Share of episodes spawned as a blue attack on the yellow goal
+            # (see DEFENSE_* in the env); "on": the dribbling foul is a
+            # blue free kick instead of the end of the episode.
+            defense_frame_prob=defense_frame_prob,
+            foul_restart=foul_restart,
             # One-hot agent id as the last two obs dims: lets the shared
             # policy play different roles instead of the same thing twice.
             role_index=role_index,
@@ -258,6 +264,16 @@ class StatsCallback(BaseCallback):
         self.chaos_success = deque(maxlen=300)
         self.chaos_passes = deque(maxlen=300)
         self.chaos_sap = deque(maxlen=300)
+        # Defensive spawn (defense_frame_prob) and the curriculum frame net
+        # of it: the promotion metric only sees the latter.
+        self.def_blue_goal = deque(maxlen=200)
+        self.def_success = deque(maxlen=200)
+        self.def_robot_oob = deque(maxlen=200)
+        self.def_ball_oob = deque(maxlen=200)
+        self.def_len = deque(maxlen=200)
+        self.curr_sasp = deque(maxlen=300)
+        self.curr_success = deque(maxlen=300)
+        self.curr_blue_goal = deque(maxlen=300)
 
     def _on_step(self) -> bool:
         dones = self.locals.get("dones", [])
@@ -300,6 +316,16 @@ class StatsCallback(BaseCallback):
                 self.chaos_sap.append(
                     float(infos[i].get("scored_after_pass", 0.0))
                 )
+            elif scen == "defense":
+                self.def_blue_goal.append(float(infos[i].get("blue_goal", 0.0)))
+                self.def_success.append(float(infos[i].get("is_success", 0.0)))
+                self.def_robot_oob.append(float(infos[i].get("robot_restarts", 0.0)))
+                self.def_ball_oob.append(float(infos[i].get("ball_restarts", 0.0)))
+                self.def_len.append(float(infos[i].get("episode", {}).get("l", 0.0)))
+            elif scen == "curriculum":
+                self.curr_sasp.append(float(infos[i].get("scored_after_strict_pass", 0.0)))
+                self.curr_success.append(float(infos[i].get("is_success", 0.0)))
+                self.curr_blue_goal.append(float(infos[i].get("blue_goal", 0.0)))
         if self.success_buffer:
             self.logger.record(
                 "selfplay/live_success_rate",
@@ -376,6 +402,16 @@ class StatsCallback(BaseCallback):
                 "scenario_chaos/scored_after_pass_rate",
                 float(np.mean(self.chaos_sap)),
             )
+        if self.def_blue_goal:
+            self.logger.record("scenario_defense/blue_goal_rate", float(np.mean(self.def_blue_goal)))
+            self.logger.record("scenario_defense/success_rate", float(np.mean(self.def_success)))
+            self.logger.record("scenario_defense/robot_oob_per_episode", float(np.mean(self.def_robot_oob)))
+            self.logger.record("scenario_defense/ball_oob_per_episode", float(np.mean(self.def_ball_oob)))
+            self.logger.record("scenario_defense/ep_len_mean", float(np.mean(self.def_len)))
+        if self.curr_sasp:
+            self.logger.record("scenario_curriculum/scored_after_strict_pass_rate", float(np.mean(self.curr_sasp)))
+            self.logger.record("scenario_curriculum/success_rate", float(np.mean(self.curr_success)))
+            self.logger.record("scenario_curriculum/blue_goal_rate", float(np.mean(self.curr_blue_goal)))
         return True
 
 
@@ -674,13 +710,15 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   curriculum_target_level=5, pass_gate="loose",
                   dribble_rule="soft", shaping="v1", restarts="off",
                   difficulty=None, difficulty_threshold=0.6, difficulty_step=0.05,
-                  difficulty_window=50, role_index=False):
+                  difficulty_window=50, role_index=False,
+                  defense_frame_prob=0.0, foul_restart="off"):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob,
                     curriculum_start_level, blue_heuristic, goal_reward_solo,
                     curriculum_target_level, pass_gate, dribble_rule, shaping,
                     restarts, difficulty, difficulty_threshold, difficulty_step,
-                    difficulty_window, role_index)
+                    difficulty_window, role_index, defense_frame_prob,
+                    foul_restart)
         for i in range(n_envs)
     ]
     if algo == "masac":
@@ -707,7 +745,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           pass_gate="loose", dribble_rule="soft", shaping="v1",
           restarts="off", difficulty=None, difficulty_threshold=0.6,
           difficulty_step=0.05, difficulty_window=50, max_minutes=None,
-          role_index=False):
+          role_index=False, defense_frame_prob=0.0, foul_restart="off"):
     assert algo in ("masac", "sac"), algo
     assert blue_heuristic in (None, "attacker", "roles"), blue_heuristic
     assert net in ("flat", "deepsets", "deepsets_mean"), net
@@ -798,7 +836,24 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         difficulty_step=difficulty_step,
         difficulty_window=difficulty_window,
         role_index=role_index,
+        defense_frame_prob=defense_frame_prob,
+        foul_restart=foul_restart,
     )
+    if defense_frame_prob > 0:
+        if difficulty is None:
+            print("WARNING: --defense_frame_prob has no effect without "
+                  "--difficulty (the defensive spawn is rolled on the "
+                  "level-5 curriculum frame only)")
+        else:
+            print(f"Defensive spawn: {defense_frame_prob:.2f} of the "
+                  f"episodes (not counted for difficulty promotion)")
+    if foul_restart == "on":
+        if restarts != "on":
+            print("WARNING: --foul_restart on has no effect without "
+                  "--restarts on (the foul still ends the episode)")
+        else:
+            print("Dribbling foul: blue free kick (restarts) instead of "
+                  "episode end")
     if goal_reward_solo is not None:
         print(
             f"Asymmetric goal payoff: goal after pass +10.0, "
@@ -1238,6 +1293,15 @@ if __name__ == "__main__":
                              "blue 0 hunts, blue 1 is a keeper that leaves "
                              "its line only for balls near its goal, so the "
                              "two never chase the same ball.")
+    parser.add_argument("--defense_frame_prob", type=float, default=0.0,
+                        help="With --difficulty: share of episodes spawned "
+                             "as a blue attack on the yellow goal (hunter on "
+                             "a loose ball, one yellow between ball and "
+                             "goal). Not counted for difficulty promotion.")
+    parser.add_argument("--foul_restart", default="off", choices=["off", "on"],
+                        help="With --restarts on: the strict dribbling foul "
+                             "is a blue free kick at the spot instead of "
+                             "the end of the episode.")
     parser.add_argument("--role_index", action="store_true",
                         help="Append the agent's one-hot id as the last two "
                              "obs dims (56 -> 58) so the shared policy can "
@@ -1281,6 +1345,8 @@ if __name__ == "__main__":
         net=args.net, start_level=args.start_level,
         load_buffer=args.load_buffer, blue_heuristic=args.blue_heuristic,
         role_index=args.role_index,
+        defense_frame_prob=args.defense_frame_prob,
+        foul_restart=args.foul_restart,
         goal_reward_solo=args.goal_reward_solo,
         target_action_std=args.target_action_std,
         noise_repeat_s=args.noise_repeat_s,

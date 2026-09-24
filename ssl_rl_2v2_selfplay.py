@@ -237,6 +237,31 @@ RESTART_CLEAR_DIST = 1.0
 RESTART_TAKER_OFFSET = 0.16
 RESTART_IN_PLAY_DIST = 0.05
 RESTART_FREEZE_STEPS = 40
+# foul_restart="on" (with restarts="on"): the strict dribbling foul is what
+# the SSL rules say it is, a free kick for the opponent at the spot, taken
+# through _do_restart like a ball restart, instead of the episodic stand-in
+# (DRIBBLE_FOUL_PENALTY and the episode over). The offender pays this much;
+# the real price is the blue set piece that follows. Without it a foul that
+# ends the episode at -2 is cheaper than the -5 of the goal blue was about
+# to score, the same exit shape as the ball clearance and the robot
+# excursion that were closed before.
+FOUL_RESTART_PENALTY = 0.5
+# defense_frame_prob (with a difficulty set): share of episodes spawned as
+# a DEFENSIVE situation instead of the curriculum frame. The blue hunter
+# runs onto a loose ball in the yellow half, DEFENSE_BALL_OFFSET ahead of
+# it toward the yellow goal; one yellow stands on the ball-goal segment,
+# DEFENSE_DEFENDER_DIST from the ball toward the goal and up to
+# DEFENSE_DEFENDER_JITTER off the line (so a block sometimes happens by
+# construction and the shot line is something the policy can learn to
+# find); the other yellow is anywhere in the yellow half. Measured on the
+# L5 policy at d ~ 0.25: the curriculum frame never puts a yellow behind
+# the ball, blue scores in 60-70 % of the episodes from open play after a
+# turnover, 0-2 of ~22 shots are blocked. These episodes do NOT feed the
+# difficulty promotion (see step()), whose metric is goals after a strict
+# pass. A training aid on the data side: no rule and no reward changes.
+DEFENSE_BALL_OFFSET = (0.5, 2.0)
+DEFENSE_DEFENDER_DIST = (1.0, 3.0)
+DEFENSE_DEFENDER_JITTER = 0.8
 # Reverse curriculum on level 5 (difficulty in [0, 1]): the spawn is the
 # per-entity interpolation between the L4 drill frame (0: carrier with the
 # ball, mate in the zone, hunter 2-3 m off) and the chaos frame (1), both
@@ -293,6 +318,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         difficulty_step=0.05,
         difficulty_threshold=0.6,
         difficulty_window=50,
+        defense_frame_prob=0.0,
+        foul_restart="off",
     ):
         super().__init__(
             field_type=1,
@@ -373,6 +400,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.difficulty_step = float(difficulty_step)
         self.difficulty_threshold = float(difficulty_threshold)
         self._diff_buffer = _deque(maxlen=int(difficulty_window))
+        # See DEFENSE_* and FOUL_RESTART_PENALTY above.
+        self.defense_frame_prob = float(defense_frame_prob)
+        assert 0.0 <= self.defense_frame_prob <= 1.0, defense_frame_prob
+        assert foul_restart in ("off", "on"), foul_restart
+        self.foul_restart = foul_restart
         # Frozen-model input dim (filled on lazy-load). If older than current
         # obs (e.g. v3 trained without role-index), we strip role-index dims
         # before predict so the same policy class can act as blue.
@@ -446,6 +478,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.must_release_y = [False, False]
         self.dribble_ban_y = [None, None]   # strict rule: None | "pending" | "armed"
         self._dribble_foul = False
+        self._dribble_foul_by = None        # index of the yellow that committed it
         self.dribble_foul_in_episode = 0
         self.last_dist_to_goal_y = None     # shaping="team": off-ball progress
         self._restart_pending = False       # restarts="on": reposition after this step
@@ -537,6 +570,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.must_release_y = [False, False]
         self.dribble_ban_y = [None, None]   # strict rule: None | "pending" | "armed"
         self._dribble_foul = False
+        self._dribble_foul_by = None        # index of the yellow that committed it
         self.dribble_foul_in_episode = 0
         self.last_dist_to_goal_y = None     # shaping="team": off-ball progress
         self._restart_pending = False       # restarts="on": reposition after this step
@@ -633,7 +667,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             info["curriculum_level"] = self.curriculum_level
             if self.difficulty is not None:
                 # Reverse curriculum: promote on goals after a strict pass.
-                self._diff_buffer.append(info["scored_after_strict_pass"])
+                # A defensive spawn (defense_frame_prob) does not count: it
+                # cannot end in a goal after a strict pass often enough and
+                # would freeze the difficulty. Every other spawn counts, as
+                # before (a drill level carrying a difficulty included).
+                if self._episode_scenario != "defense":
+                    self._diff_buffer.append(info["scored_after_strict_pass"])
                 if (
                     self.difficulty < 1.0
                     and len(self._diff_buffer) >= self._diff_buffer.maxlen
@@ -1019,6 +1058,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                     self.dribble_ban_y[i] = ban = "armed"
                 if ban == "armed" and contact[("y", i)]:
                     self._dribble_foul = True
+                    self._dribble_foul_by = i
                     self.dribble_ban_y[i] = None
 
     # ---------- command building ----------
@@ -1331,6 +1371,24 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # leaving the field so it is never a cheap exit.
             self._dribble_foul = False
             self.dribble_foul_in_episode += 1
+            if self.restarts == "on" and self.foul_restart == "on":
+                # The rule itself: blue takes a free kick where the ball is
+                # (see FOUL_RESTART_PENALTY). _do_restart puts the nearer
+                # blue on the spot with the ball at its dribbler and moves
+                # the yellows, the offender included, RESTART_CLEAR_DIST off.
+                offender = self._dribble_foul_by
+                self._dribble_foul_by = None
+                if offender is None:
+                    rewards -= FOUL_RESTART_PENALTY
+                else:
+                    rewards[offender] -= FOUL_RESTART_PENALTY
+                self._restart_pending = True
+                self._restart_spec = (
+                    "free_kick", "b",
+                    float(np.clip(ball.x, -max_x + RESTART_BALL_MARGIN, max_x - RESTART_BALL_MARGIN)),
+                    float(np.clip(ball.y, -max_y + RESTART_BALL_MARGIN, max_y - RESTART_BALL_MARGIN)),
+                )
+                return rewards, done, truncated
             done = True
             rewards -= DRIBBLE_FOUL_PENALTY
             self.match_result = -1
@@ -1672,6 +1730,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.last_dist_to_goal_y = None
         self._release = None
         self._strict_pending = None
+        if self.foul_restart == "on":
+            # A foul detected on the step of a ball-out would otherwise fire
+            # after the teleport, on a ball the offender no longer holds.
+            self._dribble_foul = False
+            self._dribble_foul_by = None
         for lst, val in (
             (self.is_dribbling_y, False), (self.must_release_y, False),
             (self.dribble_start_pos_y, None), (self.dribble_ban_y, None),
@@ -1849,6 +1912,15 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             return pos
 
         if self.difficulty is not None:
+            # The defensive spawn is rolled here and not inside
+            # _curriculum_frame, whose two inner draws run with difficulty
+            # None; at prob 0 the short-circuit draws nothing, so the spawn
+            # stream is unchanged.
+            if (
+                self.defense_frame_prob > 0.0
+                and rng.random() < self.defense_frame_prob
+            ):
+                return self._defense_frame(pos, rng, max_x)
             return self._curriculum_frame()
 
         # LEVEL 5 — scenario roll: staged pass situation vs. chaos.
@@ -1879,6 +1951,60 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             x=float(rng.uniform(-3.5, -0.2)),
             y=float(rng.uniform(-2.5, 2.5)),
             theta=float(rng.uniform(-180, 180)),
+        )
+        return pos
+
+    def _defense_frame(self, pos, rng, max_x):
+        """Defensive spawn, see DEFENSE_* above. Blue 0 (the hunter) runs
+        onto a loose ball in the yellow half and shoots on contact; one
+        yellow starts on the ball-goal segment, off the line by a random
+        amount; the other anywhere in the yellow half; the keeper (blue 1)
+        in front of its own goal as in the L4 frame."""
+        self._episode_scenario = "defense"
+        goal = np.array([max_x, 0.0])
+        hx = float(rng.uniform(-1.5, 1.5))
+        hy = float(rng.uniform(-2.0, 2.0))
+        to_goal = goal - np.array([hx, hy])
+        to_goal = to_goal / max(1e-6, float(np.linalg.norm(to_goal)))
+        off = float(rng.uniform(*DEFENSE_BALL_OFFSET))
+        bx, by = hx + off * float(to_goal[0]), hy + off * float(to_goal[1])
+        pos.ball = Ball(x=bx, y=by)
+        # Defender on the ball -> goal segment, short of the goal, off the
+        # line by a lateral jitter.
+        seg = goal - np.array([bx, by])
+        seg_len = max(1e-6, float(np.linalg.norm(seg)))
+        u = seg / seg_len
+        nrm = np.array([-u[1], u[0]])
+        along = min(float(rng.uniform(*DEFENSE_DEFENDER_DIST)), seg_len - 0.5)
+        lat = float(rng.uniform(-DEFENSE_DEFENDER_JITTER, DEFENSE_DEFENDER_JITTER))
+        dx = bx + along * float(u[0]) + lat * float(nrm[0])
+        dy = by + along * float(u[1]) + lat * float(nrm[1])
+        dx, dy = self._clip_field(dx, dy, margin=0.3)
+        theta_d = math.degrees(math.atan2(by - dy, bx - dx)) + float(rng.uniform(-45.0, 45.0))
+        # Free yellow anywhere in the yellow half, clear of the others.
+        fx, fy = float(rng.uniform(0.2, 3.5)), float(rng.uniform(-2.5, 2.5))
+        for _ in range(20):
+            if (
+                math.hypot(fx - dx, fy - dy) > 0.5
+                and math.hypot(fx - bx, fy - by) > 0.5
+                and math.hypot(fx - hx, fy - hy) > 0.5
+            ):
+                break
+            fx, fy = float(rng.uniform(0.2, 3.5)), float(rng.uniform(-2.5, 2.5))
+        theta_f = float(rng.uniform(-180.0, 180.0))
+        defender = int(rng.integers(2))
+        self._defense_defender = defender  # for the audit tools
+        yellows = [None, None]
+        yellows[defender] = Robot(x=dx, y=dy, theta=theta_d)
+        yellows[1 - defender] = Robot(x=fx, y=fy, theta=theta_f)
+        pos.robots_yellow[0], pos.robots_yellow[1] = yellows
+        pos.robots_blue[0] = Robot(
+            x=hx, y=hy, theta=math.degrees(math.atan2(by - hy, bx - hx)),
+        )
+        pos.robots_blue[1] = Robot(
+            x=float(rng.uniform(-max_x + 0.35, -max_x + 0.7)),
+            y=float(rng.uniform(-0.4, 0.4)),
+            theta=0.0,
         )
         return pos
 

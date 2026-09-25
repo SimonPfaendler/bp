@@ -40,7 +40,8 @@ def blue_attacker_heuristic_2v2(env, robot, yellows) -> np.ndarray:
     [v_x, v_y, v_theta, kick, dribble].
     """
     if robot.infrared:
-        return shoot_at_goal_center(env, robot, team_color="blue")
+        return shoot_at_goal_center(env, robot, team_color="blue",
+                                    kick_speed=getattr(env, "blue_kick_speed", 6.0))
     return move_to_ball(robot, env.frame.ball, speed=2.0)
 
 
@@ -54,7 +55,8 @@ def blue_defender_heuristic_2v2(env, robot, yellows) -> np.ndarray:
     defend_goal_x = -env.field.length / 2.0
 
     if robot.infrared:
-        return shoot_at_goal_center(env, robot, team_color="blue")
+        return shoot_at_goal_center(env, robot, team_color="blue",
+                                    kick_speed=getattr(env, "blue_kick_speed", 6.0))
 
     dist_blue_ball = math.hypot(robot.x - ball.x, robot.y - ball.y)
     closest_yellow = min(
@@ -135,7 +137,8 @@ def blue_keeper_heuristic_2v2(env, robot, yellows) -> np.ndarray:
     ball = env.frame.ball
     goal = np.array([-env.field.length / 2.0, 0.0])
     if robot.infrared:
-        return shoot_at_goal_center(env, robot, team_color="blue")
+        return shoot_at_goal_center(env, robot, team_color="blue",
+                                    kick_speed=getattr(env, "blue_kick_speed", 6.0))
     ball_pos = np.array([ball.x, ball.y])
     to_ball = ball_pos - goal
     dist_goal_ball = float(np.linalg.norm(to_ball))
@@ -340,6 +343,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         defense_frame_prob=0.0,
         foul_restart="off",
         defense_difficulty=1.0,
+        action_repeat=1,
+        blue_kick_speed=6.0,
     ):
         super().__init__(
             field_type=1,
@@ -426,6 +431,20 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         assert foul_restart in ("off", "on"), foul_restart
         self.foul_restart = foul_restart
         self.defense_difficulty = float(np.clip(defense_difficulty, 0.0, 1.0))
+        # action_repeat k: one yellow decision is held for k physics steps
+        # (40 Hz -> 40/k Hz decisions; rewards summed, the episode clock
+        # and every rule still run per physics step). Per decision gamma
+        # 0.99 then spans k physics steps, so the -5 of a conceded goal
+        # reaches the decisions that lose the ball (-2.6 -> -4.3 at 65
+        # physics steps for k=4), and a sampled action becomes a k-step
+        # manoeuvre instead of per-step jitter. Blue's heuristic keeps
+        # reacting every physics step.
+        self.action_repeat = int(action_repeat)
+        assert self.action_repeat >= 1, action_repeat
+        # Kick speed of the blue heuristic's shot (skills.shoot_at_goal_center),
+        # 6.0 = the SSL maximum it always used. Lower for a graded defence:
+        # the ball arrives later and a blocked ball rebounds shorter.
+        self.blue_kick_speed = float(blue_kick_speed)
         # Frozen-model input dim (filled on lazy-load). If older than current
         # obs (e.g. v3 trained without role-index), we strip role-index dims
         # before predict so the same policy class can act as blue.
@@ -621,6 +640,17 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         return obs, {}
 
     def step(self, yellow_action):
+        if self.action_repeat <= 1:
+            return self._step_once(yellow_action)
+        total = None
+        for _ in range(self.action_repeat):
+            obs, reward, done, truncated, info = self._step_once(yellow_action)
+            total = reward if total is None else total + reward
+            if done or truncated:
+                break
+        return obs, total, done, truncated, info
+
+    def _step_once(self, yellow_action):
         self.current_step += 1
         self.total_steps += 1
         yellow_action = np.asarray(yellow_action, dtype=np.float32)

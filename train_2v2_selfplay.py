@@ -66,10 +66,13 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
                 restarts="off", difficulty=None, difficulty_threshold=0.6,
                 difficulty_step=0.05, difficulty_window=50, role_index=False,
                 defense_frame_prob=0.0, foul_restart="off",
-                defense_difficulty=1.0):
+                defense_difficulty=1.0, action_repeat=1, blue_kick_speed=6.0):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
+            # k physics steps per decision; blue heuristic shot speed.
+            action_repeat=action_repeat,
+            blue_kick_speed=blue_kick_speed,
             # Share of episodes spawned as a blue attack on the yellow goal
             # (see DEFENSE_* in the env), graded by defense_difficulty (0
             # easy .. 1 the original frame); "on": the dribbling foul is a
@@ -714,14 +717,15 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   difficulty=None, difficulty_threshold=0.6, difficulty_step=0.05,
                   difficulty_window=50, role_index=False,
                   defense_frame_prob=0.0, foul_restart="off",
-                  defense_difficulty=1.0):
+                  defense_difficulty=1.0, action_repeat=1, blue_kick_speed=6.0):
     fns = [
         make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob,
                     curriculum_start_level, blue_heuristic, goal_reward_solo,
                     curriculum_target_level, pass_gate, dribble_rule, shaping,
                     restarts, difficulty, difficulty_threshold, difficulty_step,
                     difficulty_window, role_index, defense_frame_prob,
-                    foul_restart, defense_difficulty)
+                    foul_restart, defense_difficulty, action_repeat,
+                    blue_kick_speed)
         for i in range(n_envs)
     ]
     if algo == "masac":
@@ -749,8 +753,10 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           restarts="off", difficulty=None, difficulty_threshold=0.6,
           difficulty_step=0.05, difficulty_window=50, max_minutes=None,
           role_index=False, defense_frame_prob=0.0, foul_restart="off",
-          defense_difficulty=1.0, critic_warmup_steps=0, frame_stack=1):
+          defense_difficulty=1.0, critic_warmup_steps=0, frame_stack=1,
+          action_repeat=1, blue_kick_speed=6.0):
     assert algo in ("masac", "sac"), algo
+    assert int(action_repeat) >= 1, action_repeat
     assert int(frame_stack) >= 1, frame_stack
     if int(frame_stack) > 1:
         assert algo == "sac" and net == "flat", "frame_stack is wired for the stock-SAC flat net"
@@ -846,7 +852,14 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         defense_frame_prob=defense_frame_prob,
         foul_restart=foul_restart,
         defense_difficulty=defense_difficulty,
+        action_repeat=int(action_repeat),
+        blue_kick_speed=blue_kick_speed,
     )
+    if int(action_repeat) > 1:
+        print(f"Action repeat: {action_repeat} physics steps per decision "
+              f"({40 // int(action_repeat)} Hz); step counts below are decisions")
+    if float(blue_kick_speed) != 6.0:
+        print(f"Blue heuristic kick speed: {blue_kick_speed} m/s (default 6.0)")
     if int(frame_stack) > 1:
         # The last frame_stack observations side by side, newest LAST,
         # zeros at the episode start (SB3 StackedObservations). The env
@@ -1082,6 +1095,36 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             final_buf = init_load.replace(".zip", "") + "_replay_buffer.pkl"
             if os.path.exists(final_buf):
                 buffer_path = final_buf
+        # A buffer holds the rewards and the decision rate of the run that
+        # wrote it. The final save writes a sidecar with those flags; load
+        # only if they match. Without a sidecar (older runs, step
+        # checkpoints) the legacy rule applies: load at the 40 Hz single
+        # frame layout only, flags unchecked.
+        buffer_flags = dict(
+            action_repeat=int(action_repeat), frame_stack=int(frame_stack),
+            shaping=shaping, pass_gate=pass_gate,
+            goal_reward_solo=goal_reward_solo, dribble_rule=dribble_rule,
+            restarts=restarts, foul_restart=foul_restart,
+        )
+        if buffer_path is not None and os.path.exists(buffer_path):
+            sidecar = buffer_path.replace(".pkl", ".json")
+            if os.path.exists(sidecar):
+                import json
+                saved_flags = json.load(open(sidecar))
+                diff = {k: (saved_flags.get(k), v) for k, v in buffer_flags.items()
+                        if saved_flags.get(k) != v}
+                if diff:
+                    print(f"Skipping buffer load: flags differ from the run "
+                          f"that wrote it {diff} (saved, current)")
+                    buffer_path = None
+            elif int(action_repeat) > 1 or int(frame_stack) > 1:
+                print("Skipping buffer load: no sidecar to confirm the buffer's "
+                      "decision rate / obs layout, and this run uses "
+                      f"action_repeat={action_repeat}, frame_stack={frame_stack}")
+                buffer_path = None
+            else:
+                print("WARNING: buffer has no sidecar; reward flags of the run "
+                      "that wrote it cannot be checked")
         if buffer_path is not None:
             if os.path.exists(buffer_path):
                 # Peek at buffer's n_envs — SB3 refuses to add transitions if
@@ -1242,6 +1285,14 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     final = f"{MODEL_DIR}/{run_name}_final"
     model.save(final)
     model.save_replay_buffer(f"{final}_replay_buffer")
+    import json
+    with open(f"{final}_replay_buffer.json", "w") as _f:
+        json.dump(dict(
+            action_repeat=int(action_repeat), frame_stack=int(frame_stack),
+            shaping=shaping, pass_gate=pass_gate,
+            goal_reward_solo=goal_reward_solo, dribble_rule=dribble_rule,
+            restarts=restarts, foul_restart=foul_restart,
+        ), _f)
     print(f"Saved {final}")
 
 
@@ -1350,6 +1401,13 @@ if __name__ == "__main__":
                         help="With --restarts on: the strict dribbling foul "
                              "is a blue free kick at the spot instead of "
                              "the end of the episode.")
+    parser.add_argument("--action_repeat", type=int, default=1,
+                        help="Hold each yellow decision for k physics steps "
+                             "(40 Hz -> 40/k Hz); rewards summed, rules and "
+                             "clock per physics step. Step counts become "
+                             "decisions.")
+    parser.add_argument("--blue_kick_speed", type=float, default=6.0,
+                        help="Shot speed of the blue heuristic (SSL max 6.0).")
     parser.add_argument("--critic_warmup_steps", type=int, default=0,
                         help="Freeze actor and alpha for this many env steps "
                              "at the start of a (chained) run so the critic "
@@ -1407,6 +1465,8 @@ if __name__ == "__main__":
         defense_difficulty=args.defense_difficulty,
         critic_warmup_steps=args.critic_warmup_steps,
         frame_stack=args.frame_stack,
+        action_repeat=args.action_repeat,
+        blue_kick_speed=args.blue_kick_speed,
         goal_reward_solo=args.goal_reward_solo,
         target_action_std=args.target_action_std,
         noise_repeat_s=args.noise_repeat_s,

@@ -14,7 +14,8 @@ def run_experiment(
     difficulty=None, difficulty_threshold=None, difficulty_step=None,
     difficulty_window=None, max_minutes=None, role_index=False,
     defense_frame_prob=None, foul_restart=None, defense_difficulty=None,
-    critic_warmup_steps=None, frame_stack=None,
+    critic_warmup_steps=None, frame_stack=None, action_repeat=None,
+    blue_kick_speed=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -72,6 +73,10 @@ def run_experiment(
         cmd += f" --critic_warmup_steps {critic_warmup_steps}"
     if frame_stack is not None:
         cmd += f" --frame_stack {frame_stack}"
+    if action_repeat is not None:
+        cmd += f" --action_repeat {action_repeat}"
+    if blue_kick_speed is not None:
+        cmd += f" --blue_kick_speed {blue_kick_speed}"
     if max_minutes is not None:
         cmd += f" --max_minutes {max_minutes}"
     os.system(cmd)
@@ -222,16 +227,24 @@ def main():
     # by side (newest last); the init checkpoint is widened function-identical.
     crit_warm = os.environ.get("CRIT_WARM"); crit_warm = int(crit_warm) if crit_warm else None
     stack = os.environ.get("STACK"); stack = int(stack) if stack else None
+    # REPEAT=4: one decision per 4 physics steps (10 Hz). BLUE_KICK=4.5: the
+    # blue heuristic shoots at 4.5 m/s instead of 6.0. BUF=auto: load the
+    # replay buffer saved next to INIT_PATH (only if its sidecar says the
+    # same reward flags and decision rate; a warm buffer skips the 10k
+    # random-action steps and the critic keeps its data).
+    repeat = os.environ.get("REPEAT"); repeat = int(repeat) if repeat else None
+    blue_kick = os.environ.get("BLUE_KICK"); blue_kick = float(blue_kick) if blue_kick else None
+    load_buffer = os.environ.get("BUF", "off")
 
     job = executor.submit(
         run_experiment, reward_type, seed, n_pairs,
         None, init_path, total_steps, algo,
         pass_scenario_prob, None,
-        None, "flat", "off",
+        None, "flat", load_buffer,
         level, blue_heuristic, goal_reward_solo, None, None, level,
         pass_gate, dribble_rule, shaping, restarts,
         difficulty, diff_thr, diff_step, diff_win, max_minutes, role_index,
-        def_prob, foul_restart, def_diff, crit_warm, stack,
+        def_prob, foul_restart, def_diff, crit_warm, stack, repeat, blue_kick,
     )
     print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} "
           f"[init={init_path or 'scratch'}, start=target={level}, "
@@ -241,6 +254,7 @@ def main():
           f"blue={blue_heuristic}, role_index={role_index}, "
           f"def_prob={def_prob}, foul_restart={foul_restart or 'off'}, def_diff={def_diff}, "
           f"critic_warmup={crit_warm}, frame_stack={stack}, "
+          f"action_repeat={repeat}, blue_kick={blue_kick}, load_buffer={load_buffer}, "
           f"steps={total_steps}, time_min={max_minutes}]")
 
 

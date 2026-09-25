@@ -71,7 +71,7 @@ def move_to_ball(robot, ball, speed=1.0):
 
 
 # Shoot Ball at Goal
-def shoot_at_goal_center(env, robot, team_color):
+def shoot_at_goal_center(env, robot, team_color, kick_speed=6.0):
     goal_x = -env.field.length / 2.0 if team_color == "yellow" else env.field.length / 2.0
     goal_y = 0.0
     target_point = np.array([goal_x, goal_y])
@@ -80,7 +80,7 @@ def shoot_at_goal_center(env, robot, team_color):
     v_theta = turn_to_point(robot, target_point)
     if abs(v_theta) < 0.1:
 
-        return np.array([0.0, 0.0, 0.0, 6.0, 0.0])
+        return np.array([0.0, 0.0, 0.0, float(kick_speed), 0.0])
     else:
         return np.array([0.0, 0.0, v_theta, 0.0, 1.0])
 

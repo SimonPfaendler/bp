@@ -36,7 +36,7 @@ from pair_vec_env import (
     JointSubprocPairVecEnv,
     SubprocPairVecEnv,
 )
-from ssl_rl_2v2_selfplay import SSL2v2SelfPlayEnv
+from ssl_rl_2v2_selfplay import PASS_BONUS_MAX_PER_EPISODE, SSL2v2SelfPlayEnv
 from demo_buffer import DemoMixReplayBuffer, build_demo_buffer, load_buffer_into
 from deepsets_extractor import DeepSetsExtractor
 from exploration import NoiseRepeatSAC, unified_target_entropy
@@ -241,6 +241,27 @@ class CurriculumCallback(BaseCallback):
         return True
 
 
+class _LatestBufferCheckpointCallback(CheckpointCallback):
+    """CheckpointCallback that keeps only the newest replay-buffer snapshot
+    (policy .zip files are kept as before)."""
+
+    def _on_step(self) -> bool:
+        ok = super()._on_step()
+        if self.save_replay_buffer and self.n_calls % self.save_freq == 0:
+            import glob
+            snaps = sorted(
+                glob.glob(os.path.join(self.save_path,
+                                       f"{self.name_prefix}_replay_buffer_*_steps.pkl")),
+                key=os.path.getmtime,
+            )
+            for old in snaps[:-1]:
+                try:
+                    os.remove(old)
+                except OSError:
+                    pass
+        return ok
+
+
 class StatsCallback(BaseCallback):
     def __init__(self, verbose=0):
         super().__init__(verbose)
@@ -276,6 +297,12 @@ class StatsCallback(BaseCallback):
         self.curr_sasp = deque(maxlen=300)
         self.curr_success = deque(maxlen=300)
         self.curr_blue_goal = deque(maxlen=300)
+        # Drill levels 2-4 (scenario "level2".."level4"): success there means
+        # strict pass (L2) / goal after strict pass (L3, L4). Without a
+        # bucket a drill run only shows the aggregate rollout/* keys.
+        self.drill_success = {k: deque(maxlen=300) for k in ("level2", "level3", "level4")}
+        self.drill_strict = {k: deque(maxlen=300) for k in ("level2", "level3", "level4")}
+        self.drill_len = {k: deque(maxlen=300) for k in ("level2", "level3", "level4")}
 
     def _on_step(self) -> bool:
         dones = self.locals.get("dones", [])
@@ -328,6 +355,10 @@ class StatsCallback(BaseCallback):
                 self.curr_sasp.append(float(infos[i].get("scored_after_strict_pass", 0.0)))
                 self.curr_success.append(float(infos[i].get("is_success", 0.0)))
                 self.curr_blue_goal.append(float(infos[i].get("blue_goal", 0.0)))
+            elif scen in self.drill_success:
+                self.drill_success[scen].append(float(infos[i].get("is_success", 0.0)))
+                self.drill_strict[scen].append(float(infos[i].get("passes_strict", 0.0)))
+                self.drill_len[scen].append(float(infos[i].get("episode", {}).get("l", 0.0)))
         if self.success_buffer:
             self.logger.record(
                 "selfplay/live_success_rate",
@@ -349,8 +380,11 @@ class StatsCallback(BaseCallback):
                 float(np.mean(self.passes_strict_buffer)),
             )
         if self.foul_buffer:
+            # Fouls per episode (can exceed 1 with foul_restart="on"), not a
+            # rate — the old key name "dribble_foul_rate" is kept in the
+            # thesis plots of runs before 2026-09-28.
             self.logger.record(
-                "rollout/dribble_foul_rate", float(np.mean(self.foul_buffer))
+                "rollout/dribble_foul_per_episode", float(np.mean(self.foul_buffer))
             )
         if self.difficulty_buffer:
             self.logger.record(
@@ -414,6 +448,13 @@ class StatsCallback(BaseCallback):
             self.logger.record("scenario_curriculum/scored_after_strict_pass_rate", float(np.mean(self.curr_sasp)))
             self.logger.record("scenario_curriculum/success_rate", float(np.mean(self.curr_success)))
             self.logger.record("scenario_curriculum/blue_goal_rate", float(np.mean(self.curr_blue_goal)))
+        for scen, buf in self.drill_success.items():
+            if buf:
+                self.logger.record(f"scenario_{scen}/success_rate", float(np.mean(buf)))
+                self.logger.record(f"scenario_{scen}/passes_strict_per_episode",
+                                   float(np.mean(self.drill_strict[scen])))
+                self.logger.record(f"scenario_{scen}/ep_len_mean",
+                                   float(np.mean(self.drill_len[scen])))
         return True
 
 
@@ -1057,6 +1098,21 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             f"Policy transfer: {len(transferred)} params copied "
             f"({n_critic} critic/target), {len(skipped)} skipped (mismatches)"
         )
+        # A warm start that copies nothing (or no actor) is a cold start
+        # wearing the init checkpoint's name in the run log — e.g. a
+        # frame_stack=2 checkpoint into a frame_stack=1 run, where
+        # _fit_first_layer cannot shrink and every module is skipped. Refuse
+        # instead of training 30 minutes on the wrong premise; set
+        # ALLOW_PARTIAL_TRANSFER=1 to override deliberately.
+        n_actor = sum(1 for k in transferred if k.startswith("actor"))
+        if n_actor == 0 and os.environ.get("ALLOW_PARTIAL_TRANSFER") != "1":
+            raise RuntimeError(
+                f"Warm start from {init_load} transferred no actor weights "
+                f"({len(transferred)} params copied, {len(skipped)} skipped). "
+                f"Check frame_stack/role_index/net against the checkpoint "
+                f"(its sidecar JSON records them), or set "
+                f"ALLOW_PARTIAL_TRANSFER=1 to train from scratch anyway."
+            )
         # Entropy coef lives OUTSIDE policy.state_dict — without this, every
         # chained chunk restarts at alpha=0.05 (10x the converged 0.005) and
         # burns a few hundred k steps re-decaying exploration noise.
@@ -1239,8 +1295,9 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         print(f"Demo mixing enabled: {demo_ratio:.0%} of every batch drawn "
               f"from the demo buffer (constant share, no re-injection)")
 
+    stats_cb = StatsCallback()
     callback_list = [
-        StatsCallback(),
+        stats_cb,
         DebugCallback(log_every=500),
         AlphaClampCallback(alpha_min=0.005, alpha_max=0.3),
         BestSuccessCallback(save_path=f"{MODEL_DIR}/{run_name}"),
@@ -1251,7 +1308,11 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             start_level=effective_start_level,
             target_level=effective_target_level, threshold=0.9,
         ),
-        CheckpointCallback(
+        # Every 20000 calls x n_envs steps (~1M with 48 slots). Policy
+        # checkpoints are kept; of the replay-buffer snapshots (0.5-1 GB
+        # each) only the newest survives, so a 3 h run does not leave 15 GB
+        # behind — the buffer matters only for resuming a crashed job.
+        _LatestBufferCheckpointCallback(
             save_freq=20000, save_path=MODEL_DIR,
             name_prefix=run_name, save_replay_buffer=True,
         ),
@@ -1286,13 +1347,41 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     model.save(final)
     model.save_replay_buffer(f"{final}_replay_buffer")
     import json
+    # Sidecar: everything a later segment or an eval needs to rebuild this
+    # checkpoint's I/O layout and task. The first block is what the buffer
+    # autoload compares (keep its keys stable); the rest is provenance —
+    # the 09-26 run's env-var settings were recoverable only from a shell
+    # history. difficulty_end is the mean over envs of the last logged
+    # window; pass it as DIFF when chaining.
+    diff_end = (float(np.mean(stats_cb.difficulty_buffer))
+                if stats_cb.difficulty_buffer else None)
+    env_snapshot = {k: v for k, v in sorted(os.environ.items())
+                    if k in ("LEVEL", "PASS_GATE", "SOLO", "DRIBBLE", "SHAPING",
+                             "RESTARTS", "DIFF", "DIFF_THR", "DIFF_STEP",
+                             "DIFF_WIN", "INIT_PATH", "TOTAL_STEPS", "TIME_MIN",
+                             "BLUE", "ROLE", "DEF_PROB", "FOUL", "DEF_DIFF",
+                             "CRIT_WARM", "STACK", "REPEAT", "BLUE_KICK", "BUF",
+                             "SLURM_JOB_ID")}
     with open(f"{final}_replay_buffer.json", "w") as _f:
         json.dump(dict(
             action_repeat=int(action_repeat), frame_stack=int(frame_stack),
             shaping=shaping, pass_gate=pass_gate,
             goal_reward_solo=goal_reward_solo, dribble_rule=dribble_rule,
             restarts=restarts, foul_restart=foul_restart,
-        ), _f)
+            # provenance
+            role_index=bool(role_index), blue_heuristic=blue_heuristic,
+            blue_kick_speed=float(blue_kick_speed),
+            defense_frame_prob=float(defense_frame_prob),
+            defense_difficulty=float(defense_difficulty),
+            difficulty_start=difficulty, difficulty_end=diff_end,
+            difficulty_threshold=difficulty_threshold,
+            difficulty_step=difficulty_step, difficulty_window=difficulty_window,
+            curriculum_start_level=effective_start_level,
+            init_path=init_load, seed=int(seed), algo=algo, net=net,
+            num_timesteps=int(model.num_timesteps),
+            pass_bonus_cap=PASS_BONUS_MAX_PER_EPISODE,
+            env_vars=env_snapshot,
+        ), _f, indent=1)
     print(f"Saved {final}")
 
 

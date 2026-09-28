@@ -86,11 +86,22 @@ def main():
     log_folder = "slurm_logs"
     os.makedirs(log_folder, exist_ok=True)
 
+    # TIME=HH:MM:SS (default 00:30:00) sets the slurm limit; PARTITION
+    # defaults to the 30-min dev queue for <= 30 min and to gpu_h100 beyond
+    # (check `sinfo -s` if the long-queue name differs). TIME_MIN (the
+    # in-run budget) defaults to TIME minus 6 min: ~3 min of setup before
+    # training starts plus the final save of a ~0.5-1 GB replay buffer.
+    slurm_time = os.environ.get("TIME", "00:30:00")
+    h, m, s = (int(x) for x in slurm_time.split(":"))
+    slot_min = h * 60 + m + s / 60.0
+    partition = os.environ.get(
+        "PARTITION", "dev_gpu_h100" if slot_min <= 30 else "gpu_h100"
+    )
     executor = submitit.AutoExecutor(folder=log_folder)
     executor.update_parameters(
         slurm_job_name="sp2v2",
-        slurm_time="00:30:00",
-        slurm_partition="dev_gpu_h100",
+        slurm_time=slurm_time,
+        slurm_partition=partition,
         slurm_cpus_per_task=24,
         slurm_mem="193300mb",
         slurm_additional_parameters={"gres": "gpu:1"},
@@ -179,6 +190,47 @@ def main():
     # Compare against the MAPPO runs on rollout/passes_strict_per_episode
     # and selfplay/live_success_rate (success == strict pass on L2,
     # == goal after strict pass on L3).
+    init_path = os.environ.get("INIT_PATH")  # None = from scratch
+    # Chaining: every unset env var below falls back to the value recorded
+    # in the init checkpoint's sidecar JSON (train_2v2_selfplay.py writes it
+    # next to every _final.zip). A chained segment therefore keeps the
+    # checkpoint's I/O layout (STACK, REPEAT, ROLE) and task flags unless
+    # told otherwise; the warm-start assert in the trainer catches the rest.
+    # DIFF falls back to the difficulty the previous segment ENDED at.
+    inherited = {}
+    if init_path:
+        base = init_path[:-4] if init_path.endswith(".zip") else init_path
+        sidecar_path = f"{base}_replay_buffer.json"
+        if os.path.exists(sidecar_path):
+            import json
+            side = json.load(open(sidecar_path))
+            mapping = {  # env var -> sidecar key(s), first present wins
+                "PASS_GATE": ("pass_gate",), "DRIBBLE": ("dribble_rule",),
+                "SHAPING": ("shaping",), "RESTARTS": ("restarts",),
+                "FOUL": ("foul_restart",), "SOLO": ("goal_reward_solo",),
+                "STACK": ("frame_stack",), "REPEAT": ("action_repeat",),
+                "BLUE_KICK": ("blue_kick_speed",), "ROLE": ("role_index",),
+                "DEF_PROB": ("defense_frame_prob",),
+                "DEF_DIFF": ("defense_difficulty",), "BLUE": ("blue_heuristic",),
+                "DIFF": ("difficulty_end", "difficulty_start"),
+                "DIFF_THR": ("difficulty_threshold",),
+                "DIFF_STEP": ("difficulty_step",), "DIFF_WIN": ("difficulty_window",),
+                "LEVEL": ("curriculum_start_level",),
+            }
+            for var, keys in mapping.items():
+                if os.environ.get(var) not in (None, ""):
+                    continue
+                for k in keys:
+                    if side.get(k) is not None:
+                        v = side[k]
+                        os.environ[var] = str(int(v)) if isinstance(v, bool) else str(v)
+                        inherited[var] = os.environ[var]
+                        break
+            print(f"Inherited from {sidecar_path}: {inherited or 'nothing (all set)'}")
+        else:
+            print(f"WARNING: no sidecar at {sidecar_path}; STACK/REPEAT/ROLE and "
+                  f"the reward flags must be set by hand to match the checkpoint")
+
     level = int(os.environ.get("LEVEL", "2"))
     assert level in (2, 3, 4, 5), level
     pass_gate = os.environ.get("PASS_GATE")            # None -> loose
@@ -193,17 +245,21 @@ def main():
     diff_step = os.environ.get("DIFF_STEP"); diff_step = float(diff_step) if diff_step else None
     diff_win = os.environ.get("DIFF_WIN"); diff_win = int(diff_win) if diff_win else None
     pass_scenario_prob = 0.35 if level == 5 else 0.0
-    init_path = os.environ.get("INIT_PATH")  # None = from scratch
     reward_type = "dense"
     n_pairs = 24
     seed = 822
     # TOTAL_STEPS caps the run; TIME_MIN stops it gracefully after that many
     # minutes and saves (3M steps took 20-24 min depending on the node, so
     # a fixed step count either wastes the slot or gets killed before the
-    # final save). On the 30-min dev partition: TOTAL_STEPS=6000000 TIME_MIN=27.
-    total_steps = int(os.environ.get("TOTAL_STEPS", "3000000"))
+    # final save). On the 30-min dev partition: TOTAL_STEPS=6000000 TIME_MIN=24.
+    # (27 was too tight: the 09-26 segment was cut at 22.7 min of TRAINING,
+    # after ~3 min of setup, and the final save writes a ~0.5 GB buffer.)
+    # The run is time-bound: TIME_MIN defaults to the slot minus 6 min and
+    # TOTAL_STEPS to a cap no slot can reach (~92k steps/min for SAC on an
+    # H100 -> 3 h ~ 16M). Set TOTAL_STEPS explicitly for a step-bound run.
     time_min = os.environ.get("TIME_MIN")
-    max_minutes = float(time_min) if time_min else None
+    max_minutes = float(time_min) if time_min else max(5.0, slot_min - 6.0)
+    total_steps = int(os.environ.get("TOTAL_STEPS", "100000000"))
     algo = "sac"
     # BLUE=roles: blue 0 hunts, blue 1 keeps goal and never joins the chase
     # (the "attacker" pair double-chased loose balls). ROLE=1: one-hot agent
@@ -234,7 +290,12 @@ def main():
     # random-action steps and the critic keeps its data).
     repeat = os.environ.get("REPEAT"); repeat = int(repeat) if repeat else None
     blue_kick = os.environ.get("BLUE_KICK"); blue_kick = float(blue_kick) if blue_kick else None
-    load_buffer = os.environ.get("BUF", "off")
+    # Default "auto": the 09-26 segment ran with BUF unset ("off") and so
+    # started with an empty buffer + 10k random actions + critic warm-up on
+    # top of a warm policy. "auto" is a no-op without INIT_PATH and refuses
+    # a buffer whose sidecar disagrees on reward flags or decision rate, so
+    # it cannot silently poison a run. BUF=off for a deliberate cold buffer.
+    load_buffer = os.environ.get("BUF", "auto")
 
     job = executor.submit(
         run_experiment, reward_type, seed, n_pairs,
@@ -246,7 +307,8 @@ def main():
         difficulty, diff_thr, diff_step, diff_win, max_minutes, role_index,
         def_prob, foul_restart, def_diff, crit_warm, stack, repeat, blue_kick,
     )
-    print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} "
+    print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} on {partition} "
+          f"for {slurm_time} "
           f"[init={init_path or 'scratch'}, start=target={level}, "
           f"pass_gate={pass_gate or 'loose'}, solo={goal_reward_solo}, "
           f"dribble={dribble_rule or 'soft'}, shaping={shaping or 'v1'}, "

@@ -182,6 +182,16 @@ N_YELLOW = 2
 STRICT_PASS_MIN_SPEED = 1.0       # m/s at release; kicks are 3-6, roll-offs ~0.3
 STRICT_PASS_MAX_ANGLE_DEG = 30.0  # ball velocity vs. direction to the receiver
 STRICT_PASS_HOLD_STEPS = 4        # receiver keeps possession (0.1 s)
+# The full-game pass bonus (+3, loose or strict gate) pays at most this many
+# times per episode. Under restarts="on" the only episode exit is a goal and
+# nothing negative accrues per step, so an UNCAPPED bonus makes ping-pong the
+# optimal policy: a pass every ~12 decisions is worth ~26 at gamma 0.99
+# against 13 for a goal after one pass. Two paying passes (6) plus the goal
+# (10) still beat a solo goal (goal_reward_solo 3) by a wide margin, and a
+# goalless episode can no longer out-earn one with a goal. Counters
+# (passes_in_episode, passes_strict_in_episode) keep counting past the cap.
+PASS_BONUS_MAX_PER_EPISODE = 2
+PASS_BONUS = 3.0
 # Pass drills (curriculum levels 2 and 3). Under exploration the strict pass
 # never occurs — a random policy kicks 0.3x per episode and 0 of 45 kicks
 # were received — and the approach shaping charges every kick ~-0.6 while the
@@ -300,12 +310,23 @@ DEF_SHAPING_LO_GOAL = -0.1
 # must be started at the difficulty the previous one reached (log
 # curriculum/difficulty); checkpoints do not carry it.
 CURRICULUM_PHASES = 3
-# Under restarts="on" nothing accrues per step: no time penalty, no
-# truncation penalty, and the progress terms cannot go negative. Otherwise
+# Under restarts="on" nothing NEGATIVE accrues per step: no time penalty,
+# no truncation penalty, and the approach term cannot go below 0. Otherwise
 # conceding fast (-5) stays cheaper than defending for 1000 steps (-9 of
 # time penalty and negative shaping while blue attacks) — the same exit in a
 # third guise. What remains costs only with a cause: a goal against, a ball
 # or robot out, a foul.
+#
+# The flip side, stated so nobody designs on a false premise: POSITIVE
+# terms still accrue per step with no per-step cost to bound them. The
+# approach term pays up to +0.05/step to the closer yellow (lo = 0.0, so
+# retreating is free — a treadmill worth ~+12 over 1000 steps at 2 m/s),
+# and the ball->goal term is clipped asymmetrically (-0.1 / +0.15 under
+# team_def). The approach floor is deliberate: a kick moves the ball away
+# from the kicker, and a symmetric clip would tax the very pass we want.
+# The bound that keeps this honest is elsewhere — the pass bonus is capped
+# per episode (PASS_BONUS_MAX_PER_EPISODE), so an episode without a goal
+# cannot out-earn one with a goal.
 N_BLUE = 2
 
 
@@ -608,6 +629,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.blue_touched_since_yellow = False
         self.passes_in_episode = 0
         self.passes_strict_in_episode = 0
+        self._pass_bonuses_paid = 0  # PASS_BONUS_MAX_PER_EPISODE cap
         self._release = None         # (passer, ball_v, ball_pos, yellow_pos) at loss of possession
         self._strict_pending = None  # (receiver, held_steps) after a kicked, aimed release
         self._drill_release_step = None  # pass drills: step of the first release
@@ -1387,14 +1409,17 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                     ball, max_x, max_y, yellow_last, blue_last
                 )
             # Robots out of bounds: no stoppage. Charge the excursion once
-            # and let _build_commands drive the robot back in.
+            # and let _build_commands drive the robot back in. robot_restarts
+            # counts YELLOW excursions only — it is the yellow-behaviour
+            # metric (driving out to stall blue's attack); blue's are the
+            # heuristic's business and used to inflate it.
             for key, r in ((("y", 0), yellows[0]), (("y", 1), yellows[1]),
                            (("b", 0), blues[0]), (("b", 1), blues[1])):
                 out = abs(r.x) > max_x or abs(r.y) > max_y
                 if out and not self._outside[key]:
                     if key[0] == "y":
                         rewards[key[1]] -= RESTART_ROBOT_OOB_PENALTY
-                    self.robot_restarts += 1
+                        self.robot_restarts += 1
                 self._outside[key] = out
             if self._restart_pending:
                 return rewards, done, truncated
@@ -1575,7 +1600,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 ball_to_prev = math.hypot(ball.x - prev.x, ball.y - prev.y)
                 if ball_to_prev > 0.5:
                     if not drill and self.pass_gate == "loose":
-                        rewards += 3.0
+                        rewards += self._pass_bonus()
                     self.passes_in_episode += 1
                     # Strict pass, stage 1: was the release a kick aimed at
                     # this receiver? Then the hold check above takes over.
@@ -1608,7 +1633,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         if strict_event and not drill and self.pass_gate == "strict":
             # Full game, strict gate: the pass bonus moves from the loose
             # detector to the strict one.
-            rewards += 3.0
+            rewards += self._pass_bonus()
 
         if level == 2 and strict_event:
             # L2 pass drill terminal: the strict pass IS the goal.
@@ -1642,6 +1667,14 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             done = True
 
         return rewards, done, truncated
+
+    def _pass_bonus(self) -> float:
+        """+PASS_BONUS for the first PASS_BONUS_MAX_PER_EPISODE full-game
+        passes of the episode, 0 afterwards (see the constant)."""
+        if self._pass_bonuses_paid >= PASS_BONUS_MAX_PER_EPISODE:
+            return 0.0
+        self._pass_bonuses_paid += 1
+        return PASS_BONUS
 
     def _is_strict_release(self, receiver: int) -> bool:
         """Strict pass, stage 1: did the last release leave the passer at
@@ -1792,6 +1825,15 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.last_dist_to_goal_y = None
         self._release = None
         self._strict_pending = None
+        # A restart is a NEW possession. Without these two resets the first
+        # yellow to touch the ball after a restart is credited with a loose
+        # pass from the pre-restart carrier: the teleport makes
+        # `ball_to_prev > 0.5` trivially true, and blue_touched stays False
+        # whenever the blue taker (e.g. the keeper on a far free kick) never
+        # actually touches it. The strict counter was already protected via
+        # _release / _strict_pending above.
+        self.last_yellow_carrier = None
+        self.blue_touched_since_yellow = False
         if self.foul_restart == "on":
             # A foul detected on the step of a ball-out would otherwise fire
             # after the teleport, on a ball the offender no longer holds.

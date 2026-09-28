@@ -151,6 +151,40 @@ def _fit_first_layer(old, new_shape, act_dim, frame_stack=1):
     return grown
 
 
+def _describe_layout_mismatch(old_state, new_state):
+    """Human-readable diagnosis of an actor input-width mismatch: which
+    (single_obs_dim x frame_stack) the checkpoint was trained with, and the
+    env vars / flags that reproduce it."""
+    from ssl_rl_2v2_selfplay import (
+        EPISODE_STATE_DIM, ROLE_INDEX_DIM, SINGLE_OBS_DIM_BASE,
+    )
+    key = next((k for k in old_state
+                if k.startswith("actor") and k.endswith("0.weight")), None)
+    if key is None or key not in new_state:
+        return "  (no comparable actor input layer found)"
+    old_in = int(old_state[key].shape[1])
+    new_in = int(new_state[key].shape[1])
+    d0 = SINGLE_OBS_DIM_BASE + EPISODE_STATE_DIM       # 56
+    d1 = d0 + ROLE_INDEX_DIM                            # 58
+
+    def decode(n):
+        opts = []
+        for single, role in ((d0, False), (d1, True)):
+            if n % single == 0:
+                k = n // single
+                opts.append(f"{single} x frame_stack {k} "
+                            f"(ROLE={'1' if role else '0'}, STACK={k})")
+        if n % SINGLE_OBS_DIM_BASE == 0 and not opts:
+            opts.append(f"{SINGLE_OBS_DIM_BASE}-dim pre obs-repair checkpoint "
+                        f"x frame_stack {n // SINGLE_OBS_DIM_BASE}")
+        return " or ".join(opts) if opts else "unknown layout"
+
+    return (f"  Actor input width: checkpoint {old_in} = {decode(old_in)}; "
+            f"this run {new_in} = {decode(new_in)}.\n"
+            f"  The transfer can only GROW the input (append obs dims / frames), "
+            f"never shrink it — set this run's ROLE/STACK to the checkpoint's.")
+
+
 def _load_any(path):
     """Load a checkpoint that may be a stock-SAC run or a MASAC iteration.
 
@@ -1108,10 +1142,9 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         if n_actor == 0 and os.environ.get("ALLOW_PARTIAL_TRANSFER") != "1":
             raise RuntimeError(
                 f"Warm start from {init_load} transferred no actor weights "
-                f"({len(transferred)} params copied, {len(skipped)} skipped). "
-                f"Check frame_stack/role_index/net against the checkpoint "
-                f"(its sidecar JSON records them), or set "
-                f"ALLOW_PARTIAL_TRANSFER=1 to train from scratch anyway."
+                f"({len(transferred)} params copied, {len(skipped)} skipped).\n"
+                + _describe_layout_mismatch(old_state, new_state)
+                + "\nSet ALLOW_PARTIAL_TRANSFER=1 to train from scratch anyway."
             )
         # Entropy coef lives OUTSIDE policy.state_dict — without this, every
         # chained chunk restarts at alpha=0.05 (10x the converged 0.005) and

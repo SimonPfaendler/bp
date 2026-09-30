@@ -331,6 +331,15 @@ class StatsCallback(BaseCallback):
         self.curr_sasp = deque(maxlen=300)
         self.curr_success = deque(maxlen=300)
         self.curr_blue_goal = deque(maxlen=300)
+        # Passes per spawn type. rollout/passes_* mixes both: a defensive
+        # episode starts with blue on the ball, so its pass rate is a
+        # different quantity (do the yellows pass AFTER winning the ball?)
+        # and dilutes the curriculum frame's by the defensive share.
+        self.curr_passes = deque(maxlen=300)
+        self.curr_strict = deque(maxlen=300)
+        self.def_passes = deque(maxlen=200)
+        self.def_strict = deque(maxlen=200)
+        self.def_sasp = deque(maxlen=200)
         # Drill levels 2-4 (scenario "level2".."level4"): success there means
         # strict pass (L2) / goal after strict pass (L3, L4). Without a
         # bucket a drill run only shows the aggregate rollout/* keys.
@@ -385,10 +394,15 @@ class StatsCallback(BaseCallback):
                 self.def_robot_oob.append(float(infos[i].get("robot_restarts", 0.0)))
                 self.def_ball_oob.append(float(infos[i].get("ball_restarts", 0.0)))
                 self.def_len.append(float(infos[i].get("episode", {}).get("l", 0.0)))
+                self.def_passes.append(float(infos[i].get("passes", 0.0)))
+                self.def_strict.append(float(infos[i].get("passes_strict", 0.0)))
+                self.def_sasp.append(float(infos[i].get("scored_after_strict_pass", 0.0)))
             elif scen == "curriculum":
                 self.curr_sasp.append(float(infos[i].get("scored_after_strict_pass", 0.0)))
                 self.curr_success.append(float(infos[i].get("is_success", 0.0)))
                 self.curr_blue_goal.append(float(infos[i].get("blue_goal", 0.0)))
+                self.curr_passes.append(float(infos[i].get("passes", 0.0)))
+                self.curr_strict.append(float(infos[i].get("passes_strict", 0.0)))
             elif scen in self.drill_success:
                 self.drill_success[scen].append(float(infos[i].get("is_success", 0.0)))
                 self.drill_strict[scen].append(float(infos[i].get("passes_strict", 0.0)))
@@ -478,10 +492,15 @@ class StatsCallback(BaseCallback):
             self.logger.record("scenario_defense/robot_oob_per_episode", float(np.mean(self.def_robot_oob)))
             self.logger.record("scenario_defense/ball_oob_per_episode", float(np.mean(self.def_ball_oob)))
             self.logger.record("scenario_defense/ep_len_mean", float(np.mean(self.def_len)))
+            self.logger.record("scenario_defense/passes_per_episode", float(np.mean(self.def_passes)))
+            self.logger.record("scenario_defense/passes_strict_per_episode", float(np.mean(self.def_strict)))
+            self.logger.record("scenario_defense/scored_after_strict_pass_rate", float(np.mean(self.def_sasp)))
         if self.curr_sasp:
             self.logger.record("scenario_curriculum/scored_after_strict_pass_rate", float(np.mean(self.curr_sasp)))
             self.logger.record("scenario_curriculum/success_rate", float(np.mean(self.curr_success)))
             self.logger.record("scenario_curriculum/blue_goal_rate", float(np.mean(self.curr_blue_goal)))
+            self.logger.record("scenario_curriculum/passes_per_episode", float(np.mean(self.curr_passes)))
+            self.logger.record("scenario_curriculum/passes_strict_per_episode", float(np.mean(self.curr_strict)))
         for scen, buf in self.drill_success.items():
             if buf:
                 self.logger.record(f"scenario_{scen}/success_rate", float(np.mean(buf)))

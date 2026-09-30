@@ -15,7 +15,7 @@ def run_experiment(
     difficulty_window=None, max_minutes=None, role_index=False,
     defense_frame_prob=None, foul_restart=None, defense_difficulty=None,
     critic_warmup_steps=None, frame_stack=None, action_repeat=None,
-    blue_kick_speed=None,
+    blue_kick_speed=None, run_name=None,
 ):
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
@@ -79,7 +79,14 @@ def run_experiment(
         cmd += f" --blue_kick_speed {blue_kick_speed}"
     if max_minutes is not None:
         cmd += f" --max_minutes {max_minutes}"
-    os.system(cmd)
+    if run_name:
+        cmd = f"RUN_NAME={run_name} " + cmd
+    rc = os.system(cmd)
+    if rc != 0:
+        # os.system swallows the exit code; without this a crashed stage
+        # looks like success to slurm and the next stage of a chain
+        # (afterok) starts on a checkpoint that was never written.
+        raise RuntimeError(f"training exited with status {rc}")
 
 
 def main():
@@ -104,7 +111,13 @@ def main():
         slurm_partition=partition,
         slurm_cpus_per_task=24,
         slurm_mem="193300mb",
-        slurm_additional_parameters={"gres": "gpu:1"},
+        slurm_additional_parameters={
+            "gres": "gpu:1",
+            # AFTER=<jobid>: start only once that job finished successfully
+            # (chain stages; see submit_curriculum_chain.py).
+            **({"dependency": f"afterok:{os.environ['AFTER']}"}
+               if os.environ.get("AFTER") else {}),
+        },
     )
     # NOTE: MASAC (JointSubprocPairVecEnv, num_envs=n_pairs) needs ~2x the
     # real simulation steps of independent SAC (SubprocPairVecEnv,
@@ -197,8 +210,10 @@ def main():
     # checkpoint's I/O layout (STACK, REPEAT, ROLE) and task flags unless
     # told otherwise; the warm-start assert in the trainer catches the rest.
     # DIFF falls back to the difficulty the previous segment ENDED at.
+    # INHERIT=0 switches the fallback off (chain submitter: every flag of
+    # a stage is stated by the protocol, nothing may leak in).
     inherited = {}
-    if init_path:
+    if init_path and os.environ.get("INHERIT", "1") != "0":
         base = init_path[:-4] if init_path.endswith(".zip") else init_path
         sidecar_path = f"{base}_replay_buffer.json"
         if os.path.exists(sidecar_path):
@@ -247,7 +262,8 @@ def main():
     pass_scenario_prob = 0.35 if level == 5 else 0.0
     reward_type = "dense"
     n_pairs = 24
-    seed = 822
+    seed = int(os.environ.get("SEED", "822"))
+    run_name = os.environ.get("RUN_NAME") or None
     # TOTAL_STEPS caps the run; TIME_MIN stops it gracefully after that many
     # minutes and saves (3M steps took 20-24 min depending on the node, so
     # a fixed step count either wastes the slot or gets killed before the
@@ -306,9 +322,11 @@ def main():
         pass_gate, dribble_rule, shaping, restarts,
         difficulty, diff_thr, diff_step, diff_win, max_minutes, role_index,
         def_prob, foul_restart, def_diff, crit_warm, stack, repeat, blue_kick,
+        run_name,
     )
     print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} on {partition} "
-          f"for {slurm_time} "
+          f"for {slurm_time} seed={seed} run_name={run_name or 'auto'} "
+          f"after={os.environ.get('AFTER') or '-'} "
           f"[init={init_path or 'scratch'}, start=target={level}, "
           f"pass_gate={pass_gate or 'loose'}, solo={goal_reward_solo}, "
           f"dribble={dribble_rule or 'soft'}, shaping={shaping or 'v1'}, "
@@ -318,6 +336,7 @@ def main():
           f"critic_warmup={crit_warm}, frame_stack={stack}, "
           f"action_repeat={repeat}, blue_kick={blue_kick}, load_buffer={load_buffer}, "
           f"steps={total_steps}, time_min={max_minutes}]")
+    return job.job_id
 
 
 if __name__ == "__main__":

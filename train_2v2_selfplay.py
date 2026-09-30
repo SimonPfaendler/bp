@@ -846,7 +846,10 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     algo_tag = algo.upper()
     net_tag = f"_{net}" if net != "flat" else ""
     opp_tag = "_vsheur" if blue_heuristic else ""
-    run_name = (
+    # RUN_NAME pins the name (no timestamp), so a chain submitter knows the
+    # next stage's INIT_PATH (models/<RUN_NAME>_final.zip) before this job
+    # has even started. Re-running with the same name overwrites.
+    run_name = os.environ.get("RUN_NAME") or (
         f"2v2_selfplay_{algo_tag}{net_tag}{opp_tag}_{reward_type}"
         f"_seed{seed}_{timestamp}"
     )
@@ -1202,6 +1205,13 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
                 saved_flags = json.load(open(sidecar))
                 diff = {k: (saved_flags.get(k), v) for k, v in buffer_flags.items()
                         if saved_flags.get(k) != v}
+                # A buffer from another curriculum level holds that level's
+                # rewards and terminals (L2: the strict pass IS the goal).
+                # Sidecars before 2026-09-28 do not record the level; those
+                # are not refused on this key.
+                saved_level = saved_flags.get("curriculum_start_level")
+                if saved_level is not None and int(saved_level) != int(effective_start_level):
+                    diff["curriculum_start_level"] = (saved_level, effective_start_level)
                 if diff:
                     print(f"Skipping buffer load: flags differ from the run "
                           f"that wrote it {diff} (saved, current)")

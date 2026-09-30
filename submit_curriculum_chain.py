@@ -186,9 +186,16 @@ def feed_once(chains, state, go, limit, partition, max_attempts, log):
 
     waiting, full = bool(hold), False
     progressed = True
-    while progressed:                       # round-robin over the seeds
+    while progressed:
         progressed = False
-        for seed, segs in chains.items():
+        # Fair order: the seed with the fewest jobs in the queue goes first,
+        # one submission per round. Free slots therefore spread over the
+        # seeds (which can then run side by side) instead of one seed
+        # chaining all four slots behind its own running job.
+        order = sorted(chains, key=lambda s: (
+            sum(queued(n) for n, _, _ in chains[s]), s))
+        for seed in order:
+            segs = chains[seed]
             nxt = next(((n, e, p) for n, e, p in segs
                         if not (done(n) or queued(n))), None)
             if nxt is None:
@@ -234,6 +241,7 @@ def feed_once(chains, state, go, limit, partition, max_attempts, log):
             jobs[jid] = (partition, "")
             in_queue += 1
             progressed = True
+            break
     return waiting
 
 

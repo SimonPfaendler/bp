@@ -150,7 +150,7 @@ def main():
     )
     executor = submitit.AutoExecutor(folder=log_folder)
     executor.update_parameters(
-        slurm_job_name="sp2v2",
+        slurm_job_name=os.environ.get("RUN_NAME") or "sp2v2",
         slurm_time=slurm_time,
         slurm_partition=partition,
         slurm_cpus_per_task=24,

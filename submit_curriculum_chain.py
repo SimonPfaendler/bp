@@ -1,24 +1,41 @@
 """Send several seeds through the whole reverse curriculum on the 30-min
-dev queue: every stage is a fixed number of 30-min SEGMENTS, every segment
-one slurm job that starts when its predecessor finished (afterok).
+dev queue: every stage is a fixed number of 30-min SEGMENTS, one slurm job
+each, fed into the queue as the submit limit allows.
 
-    # print the plan, submit nothing
+    # show the plan and the current state; submit nothing
     SEEDS="101 102 103 104 105" python submit_curriculum_chain.py
 
-    # submit
-    GO=1 SEEDS="101 102 103 104 105" python submit_curriculum_chain.py
+    # submit what fits now, then keep feeding until everything is done
+    GO=1 LOOP=1 SEEDS="101 102 103 104 105" nohup python submit_curriculum_chain.py > chain_feed.log 2>&1 &
 
-    # resume one seed from a stage (its predecessor's checkpoint must exist)
-    GO=1 SEEDS="103" STAGES="L4 L5" python submit_curriculum_chain.py
+The dev queue accepts only LIMIT (default 4) queued jobs per user, so the
+whole chain cannot be submitted at once. The script is a FEEDER: each pass
+it looks at what exists and submits the next segments that fit. It is
+stateless apart from chain_state_<TAG>.json (job ids and attempt counts),
+so it can be stopped and restarted at any time, and started again with
+more seeds.
+
+A segment is
+    done      if models/<name>_final.zip exists,
+    queued    if its recorded job id is still in squeue,
+    failed    if it was submitted, is gone from the queue, and left no
+              checkpoint — retried up to MAX_ATTEMPTS (2), then its seed
+              is dropped and reported,
+    pending   otherwise.
+A segment is submitted once its predecessor is done, or queued (then with
+afterok on it). A job stuck on a failed predecessor is cancelled.
+
+ADOPT="<name>=<jobid> ..." records jobs that were submitted before this
+state file existed.
 
 Every seed runs the SAME protocol below with the CURRENT code — unlike the
 seed-822 chain, which was assembled over ten days while rules, shaping and
 the decision rate were still changing. 822 is the pilot, not sample #1.
 
-Names are fixed: <TAG>_s<seed>_<stage>-<segment>, e.g. c15_s101_L5-2, so
-each job knows its INIT_PATH before its predecessor has started. Nothing
-is inherited from sidecars at submit time and nothing leaks in from the
-shell: a segment's environment is exactly COMMON + stage + segment rules.
+Names are fixed: <TAG>_s<seed>_<stage>-<segment>, e.g. c15_s101_L5-2.
+Nothing is inherited from sidecars at submit time and nothing leaks in
+from the shell: a segment's environment is exactly COMMON + SEGMENT +
+stage + segment rules.
 
 Within a stage, segment k+1 warm-starts from segment k WITH its replay
 buffer (BUF=auto) and, on L5, at the difficulty segment k ended at
@@ -29,7 +46,10 @@ ABLATE="REPEAT=1" (or "STACK=2", "ROLE=0", ...) overrides COMMON on every
 segment and extends the tag (c15-REPEAT1_s101_L5-2): one changed factor,
 same protocol, same seeds.
 """
+import json
 import os
+import subprocess
+import time
 
 import submit_2v2_selfplay as sub
 
@@ -81,11 +101,151 @@ STAGES = [
 ]
 
 
+def squeue():
+    """{job_id: reason} for all of this user's jobs (any partition)."""
+    out = subprocess.run(
+        ["squeue", "-u", os.environ.get("USER", ""), "-h", "-o", "%i|%P|%r"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    jobs = {}
+    for ln in out.splitlines():
+        jid, part, reason = (ln.split("|") + ["", ""])[:3]
+        jobs[jid.strip()] = (part.strip(), reason.strip())
+    return jobs
+
+
+def segments_for(seed, tag, stages, ablate, partition):
+    """Ordered [(name, env, prev_name)] for one seed."""
+    segs, prev = [], None
+    for st in stages:
+        for k in range(1, st["segs"] + 1):
+            name = f"{tag}_s{seed}_{st['name']}-{k}"
+            env = dict(COMMON)
+            env.update(SEGMENT)
+            env.update({a: b for a, b in st.items() if a not in ("name", "segs")})
+            env.update(ablate)
+            env.update(SEED=str(seed), RUN_NAME=name, PARTITION=partition,
+                       INHERIT="0", BUF="off")
+            if k > 1:
+                # same stage: keep the buffer, continue the difficulty, and
+                # clean up the predecessor's buffer afterwards
+                env.update(BUF="auto", DROP_INIT_BUF="1")
+                if "DIFF" in st:
+                    env["DIFF"] = "inherit"
+            if prev:
+                env["INIT_PATH"] = f"models/{prev}_final.zip"
+            segs.append((name, env, prev))
+            prev = name
+    return segs
+
+
+def feed_once(chains, state, go, limit, partition, max_attempts, log):
+    """One pass. Returns True while there is still something to wait for."""
+    jobs = squeue() if go else {}
+    in_queue = sum(1 for p, _ in jobs.values() if p == partition)
+    done = lambda n: os.path.exists(f"models/{n}_final.zip")
+    queued = lambda n: str(state.get(n, {}).get("job")) in jobs
+    hold = set()   # submitted, gone from the queue, no checkpoint — seen once
+
+    def cancel(name, why):
+        nonlocal in_queue
+        rec = state[name]
+        jid = str(rec["job"])
+        log(f"  {name}: job {jid} {why} -> scancel")
+        subprocess.run(["scancel", jid])
+        if jobs.pop(jid, (None,))[0] == partition:
+            in_queue -= 1
+        rec["job"] = None
+        rec["attempts"] = max(0, rec.get("attempts", 1) - 1)   # not its fault
+
+    # Per seed, in order: the first segment that is neither done nor queued
+    # breaks the chain — everything queued behind it waits on a job that
+    # will never succeed (slurm leaves such jobs in the queue forever,
+    # holding a submit slot), so it is cancelled and resubmitted later.
+    for seed, segs in chains.items():
+        broken = False
+        for name, _, _ in segs:
+            if done(name):
+                continue
+            rec = state.get(name)
+            if queued(name):
+                if broken:
+                    cancel(name, "waits on a broken chain")
+                continue
+            if rec and rec.get("job"):
+                # Gone without a checkpoint. Believe it only on the second
+                # pass: the checkpoint may not be visible on this node yet.
+                rec["gone"] = rec.get("gone", 0) + 1
+                if rec["gone"] < 2:
+                    hold.add(name)
+                    break
+                log(f"  {name}: job {rec['job']} ended without a checkpoint "
+                    f"(attempt {rec.get('attempts', 1)} failed)")
+                rec["job"], rec["gone"] = None, 0
+            broken = True
+
+    waiting, full = bool(hold), False
+    progressed = True
+    while progressed:                       # round-robin over the seeds
+        progressed = False
+        for seed, segs in chains.items():
+            nxt = next(((n, e, p) for n, e, p in segs
+                        if not (done(n) or queued(n))), None)
+            if nxt is None:
+                waiting |= any(queued(n) for n, _, _ in segs)
+                continue
+            name, env, prev = nxt
+            rec = state.setdefault(name, {"job": None, "attempts": 0})
+            if rec["attempts"] >= max_attempts:
+                if not rec.get("reported"):
+                    log(f"  seed {seed}: {name} failed {rec['attempts']}x — seed "
+                        f"dropped (see slurm_logs; delete its entry in the "
+                        f"state file to retry)")
+                    rec["reported"] = True
+                continue
+            waiting = True
+            if name in hold or (prev and not (done(prev) or queued(prev))):
+                continue
+            if full or in_queue >= limit:
+                full = True
+                continue
+            env = dict(env)
+            if prev and not done(prev):
+                env["AFTER"] = str(state[prev]["job"])
+            if not go:
+                log(f"  would submit {name}"
+                    + (f" after {prev}" if "AFTER" in env else ""))
+                jid = f"dry:{name}"
+            else:
+                for a in MANAGED:
+                    os.environ.pop(a, None)
+                os.environ.update(env)
+                try:
+                    jid = str(sub.main())
+                except Exception as e:      # QOSMaxSubmitJobPerUserLimit etc.
+                    msg = (str(e).strip().splitlines() or [repr(e)])[0]
+                    log(f"  {name}: submit refused ({msg}) — will retry")
+                    full = True
+                    continue
+                log(f"  submitted {name} as job {jid}"
+                    + (f" after {env['AFTER']}" if "AFTER" in env else "")
+                    + f" (attempt {rec['attempts'] + 1})")
+            rec.update(job=jid, attempts=rec["attempts"] + 1, gone=0)
+            jobs[jid] = (partition, "")
+            in_queue += 1
+            progressed = True
+    return waiting
+
+
 def main():
     seeds = [int(s) for s in os.environ.get("SEEDS", "").split()]
     if not seeds:
         raise SystemExit(__doc__)
     go = os.environ.get("GO") == "1"
+    loop = os.environ.get("LOOP") == "1"
+    limit = int(os.environ.get("LIMIT", "4"))
+    poll = int(os.environ.get("POLL", "120"))
+    max_attempts = int(os.environ.get("MAX_ATTEMPTS", "2"))
     partition = os.environ.get("CHAIN_PARTITION", "dev_gpu_h100")
     ablate = dict(kv.split("=", 1) for kv in os.environ.get("ABLATE", "").split())
     unknown = set(ablate) - set(MANAGED)
@@ -94,54 +254,49 @@ def main():
     tag = os.environ.get("TAG", "c15") + "".join(
         f"-{k}{v}" for k, v in sorted(ablate.items())
     )
-    only = os.environ.get("STAGES")
-    stages = [s for s in STAGES if not only or s["name"] in only.split()]
-    n_jobs = len(seeds) * sum(s["segs"] for s in stages)
+    chains = {s: segments_for(s, tag, STAGES, ablate, partition) for s in seeds}
+    state_path = f"chain_state_{tag}.json"
+    state = json.load(open(state_path)) if os.path.exists(state_path) else {}
+    for kv in os.environ.get("ADOPT", "").split():
+        n, jid = kv.split("=", 1)
+        state[n] = {"job": jid, "attempts": 1}
 
-    print(f"{'SUBMITTING' if go else 'DRY RUN (GO=1 to submit)'}: "
-          f"{len(seeds)} seeds x {sum(s['segs'] for s in stages)} segments "
-          f"= {n_jobs} jobs of 30 min, tag={tag}, partition={partition}, "
-          f"ablate={ablate or '-'}")
-    for seed in seeds:
-        prev_job, prev_name = None, None
-        first = STAGES.index(stages[0])
-        if first > 0:   # resuming: last segment of the stage before
-            p = STAGES[first - 1]
-            prev_name = f"{tag}_s{seed}_{p['name']}-{p['segs']}"
-        for st in stages:
-            for k in range(1, st["segs"] + 1):
-                name = f"{tag}_s{seed}_{st['name']}-{k}"
-                env = dict(COMMON)
-                env.update(SEGMENT)
-                env.update({a: b for a, b in st.items() if a not in ("name", "segs")})
-                env.update(ablate)
-                env.update(SEED=str(seed), RUN_NAME=name, PARTITION=partition,
-                           INHERIT="0", BUF="off")
-                if k > 1:
-                    # same stage: keep the buffer, continue the difficulty,
-                    # and clean up the predecessor's buffer afterwards
-                    env.update(BUF="auto", DROP_INIT_BUF="1")
-                    if "DIFF" in st:
-                        env["DIFF"] = "inherit"
-                if prev_name:
-                    env["INIT_PATH"] = f"models/{prev_name}_final.zip"
-                if prev_job:
-                    env["AFTER"] = str(prev_job)
-                if not go:
-                    show = {a: b for a, b in env.items()
-                            if a not in COMMON and a not in SEGMENT
-                            and a not in ("PARTITION", "INHERIT", "RUN_NAME", "SEED")}
-                    print(f"  {name}: " + " ".join(f"{a}={b}" for a, b in sorted(show.items())))
-                    prev_job, prev_name = f"<{name}>", name
-                    continue
-                for a in MANAGED:
-                    os.environ.pop(a, None)
-                os.environ.update(env)
-                prev_job, prev_name = sub.main(), name
+    def log(msg):
+        print(f"{time.strftime('%m-%d %H:%M')} {msg}", flush=True)
+
+    def save():
+        if go:
+            with open(state_path, "w") as f:
+                json.dump(state, f, indent=1)
+
+    n_seg = len(next(iter(chains.values())))
+    log(f"{'FEEDING' if go else 'DRY RUN (GO=1 to submit)'}: {len(seeds)} seeds "
+        f"x {n_seg} segments, tag={tag}, partition={partition}, limit={limit}, "
+        f"ablate={ablate or '-'}")
     if not go:
-        print(f"\n  every segment also has: "
-              + " ".join(f"{a}={b}" for a, b in sorted({**COMMON, **SEGMENT, **ablate}.items())))
-        print("Nothing submitted. Re-run with GO=1.")
+        for n, env, _ in next(iter(chains.values())):
+            show = {a: b for a, b in env.items()
+                    if a not in COMMON and a not in SEGMENT
+                    and a not in ("PARTITION", "INHERIT", "RUN_NAME", "SEED")}
+            print(f"  {n}: " + " ".join(f"{a}={b}" for a, b in sorted(show.items())))
+        print("  every segment also has: " + " ".join(
+            f"{a}={b}" for a, b in sorted({**COMMON, **SEGMENT, **ablate}.items())))
+    last_done = -1
+    while True:
+        waiting = feed_once(chains, state, go, limit, partition, max_attempts, log)
+        save()
+        n_done = sum(os.path.exists(f"models/{n}_final.zip")
+                     for segs in chains.values() for n, _, _ in segs)
+        if n_done != last_done:
+            log(f"  {n_done}/{len(seeds) * n_seg} segments done")
+            last_done = n_done
+        if not (go and loop and waiting):
+            break
+        time.sleep(poll)
+    if go and not loop and waiting:
+        log("queue filled; run again (or with LOOP=1) to feed the rest")
+    if not go:
+        print("Nothing submitted. Re-run with GO=1 (add LOOP=1 to keep feeding).")
 
 
 if __name__ == "__main__":

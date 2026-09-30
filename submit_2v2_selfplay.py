@@ -97,11 +97,25 @@ def run_experiment(
         cmd += f" --max_minutes {max_minutes}"
     if run_name:
         cmd = f"RUN_NAME={run_name} " + cmd
+    import time
+    t_start = time.time()
     rc = os.system(cmd)
-    if rc != 0:
-        # os.system swallows the exit code; without this a crashed stage
-        # looks like success to slurm and the next stage of a chain
-        # (afterok) starts on a checkpoint that was never written.
+    # os.system swallows the exit code; without a check a crashed segment
+    # looks like success to slurm and the next segment of a chain (afterok)
+    # starts on a checkpoint that was never written. With a fixed run name
+    # the checkpoint itself is the criterion — the time-bounded seed-822
+    # segments all saved correctly yet left a TypeError in stderr, so the
+    # exit status alone would be the wrong judge.
+    if run_name:
+        final = f"models/{run_name}_final.zip"
+        fresh = os.path.exists(final) and os.path.getmtime(final) >= t_start
+        if not fresh:
+            raise RuntimeError(
+                f"segment {run_name}: no fresh {final} (exit status {rc})")
+        if rc != 0:
+            print(f"WARNING: exit status {rc}, but {final} was written — "
+                  f"treating the segment as complete")
+    elif rc != 0:
         raise RuntimeError(f"training exited with status {rc}")
     if drop_init_buffer and init_path:
         # Chain housekeeping: this segment finished and saved its own

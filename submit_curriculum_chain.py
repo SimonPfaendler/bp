@@ -45,19 +45,36 @@ MANAGED = (
 COMMON = dict(ROLE="1", REPEAT="4", STACK="1", BLUE="roles", BLUE_KICK="4.5")
 
 # One segment = one 30-min dev slot. The step budget is what ends it
-# (~1450 decisions/s on an H100 at REPEAT=4 -> ~21 min); TIME_MIN is only
-# the safety net that still leaves room for setup and the final save.
-SEGMENT = dict(TIME="00:30:00", TIME_MIN="24", TOTAL_STEPS="1800000")
+# (1464 decisions/s on an H100 at REPEAT=4 -> 22.8 min); TIME_MIN is the
+# safety net (the seed-822 segments ran 27 min and still saved in time).
+SEGMENT = dict(TIME="00:30:00", TIME_MIN="25", TOTAL_STEPS="2000000")
 
-# >>> Segment counts are PROVISIONAL until aligned with what the seed-822
-# >>> chain actually used (python trace_chain.py <run> on the cluster).
-# >>> L5 stays at 2 segments (3.6M steps): the 3-hour L5 segment's critic
-# >>> diverged at 4.5M.
+# Segment counts, from the seed-822 lineage (python trace_chain.py, 2026-09-30):
+#
+#   stage  822 segments          822 budget            822 result at stage end
+#   L2     1 (REPEAT=1)          3.0M decisions        .79 strict-pass success
+#   L3     1 (REPEAT=1)          3.0M                  .93 goal after strict pass
+#   L4     1 (REPEAT=1)          3.0M                  .85
+#   L5     9 (REPEAT=1) + 4 (4)  34.5M + 9.6M          d .03 -> .40, goal after
+#                                (= 73M physics steps)  strict pass .73 -> .42
+#
+# 822's L5 rules were still changing during those 13 segments (roles and
+# role index at #5, defensive frames and foul restart at #7, team_def at
+# #8, one symmetric-payoff segment at #9, REPEAT=4 at #10), and the
+# difficulty sat at .25 through five of them. The protocol here runs the
+# FINAL rule set and layout from the first step, so it needs fewer:
+# one segment per drill (2.0M decisions = 8M physics steps at REPEAT=4)
+# and L5_SEGS (default 6) L5 segments = 12M decisions = 48M physics steps.
+# No single L5 segment comes near the 4.5M steps at which the 3-hour
+# segment's critic diverged; every segment boundary resets the optimizer
+# and re-fits the critic first (CRIT_WARM), as in the pilot.
+DRILL_SEGS = int(os.environ.get("DRILL_SEGS", "1"))
+L5_SEGS = int(os.environ.get("L5_SEGS", "6"))
 STAGES = [
-    dict(name="L2", segs=2, LEVEL="2"),
-    dict(name="L3", segs=2, LEVEL="3"),
-    dict(name="L4", segs=2, LEVEL="4"),
-    dict(name="L5", segs=2, LEVEL="5", DIFF="0", DIFF_THR="0.6",
+    dict(name="L2", segs=DRILL_SEGS, LEVEL="2"),
+    dict(name="L3", segs=DRILL_SEGS, LEVEL="3"),
+    dict(name="L4", segs=DRILL_SEGS, LEVEL="4"),
+    dict(name="L5", segs=L5_SEGS, LEVEL="5", DIFF="0", DIFF_THR="0.6",
          PASS_GATE="strict", SOLO="2", DRIBBLE="strict", SHAPING="team_def",
          RESTARTS="on", FOUL="on", DEF_PROB="0.25", DEF_DIFF="0",
          CRIT_WARM="60000"),

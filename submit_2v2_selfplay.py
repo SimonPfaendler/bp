@@ -15,8 +15,24 @@ def run_experiment(
     difficulty_window=None, max_minutes=None, role_index=False,
     defense_frame_prob=None, foul_restart=None, defense_difficulty=None,
     critic_warmup_steps=None, frame_stack=None, action_repeat=None,
-    blue_kick_speed=None, run_name=None,
+    blue_kick_speed=None, run_name=None, drop_init_buffer=False,
 ):
+    # difficulty="inherit": continue at the difficulty the init checkpoint's
+    # segment ENDED at. Resolved here, inside the job, because in a chain
+    # the previous segment's sidecar does not exist yet at submit time.
+    if difficulty == "inherit":
+        import json
+        base = init_path[:-4] if init_path and init_path.endswith(".zip") else init_path
+        side = {}
+        if base and os.path.exists(f"{base}_replay_buffer.json"):
+            side = json.load(open(f"{base}_replay_buffer.json"))
+        difficulty = side.get("difficulty_end")
+        if difficulty is None:
+            difficulty = side.get("difficulty_start")
+        if difficulty is None:
+            raise RuntimeError(
+                f"DIFF=inherit: no difficulty recorded next to {init_path}")
+        print(f"DIFF=inherit -> {difficulty} (from {base}_replay_buffer.json)")
     init_flag = f"--init_path {init_path} " if init_path else ""
     frozen_flag = f"--frozen_path {frozen_path} " if frozen_path else ""
     demo_flag = f"--demo_dir {demo_dir} " if demo_dir else ""
@@ -87,6 +103,20 @@ def run_experiment(
         # looks like success to slurm and the next stage of a chain
         # (afterok) starts on a checkpoint that was never written.
         raise RuntimeError(f"training exited with status {rc}")
+    if drop_init_buffer and init_path:
+        # Chain housekeeping: this segment finished and saved its own
+        # buffer, so the predecessor's snapshots (0.5-1 GB each) are dead
+        # weight. Policies and sidecars are kept.
+        import glob
+        base = init_path[:-4] if init_path.endswith(".zip") else init_path
+        prefix = base[:-len("_final")] if base.endswith("_final") else base
+        for p in glob.glob(f"{prefix}_final_replay_buffer.pkl") + \
+                glob.glob(f"{prefix}_replay_buffer_*_steps.pkl"):
+            try:
+                os.remove(p)
+                print(f"removed predecessor buffer {p}")
+            except OSError:
+                pass
 
 
 def main():
@@ -255,7 +285,8 @@ def main():
     shaping = os.environ.get("SHAPING")               # None -> v1
     restarts = os.environ.get("RESTARTS")             # None -> off
     diff = os.environ.get("DIFF")                     # None -> curriculum off
-    difficulty = float(diff) if diff is not None else None
+    difficulty = (diff if diff == "inherit"
+                  else float(diff) if diff is not None else None)
     diff_thr = os.environ.get("DIFF_THR"); diff_thr = float(diff_thr) if diff_thr else None
     diff_step = os.environ.get("DIFF_STEP"); diff_step = float(diff_step) if diff_step else None
     diff_win = os.environ.get("DIFF_WIN"); diff_win = int(diff_win) if diff_win else None
@@ -322,7 +353,7 @@ def main():
         pass_gate, dribble_rule, shaping, restarts,
         difficulty, diff_thr, diff_step, diff_win, max_minutes, role_index,
         def_prob, foul_restart, def_diff, crit_warm, stack, repeat, blue_kick,
-        run_name,
+        run_name, os.environ.get("DROP_INIT_BUF") == "1",
     )
     print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} on {partition} "
           f"for {slurm_time} seed={seed} run_name={run_name or 'auto'} "

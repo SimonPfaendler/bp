@@ -17,6 +17,7 @@ indirectly via the ball / teammate features.
 import json
 import math
 import os
+import re
 import time
 from typing import Tuple
 
@@ -330,6 +331,153 @@ CURRICULUM_PHASES = 3
 N_BLUE = 2
 
 
+# Contact radius of the pass detector (robot hull + ball). Same value as the
+# literal in _calculate_team_reward_and_done; named for _TeamPassTracker.
+PASS_CONTACT_DIST = 0.13
+
+
+def _release_is_strict(rel, receiver: int) -> bool:
+    """Strict pass, stage 1: did the release `rel` = (passer, ball_v,
+    ball_pos, team_pos) leave the passer at kick speed, heading for
+    `receiver`?"""
+    if rel is None:
+        return False
+    (vx, vy), (bx, by), tpos = rel[1], rel[2], rel[3]
+    speed = math.hypot(vx, vy)
+    if speed < STRICT_PASS_MIN_SPEED:
+        return False
+    tx, ty = tpos[receiver][0] - bx, tpos[receiver][1] - by
+    norm = math.hypot(tx, ty)
+    if norm < 1e-6:
+        return False
+    cos = (vx * tx + vy * ty) / (speed * norm)
+    angle = math.degrees(math.acos(max(-1.0, min(1.0, cos))))
+    return angle < STRICT_PASS_MAX_ANGLE_DEG
+
+
+class _TeamPassTracker:
+    """The pass bookkeeping of _calculate_team_reward_and_done for ONE team,
+    as a standalone state machine.
+
+    The env tracks passes for yellow only: rewards and metrics are yellow's.
+    A frozen policy playing BLUE was trained as yellow and reads the episode
+    state in its observation — has my team passed, was I the last carrier,
+    has the opponent touched the ball since. Without a blue-side bookkeeping
+    it is told "no pass yet" for the whole episode, although a goal after a
+    pass pays 10 and a solo goal 2, so its behaviour hangs on that bit.
+
+    This class repeats yellow's logic step for step with the teams as
+    arguments. It pays nothing; it exists so that blue's observation means
+    what yellow's means. test_blue_fairness.py runs a shadow instance on
+    YELLOW and checks it against the env's own variables at every physics
+    step, so the two copies of the logic cannot drift apart unnoticed.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.last_carrier = None      # index in the team, or None
+        self.opp_touched = False      # opponent touched since our last carry
+        self.passes = 0               # loose counter
+        self.passes_strict = 0
+        self._release = None          # (passer, ball_v, ball_pos, team_pos)
+        self._strict_pending = None   # (receiver, held_steps)
+
+    def on_restart(self):
+        """A restart is a new possession (same four resets as _do_restart)."""
+        self.last_carrier = None
+        self.opp_touched = False
+        self._release = None
+        self._strict_pending = None
+
+    def has_passed(self, pass_gate) -> bool:
+        return (self.passes_strict if pass_gate == "strict" else self.passes) > 0
+
+    def update(self, team, opps, ball):
+        has = tuple(
+            (math.hypot(r.x - ball.x, r.y - ball.y) < PASS_CONTACT_DIST)
+            or bool(r.infrared)
+            for r in team
+        )
+        opp_has = any(
+            (math.hypot(o.x - ball.x, o.y - ball.y) < PASS_CONTACT_DIST)
+            or bool(o.infrared)
+            for o in opps
+        )
+        if opp_has:
+            self.opp_touched = True
+            self.last_carrier = None
+            self._release = None
+            self._strict_pending = None
+
+        # Strict stage 2 (hold) before the loose detector, as for yellow.
+        if self._strict_pending is not None:
+            recv, held = self._strict_pending
+            if has[recv]:
+                held += 1
+                if held >= STRICT_PASS_HOLD_STEPS:
+                    self.passes_strict += 1
+                    self._strict_pending = None
+                else:
+                    self._strict_pending = (recv, held)
+            else:
+                self._strict_pending = None
+
+        current = None
+        if has[0] and not has[1]:
+            current = 0
+        elif has[1] and not has[0]:
+            current = 1
+        if current is not None:
+            if (
+                self.last_carrier is not None
+                and current != self.last_carrier
+                and not self.opp_touched
+            ):
+                prev = team[self.last_carrier]
+                if math.hypot(ball.x - prev.x, ball.y - prev.y) > 0.5:
+                    self.passes += 1
+                    if _release_is_strict(self._release, current):
+                        self._strict_pending = (current, 1)
+            self.last_carrier = current
+            self.opp_touched = False
+
+        # Release bookkeeping, after the detector.
+        if has[0] or has[1]:
+            self._release = None
+        elif self.last_carrier is not None and self._release is None:
+            self._release = (
+                self.last_carrier,
+                (ball.v_x, ball.v_y),
+                (ball.x, ball.y),
+                ((team[0].x, team[0].y), (team[1].x, team[1].y)),
+            )
+
+
+def _checkpoint_action_repeat(path) -> int:
+    """Decision rate a checkpoint was trained at, from the sidecar JSON the
+    trainer writes next to every _final.zip (also looked up for that run's
+    _<N>_steps.zip and _best.zip). 1 if unknown: the behaviour before
+    2026-10 and the right value for every checkpoint older than action
+    repeat itself."""
+    base = path[:-4] if path.endswith(".zip") else path
+    cands = [f"{base}_replay_buffer.json"]
+    m = re.match(r"^(.*)_\d+_steps$", base)
+    if m:
+        cands.append(f"{m.group(1)}_final_replay_buffer.json")
+    if base.endswith("_best"):
+        cands.append(f"{base[:-5]}_final_replay_buffer.json")
+    for c in cands:
+        if os.path.exists(c):
+            try:
+                with open(c) as f:
+                    return max(1, int(json.load(f).get("action_repeat", 1)))
+            except (ValueError, OSError):
+                pass
+    return 1
+
+
 class SSL2v2SelfPlayEnv(SSLBaseEnv):
     """2v2 self-play env. Yellow side is exposed to SB3 via PairVecEnv;
     blue side is computed internally from a frozen SAC checkpoint.
@@ -366,6 +514,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         defense_difficulty=1.0,
         action_repeat=1,
         blue_kick_speed=6.0,
+        frozen_action_repeat=None,
     ):
         super().__init__(
             field_type=1,
@@ -392,6 +541,25 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # frozen_path and is controlled by the hand-coded heuristic at the
         # _build_commands stage. Mutually exclusive with frozen_path.
         self.blue_heuristic = blue_heuristic
+        # Fair play for a frozen LEARNED opponent. Neither item is read on
+        # the heuristic or static-blue path, which stays as it was.
+        #  * Decision rate: a checkpoint trained with action repeat k is
+        #    asked once per k physics steps and its action held, as in its
+        #    own training. It used to be asked on every physics step, i.e.
+        #    4x as often as it ever decided. None = read k from the
+        #    checkpoint's sidecar on load (1 if there is none).
+        #  * Pass state: blue's observation carries blue's own pass
+        #    bookkeeping instead of zeros (see _TeamPassTracker).
+        self.frozen_action_repeat = (
+            None if frozen_action_repeat is None
+            else max(1, int(frozen_action_repeat))
+        )
+        self._blue_hold = 0
+        self._blue_cached = None
+        self._blue_pass = (
+            _TeamPassTracker() if (frozen_path and not blue_heuristic) else None
+        )
+        self._pass_shadow_y = None   # tests only: a shadow tracker on yellow
 
         # Ball speed needs its own scale. norm_v divides by the ROBOT max
         # (4.035 m/s) and clips at NORM_BOUNDS=1.2, while kicks run 3-6 m/s
@@ -584,6 +752,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                     f"the env produces {self.single_obs_dim}; frame-stacked "
                     f"checkpoints are not supported as frozen opponents"
                 )
+            if self.frozen_action_repeat is None:
+                self.frozen_action_repeat = _checkpoint_action_repeat(p)
             return
         if not os.path.isdir(p):
             raise ValueError(
@@ -614,6 +784,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.frozen_type = "harl"
         self.frozen_model = actor
         self.frozen_obs_dim = self.single_obs_dim
+        if self.frozen_action_repeat is None:
+            self.frozen_action_repeat = 1
 
     # ---------- gym API ----------
 
@@ -652,6 +824,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.is_dribbling_b = [False, False]
         self.dribble_start_pos_b = [None, None]
         self.must_release_b = [False, False]
+        self._blue_hold = 0
+        self._blue_cached = None
+        if self._blue_pass is not None:
+            self._blue_pass.reset()
+        if self._pass_shadow_y is not None:
+            self._pass_shadow_y.reset()
         self.ep_reward = 0.0
         self.ep_length = 0
         self.ep_start_time = time.time()
@@ -721,6 +899,16 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 self.match_result == 1 and self.passes_strict_in_episode > 0
             ) else 0.0
             info["scenario"] = self._episode_scenario
+            # Who blue was: lets the trainer split its statistics when the
+            # envs of one run play against different opponents (pool).
+            info["opponent"] = (
+                "heuristic" if self.blue_heuristic
+                else os.path.basename(self.frozen_path) if self.frozen_path
+                else "static"
+            )
+            if self._blue_pass is not None:
+                info["blue_passes"] = self._blue_pass.passes
+                info["blue_passes_strict"] = self._blue_pass.passes_strict
             if self._episode_scenario == "pass":
                 info["pass_variant"] = getattr(
                     self, "_episode_pass_variant", "corner"
@@ -843,18 +1031,28 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
     def _episode_state_obs(self, is_yellow, idx) -> np.ndarray:
         """The episode-scoped variables the reward function reads.
 
-        Order: has_passed, i_am_last_carrier, blue_touched_since_yellow,
-        time_remaining. The first three are yellow-team concepts (the pass
-        bookkeeping only tracks yellow), so blue gets zeros for them and
-        shares only the clock.
+        Order: has_passed, i_am_last_carrier, opponent_touched_since, and
+        time_remaining. For yellow the first three are the reward function's
+        own variables. For a frozen learned blue they come from blue's own
+        bookkeeping (_TeamPassTracker), so the policy reads the same thing
+        on either side. Without a tracker (heuristic or static blue, whose
+        observation nobody reads) blue gets zeros and shares only the clock.
         """
         time_remaining = 1.0 - min(
             1.0, self.current_step / float(self.max_steps)
         )
         if not is_yellow:
-            return np.array(
-                [0.0, 0.0, 0.0, time_remaining], dtype=np.float32
-            )
+            bp = self._blue_pass
+            if bp is None:
+                return np.array(
+                    [0.0, 0.0, 0.0, time_remaining], dtype=np.float32
+                )
+            return np.array([
+                1.0 if bp.has_passed(self.pass_gate) else 0.0,
+                1.0 if bp.last_carrier == idx else 0.0,
+                1.0 if bp.opp_touched else 0.0,
+                time_remaining,
+            ], dtype=np.float32)
         return np.array([
             1.0 if self._has_passed() else 0.0,
             1.0 if self.last_yellow_carrier == idx else 0.0,
@@ -1186,6 +1384,21 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
     def _compute_blue_action(self) -> np.ndarray:
         if self.frozen_model is None:
             return np.zeros((N_BLUE, SINGLE_ACT_DIM), dtype=np.float32)
+        k = self.frozen_action_repeat or 1
+        if k <= 1:
+            return self._frozen_policy_action()
+        # One decision per k physics steps, held in between — the rate the
+        # checkpoint trained at. The counter starts at 0 on reset, so with
+        # k == self.action_repeat blue decides on exactly the physics steps
+        # on which yellow's new action arrives. A restart does not force a
+        # fresh decision: yellow's held action is not refreshed either.
+        if self._blue_hold <= 0 or self._blue_cached is None:
+            self._blue_cached = self._frozen_policy_action()
+            self._blue_hold = k
+        self._blue_hold -= 1
+        return self._blue_cached
+
+    def _frozen_policy_action(self) -> np.ndarray:
         blue_obs = self._stacked_obs_blue()
         # Frozen blue may have been trained with a smaller obs (52 base,
         # 56 with episode state, 58 with role index). Truncate to the frozen
@@ -1545,6 +1758,14 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
             self.last_ball_pos = (ball.x, ball.y)
 
+        # Blue-side pass bookkeeping for a frozen learned opponent, and the
+        # tests' shadow on yellow. Here, so that they advance on exactly the
+        # steps on which yellow's own detector below does.
+        if self._blue_pass is not None:
+            self._blue_pass.update(blues, yellows, ball)
+        if self._pass_shadow_y is not None:
+            self._pass_shadow_y.update(yellows, blues, ball)
+
         # Pass detection: +3 shared event bonus. Receiver must be at true
         # contact distance (0.13 ≈ robot hull + ball) or have infrared —
         # tighter than the old 0.20 fly-by radius.
@@ -1679,20 +1900,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
     def _is_strict_release(self, receiver: int) -> bool:
         """Strict pass, stage 1: did the last release leave the passer at
         kick speed, heading for `receiver`?"""
-        rel = self._release
-        if rel is None:
-            return False
-        (vx, vy), (bx, by), ypos = rel[1], rel[2], rel[3]
-        speed = math.hypot(vx, vy)
-        if speed < STRICT_PASS_MIN_SPEED:
-            return False
-        tx, ty = ypos[receiver][0] - bx, ypos[receiver][1] - by
-        norm = math.hypot(tx, ty)
-        if norm < 1e-6:
-            return False
-        cos = (vx * tx + vy * ty) / (speed * norm)
-        angle = math.degrees(math.acos(max(-1.0, min(1.0, cos))))
-        return angle < STRICT_PASS_MAX_ANGLE_DEG
+        return _release_is_strict(self._release, receiver)
 
     def _classify_ball_out(self, ball, max_x, max_y, yellow_last, blue_last):
         """Which restart a ball out of bounds is, and where it is taken.
@@ -1834,6 +2042,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # _release / _strict_pending above.
         self.last_yellow_carrier = None
         self.blue_touched_since_yellow = False
+        if self._blue_pass is not None:
+            self._blue_pass.on_restart()
+        if self._pass_shadow_y is not None:
+            self._pass_shadow_y.on_restart()
         if self.foul_restart == "on":
             # A foul detected on the step of a ball-out would otherwise fire
             # after the teleport, on a ball the offender no longer holds.

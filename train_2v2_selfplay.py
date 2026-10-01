@@ -346,6 +346,12 @@ class StatsCallback(BaseCallback):
         self.drill_success = {k: deque(maxlen=300) for k in ("level2", "level3", "level4")}
         self.drill_strict = {k: deque(maxlen=300) for k in ("level2", "level3", "level4")}
         self.drill_len = {k: deque(maxlen=300) for k in ("level2", "level3", "level4")}
+        # Opponent pool: the same four numbers per kind of opponent, and
+        # the success rate against each pool member.
+        self.saw_pool = False
+        self.opp = {kind: {m: deque(maxlen=300) for m in ("success", "blue_goal", "strict", "sasp")}
+                    for kind in ("heuristic", "pool")}
+        self.pool_by = {}
 
     def _on_step(self) -> bool:
         dones = self.locals.get("dones", [])
@@ -369,12 +375,26 @@ class StatsCallback(BaseCallback):
                 self.sasp_buffer.append(float(infos[i]["scored_after_strict_pass"]))
             if "dribble_foul" in infos[i]:
                 self.foul_buffer.append(float(infos[i]["dribble_foul"]))
-            if "difficulty" in infos[i]:
+            opp = infos[i].get("opponent", "heuristic")
+            pool_ep = opp not in ("heuristic", "static")
+            o = self.opp["pool" if pool_ep else "heuristic"]
+            o["success"].append(float(infos[i].get("is_success", 0.0)))
+            o["blue_goal"].append(float(infos[i].get("blue_goal", 0.0)))
+            o["strict"].append(float(infos[i].get("passes_strict", 0.0)))
+            o["sasp"].append(float(infos[i].get("scored_after_strict_pass", 0.0)))
+            if pool_ep:
+                self.saw_pool = True
+                self.pool_by.setdefault(opp, deque(maxlen=150)).append(
+                    float(infos[i].get("is_success", 0.0)))
+            # Pool envs sit at difficulty 1.0 on the "curriculum" frame by
+            # construction; they must not move the curriculum statistics
+            # (difficulty_end is what the next segment inherits).
+            if "difficulty" in infos[i] and not pool_ep:
                 self.difficulty_buffer.append(float(infos[i]["difficulty"]))
             if "ball_restarts" in infos[i]:
                 self.ball_oob_buffer.append(float(infos[i]["ball_restarts"]))
                 self.robot_oob_buffer.append(float(infos[i]["robot_restarts"]))
-            scen = infos[i].get("scenario")
+            scen = None if pool_ep else infos[i].get("scenario")
             if scen == "pass":
                 self.pass_strict.append(float(infos[i].get("passes_strict", 0.0)))
             elif scen == "chaos":
@@ -501,6 +521,16 @@ class StatsCallback(BaseCallback):
             self.logger.record("scenario_curriculum/blue_goal_rate", float(np.mean(self.curr_blue_goal)))
             self.logger.record("scenario_curriculum/passes_per_episode", float(np.mean(self.curr_passes)))
             self.logger.record("scenario_curriculum/passes_strict_per_episode", float(np.mean(self.curr_strict)))
+        if self.saw_pool:
+            for kind, o in self.opp.items():
+                if o["success"]:
+                    self.logger.record(f"opp_{kind}/success_rate", float(np.mean(o["success"])))
+                    self.logger.record(f"opp_{kind}/blue_goal_rate", float(np.mean(o["blue_goal"])))
+                    self.logger.record(f"opp_{kind}/passes_strict_per_episode", float(np.mean(o["strict"])))
+                    self.logger.record(f"opp_{kind}/scored_after_strict_pass_rate", float(np.mean(o["sasp"])))
+            for name, buf in self.pool_by.items():
+                short = name.replace("_final.zip", "").replace(".zip", "")
+                self.logger.record(f"opp_pool/success_vs_{short}", float(np.mean(buf)))
         for scen, buf in self.drill_success.items():
             if buf:
                 self.logger.record(f"scenario_{scen}/success_rate", float(np.mean(buf)))
@@ -811,17 +841,33 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   difficulty=None, difficulty_threshold=0.6, difficulty_step=0.05,
                   difficulty_window=50, role_index=False,
                   defense_frame_prob=0.0, foul_restart="off",
-                  defense_difficulty=1.0, action_repeat=1, blue_kick_speed=6.0):
-    fns = [
-        make_env_fn(reward_type, seed + i, frozen_path, pass_scenario_prob,
-                    curriculum_start_level, blue_heuristic, goal_reward_solo,
-                    curriculum_target_level, pass_gate, dribble_rule, shaping,
-                    restarts, difficulty, difficulty_threshold, difficulty_step,
-                    difficulty_window, role_index, defense_frame_prob,
-                    foul_restart, defense_difficulty, action_repeat,
-                    blue_kick_speed)
-        for i in range(n_envs)
-    ]
+                  defense_difficulty=1.0, action_repeat=1, blue_kick_speed=6.0,
+                  opponents=None):
+    """`opponents`: one entry per env, None = the run's normal opponent, a
+    checkpoint path = that frozen policy as blue (opponent pool). A pool env
+    plays the open game against its opponent: start positions fully random
+    (difficulty 1.0), no defensive frames — a learned opponent creates
+    attack and defence by itself. Rules and rewards are the run's."""
+    def _fn(i):
+        opp = opponents[i] if opponents else None
+        if opp is None:
+            return make_env_fn(
+                reward_type, seed + i, frozen_path, pass_scenario_prob,
+                curriculum_start_level, blue_heuristic, goal_reward_solo,
+                curriculum_target_level, pass_gate, dribble_rule, shaping,
+                restarts, difficulty, difficulty_threshold, difficulty_step,
+                difficulty_window, role_index, defense_frame_prob,
+                foul_restart, defense_difficulty, action_repeat,
+                blue_kick_speed)
+        return make_env_fn(
+            reward_type, seed + i, opp, pass_scenario_prob,
+            curriculum_start_level, None, goal_reward_solo,
+            curriculum_target_level, pass_gate, dribble_rule, shaping,
+            restarts, 1.0, difficulty_threshold, difficulty_step,
+            difficulty_window, role_index, 0.0,
+            foul_restart, defense_difficulty, action_repeat,
+            blue_kick_speed)
+    fns = [_fn(i) for i in range(n_envs)]
     if algo == "masac":
         # Joint variants keep the 2-agent pairing intact so the replay buffer
         # stores joint transitions for the centralized critic.
@@ -848,7 +894,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           difficulty_step=0.05, difficulty_window=50, max_minutes=None,
           role_index=False, defense_frame_prob=0.0, foul_restart="off",
           defense_difficulty=1.0, critic_warmup_steps=0, frame_stack=1,
-          action_repeat=1, blue_kick_speed=6.0):
+          action_repeat=1, blue_kick_speed=6.0,
+          opponent_pool=None, pool_frac=0.5):
     assert algo in ("masac", "sac"), algo
     assert int(action_repeat) >= 1, action_repeat
     assert int(frame_stack) >= 1, frame_stack
@@ -929,7 +976,29 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     # With the heuristic opponent the env must NOT load a frozen model (blue
     # is hand-coded). frozen_path stays available as an init source above.
     env_frozen_path = None if blue_heuristic else frozen_path
+    # Opponent pool: a share of the envs plays frozen learned policies, the
+    # rest keeps the run's normal opponent (the heuristic anchor). Naive
+    # self-play against ONE frozen copy beat that copy within 600k steps and
+    # lost the heuristic (0.78 -> 0.20 success); several opponents at once
+    # is the standard remedy. The pool envs are the LAST ones, so the
+    # anchor envs keep the seeds they would have without a pool.
+    opponents = None
+    if opponent_pool:
+        pool = [p for p in opponent_pool if p]
+        missing = [p for p in pool if not os.path.exists(p)]
+        if missing:
+            raise FileNotFoundError(f"opponent pool: missing {missing}")
+        n_pool = max(1, min(n_envs, int(round(n_envs * float(pool_frac)))))
+        opponents = [None] * (n_envs - n_pool) + [
+            pool[j % len(pool)] for j in range(n_pool)
+        ]
+        print(f"Opponent pool: {n_pool} of {n_envs} envs play frozen policies "
+              f"(open game, d=1.0), {n_envs - n_pool} keep "
+              f"{'the ' + blue_heuristic + ' heuristic' if blue_heuristic else 'the run opponent'}")
+        for p in pool:
+            print(f"  pool: {p}  x{opponents.count(p)}")
     env = build_vec_env(
+        opponents=opponents,
         n_envs=n_envs, reward_type=reward_type, seed=seed,
         frozen_path=env_frozen_path, use_subproc=True, algo=algo,
         pass_scenario_prob=initial_pass_prob,
@@ -1442,6 +1511,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             init_path=init_load, seed=int(seed), algo=algo, net=net,
             num_timesteps=int(model.num_timesteps),
             pass_bonus_cap=PASS_BONUS_MAX_PER_EPISODE,
+            opponent_pool=list(opponent_pool) if opponent_pool else None,
+            pool_frac=float(pool_frac) if opponent_pool else None,
             env_vars=env_snapshot,
         ), _f, indent=1)
     print(f"Saved {final}")
@@ -1559,6 +1630,11 @@ if __name__ == "__main__":
                              "decisions.")
     parser.add_argument("--blue_kick_speed", type=float, default=6.0,
                         help="Shot speed of the blue heuristic (SSL max 6.0).")
+    parser.add_argument("--opponent_pool", default=None,
+                        help="Comma-separated frozen checkpoints. A share "
+                             "--pool_frac of the envs plays them as blue "
+                             "(open game); the rest keeps the run opponent.")
+    parser.add_argument("--pool_frac", type=float, default=0.5)
     parser.add_argument("--critic_warmup_steps", type=int, default=0,
                         help="Freeze actor and alpha for this many env steps "
                              "at the start of a (chained) run so the critic "
@@ -1618,6 +1694,9 @@ if __name__ == "__main__":
         frame_stack=args.frame_stack,
         action_repeat=args.action_repeat,
         blue_kick_speed=args.blue_kick_speed,
+        opponent_pool=([p for p in args.opponent_pool.split(",") if p]
+                       if args.opponent_pool else None),
+        pool_frac=args.pool_frac,
         goal_reward_solo=args.goal_reward_solo,
         target_action_std=args.target_action_std,
         noise_repeat_s=args.noise_repeat_s,

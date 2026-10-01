@@ -57,7 +57,7 @@ MANAGED = (
     "LEVEL PASS_GATE SOLO DRIBBLE SHAPING RESTARTS DIFF DIFF_THR DIFF_STEP "
     "DIFF_WIN INIT_PATH TOTAL_STEPS TIME_MIN BLUE ROLE DEF_PROB FOUL DEF_DIFF "
     "CRIT_WARM STACK REPEAT BLUE_KICK BUF TIME PARTITION SEED RUN_NAME AFTER "
-    "INHERIT DROP_INIT_BUF"
+    "INHERIT DROP_INIT_BUF POOL POOL_FRAC"
 ).split()
 
 # I/O layout and opponent: identical on every segment, so no boundary ever
@@ -100,6 +100,21 @@ STAGES = [
          CRIT_WARM="60000"),
 ]
 
+# Self-play stage, off by default. SP_SEGS=2 appends it after L5:
+#   * every seed keeps learning from its own last L5 checkpoint, WITH that
+#     segment's replay buffer and at the difficulty it reached;
+#   * POOL_FRAC (0.5) of the envs play frozen opponents — the last L5
+#     checkpoints of POOL_SEEDS (default: all five), the same pool for every
+#     learner — on the open game; the other envs go on exactly as in L5
+#     (heuristic, curriculum frame, defensive frames). The heuristic share
+#     is the anchor: without it, self-play against one frozen copy lost the
+#     heuristic within 600k decisions (success 0.78 -> 0.20).
+SP_SEGS = int(os.environ.get("SP_SEGS", "0"))
+if SP_SEGS > 0:
+    STAGES.append({**STAGES[-1], "name": "SP", "segs": SP_SEGS,
+                   "DIFF": "inherit", "keep_buffer": True, "pool": True})
+POOL = None   # set in main(): comma-separated checkpoint paths
+
 
 def squeue():
     """{job_id: reason} for all of this user's jobs (any partition)."""
@@ -114,15 +129,17 @@ def squeue():
     return jobs
 
 
-def segments_for(seed, tag, stages, ablate, partition):
-    """Ordered [(name, env, prev_name)] for one seed."""
-    segs, prev = [], None
+def segments_for(seed, tag, stages, ablate, partition, prev=None):
+    """Ordered [(name, env, prev_name)] for one seed. `prev` is the run the
+    first segment warm-starts from (BRANCH), None for a chain from scratch."""
+    segs = []
     for st in stages:
         for k in range(1, st["segs"] + 1):
             name = f"{tag}_s{seed}_{st['name']}-{k}"
             env = dict(COMMON)
             env.update(SEGMENT)
-            env.update({a: b for a, b in st.items() if a not in ("name", "segs")})
+            env.update({a: b for a, b in st.items()
+                        if a not in ("name", "segs", "keep_buffer", "pool")})
             env.update(ablate)
             env.update(SEED=str(seed), RUN_NAME=name, PARTITION=partition,
                        INHERIT="0", BUF="off")
@@ -132,6 +149,10 @@ def segments_for(seed, tag, stages, ablate, partition):
                 env.update(BUF="auto", DROP_INIT_BUF="1")
                 if "DIFF" in st:
                     env["DIFF"] = "inherit"
+            if k == 1 and st.get("keep_buffer") and prev:
+                env["BUF"] = "auto"     # same level and rules: keep the data
+            if st.get("pool"):
+                env.update(POOL=POOL, POOL_FRAC=os.environ.get("POOL_FRAC", "0.5"))
             if prev:
                 env["INIT_PATH"] = f"models/{prev}_final.zip"
             segs.append((name, env, prev))
@@ -262,7 +283,32 @@ def main():
     tag = os.environ.get("TAG", "c15") + "".join(
         f"-{k}{v}" for k, v in sorted(ablate.items())
     )
-    chains = {s: segments_for(s, tag, STAGES, ablate, partition) for s in seeds}
+    # BRANCH=L5: start at that stage, from the BASE_TAG run's last segment
+    # of the stage before, instead of repeating identical earlier stages.
+    # For ablations that only change L5 (e.g. ABLATE="DEF_PROB=0"): every
+    # seed keeps its own drill checkpoint, so the arms differ in exactly
+    # the ablated factor and not in the luck of a second drill run.
+    branch = os.environ.get("BRANCH")
+    base_tag = os.environ.get("BASE_TAG", os.environ.get("TAG", "c15"))
+    stages, first_prev = STAGES, (lambda seed: None)
+    if branch:
+        names = [s["name"] for s in STAGES]
+        if branch not in names or names.index(branch) == 0:
+            raise SystemExit(f"BRANCH must be one of {names[1:]}")
+        if tag == base_tag:
+            raise SystemExit("BRANCH needs ABLATE or a TAG other than BASE_TAG, "
+                             "otherwise it would overwrite the baseline runs")
+        i = names.index(branch)
+        stages, p = STAGES[i:], STAGES[i - 1]
+        first_prev = lambda seed: f"{base_tag}_s{seed}_{p['name']}-{p['segs']}"
+    if SP_SEGS > 0:
+        global POOL
+        pool_seeds = os.environ.get("POOL_SEEDS", "101 102 103 104 105").split()
+        POOL = ",".join(f"models/{base_tag}_s{ps}_L5-{L5_SEGS}_final.zip"
+                        for ps in pool_seeds)
+        log_pool = f"pool = last L5 checkpoint of seeds {' '.join(pool_seeds)}"
+    chains = {s: segments_for(s, tag, stages, ablate, partition, first_prev(s))
+              for s in seeds}
     state_path = f"chain_state_{tag}.json"
     state = json.load(open(state_path)) if os.path.exists(state_path) else {}
     for kv in os.environ.get("ADOPT", "").split():
@@ -281,6 +327,9 @@ def main():
     log(f"{'FEEDING' if go else 'DRY RUN (GO=1 to submit)'}: {len(seeds)} seeds "
         f"x {n_seg} segments, tag={tag}, partition={partition}, limit={limit}, "
         f"ablate={ablate or '-'}")
+    if SP_SEGS > 0:
+        log(f"  self-play stage: {SP_SEGS} segments, {log_pool}, "
+            f"{os.environ.get('POOL_FRAC', '0.5')} of the envs")
     if not go:
         for n, env, _ in next(iter(chains.values())):
             show = {a: b for a, b in env.items()

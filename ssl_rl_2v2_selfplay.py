@@ -515,6 +515,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         action_repeat=1,
         blue_kick_speed=6.0,
         frozen_action_repeat=None,
+        pass_bonus=None,
     ):
         super().__init__(
             field_type=1,
@@ -541,6 +542,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # frozen_path and is controlled by the hand-coded heuristic at the
         # _build_commands stage. Mutually exclusive with frozen_path.
         self.blue_heuristic = blue_heuristic
+        # Payment per full-game pass (first PASS_BONUS_MAX_PER_EPISODE of an
+        # episode). None = PASS_BONUS. 0 together with goal_reward_solo =
+        # goal_reward removes every payment for passing: only goals count,
+        # which asks whether passing sustains itself once it is learned.
+        self.pass_bonus = PASS_BONUS if pass_bonus is None else float(pass_bonus)
         # Fair play for a frozen LEARNED opponent. Neither item is read on
         # the heuristic or static-blue path, which stays as it was.
         #  * Decision rate: a checkpoint trained with action repeat k is
@@ -1895,7 +1901,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         if self._pass_bonuses_paid >= PASS_BONUS_MAX_PER_EPISODE:
             return 0.0
         self._pass_bonuses_paid += 1
-        return PASS_BONUS
+        return self.pass_bonus
 
     def _is_strict_release(self, receiver: int) -> bool:
         """Strict pass, stage 1: did the last release leave the passer at

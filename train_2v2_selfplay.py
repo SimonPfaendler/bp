@@ -66,10 +66,12 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
                 restarts="off", difficulty=None, difficulty_threshold=0.6,
                 difficulty_step=0.05, difficulty_window=50, role_index=False,
                 defense_frame_prob=0.0, foul_restart="off",
-                defense_difficulty=1.0, action_repeat=1, blue_kick_speed=6.0):
+                defense_difficulty=1.0, action_repeat=1, blue_kick_speed=6.0,
+                pass_bonus=None):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
+            pass_bonus=pass_bonus,       # None = the env default (+3)
             # k physics steps per decision; blue heuristic shot speed.
             action_repeat=action_repeat,
             blue_kick_speed=blue_kick_speed,
@@ -842,7 +844,7 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   difficulty_window=50, role_index=False,
                   defense_frame_prob=0.0, foul_restart="off",
                   defense_difficulty=1.0, action_repeat=1, blue_kick_speed=6.0,
-                  opponents=None):
+                  opponents=None, pass_bonus=None):
     """`opponents`: one entry per env, None = the run's normal opponent, a
     checkpoint path = that frozen policy as blue (opponent pool). A pool env
     plays the open game against its opponent: start positions fully random
@@ -858,7 +860,7 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                 restarts, difficulty, difficulty_threshold, difficulty_step,
                 difficulty_window, role_index, defense_frame_prob,
                 foul_restart, defense_difficulty, action_repeat,
-                blue_kick_speed)
+                blue_kick_speed, pass_bonus=pass_bonus)
         return make_env_fn(
             reward_type, seed + i, opp, pass_scenario_prob,
             curriculum_start_level, None, goal_reward_solo,
@@ -866,7 +868,7 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
             restarts, 1.0, difficulty_threshold, difficulty_step,
             difficulty_window, role_index, 0.0,
             foul_restart, defense_difficulty, action_repeat,
-            blue_kick_speed)
+            blue_kick_speed, pass_bonus=pass_bonus)
     fns = [_fn(i) for i in range(n_envs)]
     if algo == "masac":
         # Joint variants keep the 2-agent pairing intact so the replay buffer
@@ -895,7 +897,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           role_index=False, defense_frame_prob=0.0, foul_restart="off",
           defense_difficulty=1.0, critic_warmup_steps=0, frame_stack=1,
           action_repeat=1, blue_kick_speed=6.0,
-          opponent_pool=None, pool_frac=0.5):
+          opponent_pool=None, pool_frac=0.5, pass_bonus=None):
     assert algo in ("masac", "sac"), algo
     assert int(action_repeat) >= 1, action_repeat
     assert int(frame_stack) >= 1, frame_stack
@@ -997,8 +999,10 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
               f"{'the ' + blue_heuristic + ' heuristic' if blue_heuristic else 'the run opponent'}")
         for p in pool:
             print(f"  pool: {p}  x{opponents.count(p)}")
+    if pass_bonus is not None:
+        print(f"Pass bonus: {float(pass_bonus)} per paying pass (default 3.0)")
     env = build_vec_env(
-        opponents=opponents,
+        opponents=opponents, pass_bonus=pass_bonus,
         n_envs=n_envs, reward_type=reward_type, seed=seed,
         frozen_path=env_frozen_path, use_subproc=True, algo=algo,
         pass_scenario_prob=initial_pass_prob,
@@ -1297,6 +1301,13 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
                 # rewards and terminals (L2: the strict pass IS the goal).
                 # Sidecars before 2026-09-28 do not record the level; those
                 # are not refused on this key.
+                # Same for the pass bonus: sidecars without the key were
+                # written with the default of 3.0.
+                saved_pb = float(saved_flags.get("pass_bonus") or 3.0) \
+                    if saved_flags.get("pass_bonus") != 0 else 0.0
+                cur_pb = 3.0 if pass_bonus is None else float(pass_bonus)
+                if saved_pb != cur_pb:
+                    diff["pass_bonus"] = (saved_pb, cur_pb)
                 saved_level = saved_flags.get("curriculum_start_level")
                 if saved_level is not None and int(saved_level) != int(effective_start_level):
                     diff["curriculum_start_level"] = (saved_level, effective_start_level)
@@ -1511,6 +1522,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             init_path=init_load, seed=int(seed), algo=algo, net=net,
             num_timesteps=int(model.num_timesteps),
             pass_bonus_cap=PASS_BONUS_MAX_PER_EPISODE,
+            pass_bonus=3.0 if pass_bonus is None else float(pass_bonus),
             opponent_pool=list(opponent_pool) if opponent_pool else None,
             pool_frac=float(pool_frac) if opponent_pool else None,
             env_vars=env_snapshot,
@@ -1635,6 +1647,9 @@ if __name__ == "__main__":
                              "--pool_frac of the envs plays them as blue "
                              "(open game); the rest keeps the run opponent.")
     parser.add_argument("--pool_frac", type=float, default=0.5)
+    parser.add_argument("--pass_bonus", type=float, default=None,
+                        help="Payment per paying pass (default 3.0). 0 with "
+                             "--goal_reward_solo 10 = only goals count.")
     parser.add_argument("--critic_warmup_steps", type=int, default=0,
                         help="Freeze actor and alpha for this many env steps "
                              "at the start of a (chained) run so the critic "
@@ -1697,6 +1712,7 @@ if __name__ == "__main__":
         opponent_pool=([p for p in args.opponent_pool.split(",") if p]
                        if args.opponent_pool else None),
         pool_frac=args.pool_frac,
+        pass_bonus=args.pass_bonus,
         goal_reward_solo=args.goal_reward_solo,
         target_action_std=args.target_action_std,
         noise_repeat_s=args.noise_repeat_s,

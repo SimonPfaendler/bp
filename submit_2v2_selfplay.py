@@ -16,7 +16,7 @@ def run_experiment(
     defense_frame_prob=None, foul_restart=None, defense_difficulty=None,
     critic_warmup_steps=None, frame_stack=None, action_repeat=None,
     blue_kick_speed=None, run_name=None, drop_init_buffer=False,
-    opponent_pool=None, pool_frac=None,
+    opponent_pool=None, pool_frac=None, pass_bonus=None,
 ):
     # difficulty="inherit": continue at the difficulty the init checkpoint's
     # segment ENDED at. Resolved here, inside the job, because in a chain
@@ -96,6 +96,8 @@ def run_experiment(
         cmd += f" --blue_kick_speed {blue_kick_speed}"
     if max_minutes is not None:
         cmd += f" --max_minutes {max_minutes}"
+    if pass_bonus is not None:
+        cmd += f" --pass_bonus {pass_bonus}"
     if opponent_pool:
         cmd += f" --opponent_pool {opponent_pool}"
         if pool_frac is not None:
@@ -375,6 +377,8 @@ def main():
         run_name, os.environ.get("DROP_INIT_BUF") == "1",
         # POOL=a.zip,b.zip: frozen opponents for POOL_FRAC (0.5) of the envs.
         os.environ.get("POOL") or None, os.environ.get("POOL_FRAC") or None,
+        # PASS_BONUS=0 with SOLO=10: no payment for passing, only goals.
+        os.environ.get("PASS_BONUS") or None,
     )
     print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} on {partition} "
           f"for {slurm_time} seed={seed} run_name={run_name or 'auto'} "

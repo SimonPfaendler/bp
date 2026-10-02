@@ -151,7 +151,14 @@ def segments_for(seed, tag, stages, ablate, partition, prev=None):
                         if a not in ("name", "segs", "keep_buffer", "pool")})
             env.update(ablate)
             if "TOTAL_STEPS" not in ablate:
-                env["TOTAL_STEPS"] = str(PHYS_PER_SEG // (int(env["REPEAT"]) * SEG_MULT))
+                # BUDGET=physics (default): the same simulated play per
+                # segment for every action repeat. BUDGET=decisions: the
+                # same number of decisions — and therefore of gradient
+                # updates — as the baseline (2.0M), whatever the repeat.
+                if os.environ.get("BUDGET", "physics") == "decisions":
+                    env["TOTAL_STEPS"] = str(2_000_000 // SEG_MULT)
+                else:
+                    env["TOTAL_STEPS"] = str(PHYS_PER_SEG // (int(env["REPEAT"]) * SEG_MULT))
             env.update(SEED=str(seed), RUN_NAME=name, PARTITION=partition,
                        INHERIT="0", BUF="off")
             if k > 1:
@@ -349,11 +356,13 @@ def main():
             print(f"  {n}: " + " ".join(f"{a}={b}" for a, b in sorted(show.items())))
         shown = {**COMMON, **SEGMENT, **ablate}
         if "TOTAL_STEPS" not in ablate:
-            shown["TOTAL_STEPS"] = str(PHYS_PER_SEG // (int(shown["REPEAT"]) * SEG_MULT))
+            shown["TOTAL_STEPS"] = str(
+                2_000_000 // SEG_MULT if os.environ.get("BUDGET", "physics") == "decisions"
+                else PHYS_PER_SEG // (int(shown["REPEAT"]) * SEG_MULT))
         print("  every segment also has: " + " ".join(
             f"{a}={b}" for a, b in sorted(shown.items())))
         print(f"  = {int(shown['TOTAL_STEPS']) * int(shown['REPEAT']) / 1e6:.1f}M physics steps "
-              f"per job, {PHYS_PER_SEG / 1e6:.0f}M per curriculum segment")
+              f"per job, budget = {os.environ.get('BUDGET', 'physics')}")
     last_done = -1
     while True:
         waiting = feed_once(chains, state, go, limit, partition, max_attempts, log)

@@ -88,8 +88,17 @@ SEGMENT = dict(TIME="00:30:00", TIME_MIN="25", TOTAL_STEPS="2000000")
 # No single L5 segment comes near the 4.5M steps at which the 3-hour
 # segment's critic diverged; every segment boundary resets the optimizer
 # and re-fits the critic first (CRIT_WARM), as in the pilot.
-DRILL_SEGS = int(os.environ.get("DRILL_SEGS", "1"))
-L5_SEGS = int(os.environ.get("L5_SEGS", "6"))
+# Budget per segment in PHYSICS steps (simulated play), so that arms with a
+# different action repeat see the same amount of game: 8M = the baseline's
+# 2.0M decisions at REPEAT=4. A segment's decision budget is
+# PHYS_PER_SEG / (REPEAT * SEG_MULT). SEG_MULT splits every segment into
+# that many 30-min jobs and is needed where the budget does not fit one
+# slot: at REPEAT=1 the simulator manages ~2600 decisions/s, i.e. 8M in
+# 50 min, so REPEAT=1 runs with SEG_MULT=2 (twice the segments, 4M each).
+PHYS_PER_SEG = 8_000_000
+SEG_MULT = int(os.environ.get("SEG_MULT", "1"))
+DRILL_SEGS = int(os.environ.get("DRILL_SEGS", str(1 * SEG_MULT)))
+L5_SEGS = int(os.environ.get("L5_SEGS", str(6 * SEG_MULT)))
 STAGES = [
     dict(name="L2", segs=DRILL_SEGS, LEVEL="2"),
     dict(name="L3", segs=DRILL_SEGS, LEVEL="3"),
@@ -141,6 +150,8 @@ def segments_for(seed, tag, stages, ablate, partition, prev=None):
             env.update({a: b for a, b in st.items()
                         if a not in ("name", "segs", "keep_buffer", "pool")})
             env.update(ablate)
+            if "TOTAL_STEPS" not in ablate:
+                env["TOTAL_STEPS"] = str(PHYS_PER_SEG // (int(env["REPEAT"]) * SEG_MULT))
             env.update(SEED=str(seed), RUN_NAME=name, PARTITION=partition,
                        INHERIT="0", BUF="off")
             if k > 1:
@@ -336,8 +347,13 @@ def main():
                     if a not in COMMON and a not in SEGMENT
                     and a not in ("PARTITION", "INHERIT", "RUN_NAME", "SEED")}
             print(f"  {n}: " + " ".join(f"{a}={b}" for a, b in sorted(show.items())))
+        shown = {**COMMON, **SEGMENT, **ablate}
+        if "TOTAL_STEPS" not in ablate:
+            shown["TOTAL_STEPS"] = str(PHYS_PER_SEG // (int(shown["REPEAT"]) * SEG_MULT))
         print("  every segment also has: " + " ".join(
-            f"{a}={b}" for a, b in sorted({**COMMON, **SEGMENT, **ablate}.items())))
+            f"{a}={b}" for a, b in sorted(shown.items())))
+        print(f"  = {int(shown['TOTAL_STEPS']) * int(shown['REPEAT']) / 1e6:.1f}M physics steps "
+              f"per job, {PHYS_PER_SEG / 1e6:.0f}M per curriculum segment")
     last_done = -1
     while True:
         waiting = feed_once(chains, state, go, limit, partition, max_attempts, log)

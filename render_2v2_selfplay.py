@@ -285,7 +285,8 @@ def main():
     keys = ("is_success", "blue_goal", "passes", "passes_strict",
             "scored_after_pass", "scored_after_strict_pass",
             "ball_restarts", "robot_restarts",
-            "blue_passes", "blue_passes_strict")
+            "blue_passes", "blue_passes_strict",
+            "yellows_touched", "strict_to_farther_mate")
     rows = []
     cap = 1500  # decisions; the env truncates at 1000 physics steps anyway
     for ep in range(args.n_eps):
@@ -340,7 +341,8 @@ def main():
         rates[k] = _wilson(int(col(k).sum()), n)
     means = {k: _mean_se(col(k)) for k in
              ("passes", "passes_strict", "ball_restarts", "robot_restarts",
-              "ep_len", "return", "blue_passes", "blue_passes_strict")}
+              "ep_len", "return", "blue_passes", "blue_passes_strict",
+              "yellows_touched", "strict_to_farther_mate")}
 
     print()
     print("=" * 72)
@@ -351,6 +353,12 @@ def main():
           f"[{rates['blue_goal'][1]:.3f}, {rates['blue_goal'][2]:.3f}]")
     print(f"  passes / episode               {means['passes'][0]:.3f} ± {means['passes'][1]:.3f}")
     print(f"  passes_strict / episode        {means['passes_strict'][0]:.3f} ± {means['passes_strict'][1]:.3f}")
+    if n_yellow > 2:
+        all_touched = float(np.mean(col("yellows_touched") >= n_yellow))
+        print(f"  yellows that carried the ball  {means['yellows_touched'][0]:.2f} of {n_yellow} per episode "
+              f"(all {n_yellow} in {all_touched:.2f} of the episodes)")
+        print(f"  strict passes to the FARTHER   {means['strict_to_farther_mate'][0]:.3f} per episode "
+              f"({means['strict_to_farther_mate'][0] / max(1e-9, means['passes_strict'][0]):.2f} of the strict passes)")
     print(f"  scored_after_pass_rate         {rates['scored_after_pass'][0]:.3f}  "
           f"[{rates['scored_after_pass'][1]:.3f}, {rates['scored_after_pass'][2]:.3f}]")
     print(f"  scored_after_strict_pass_rate  {rates['scored_after_strict_pass'][0]:.3f}  "

@@ -829,6 +829,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self._pass_bonuses_paid = 0  # PASS_BONUS_MAX_PER_EPISODE cap
         self._release = None         # (passer, ball_v, ball_pos, yellow_pos) at loss of possession
         self._strict_pending = None  # (receiver, held_steps) after a kicked, aimed release
+        # Measurement only (info keys): who passed to whom, and whether the
+        # receiver was the passer's nearest team-mate at the release.
+        self._strict_open = None       # (passer, receiver, to_nearest) of the pending candidate
+        self._pass_pairs_strict = []   # the completed ones of this episode
+        self._yellows_touched = set()  # yellow indices that carried the ball
         self._drill_release_step = None  # pass drills: step of the first release
         self._l3_pass_step = None        # L3: step of the (first) strict pass
         self.blue_goal_scored = False
@@ -923,6 +928,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             info["scored_after_strict_pass"] = 1.0 if (
                 self.match_result == 1 and self.passes_strict_in_episode > 0
             ) else 0.0
+            # Who passed to whom (strict) and how many yellows carried the
+            # ball: with three robots the only way to tell whether the
+            # third one takes part.
+            info["pass_pairs_strict"] = [[int(p[0]), int(p[1])] for p in self._pass_pairs_strict]
+            info["strict_to_farther_mate"] = float(sum(1 for p in self._pass_pairs_strict if not p[2]))
+            info["yellows_touched"] = float(len(self._yellows_touched))
             info["scenario"] = self._episode_scenario
             # Who blue was: lets the trainer split its statistics when the
             # envs of one run play against different opponents (pool).
@@ -1848,6 +1859,9 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                     self.passes_strict_in_episode += 1
                     strict_event = True
                     self._strict_pending = None
+                    if self._strict_open is not None:
+                        self._pass_pairs_strict.append(self._strict_open)
+                        self._strict_open = None
                 else:
                     self._strict_pending = (recv, held)
             else:
@@ -1871,6 +1885,18 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                     # this receiver? Then the hold check above takes over.
                     if self._is_strict_release(current_carrier):
                         self._strict_pending = (current_carrier, 1)
+                        # Measurement only: was the receiver the passer's
+                        # nearest team-mate at the release? With three
+                        # robots this tells whether the carrier chose the
+                        # farther option.
+                        passer, tpos = self._release[0], self._release[3]
+                        nearest = min(
+                            (j for j in range(n) if j != passer),
+                            key=lambda j: math.hypot(tpos[j][0] - tpos[passer][0],
+                                                     tpos[j][1] - tpos[passer][1]),
+                        )
+                        self._strict_open = (passer, current_carrier, current_carrier == nearest)
+            self._yellows_touched.add(current_carrier)
             self.last_yellow_carrier = current_carrier
             self.blue_touched_since_yellow = False
 
@@ -2162,6 +2188,123 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             out.append((x, y))
         return out
 
+    def _drill_frame_multi(self, pos, rng, max_x, level):
+        """Pass drills for a team of three or more: the carrier has TWO
+        receivers and one of the two lanes is covered, so the drill asks
+        for the choice of the free man, not only for the pass.
+
+        L2: carrier with the ball in the attacking half, receivers 1.5-3 m
+            away on different sides (60-150 deg apart as seen from the
+            carrier); a parked blue stands on the lane to one of them,
+            0.4-0.6 m in front of it.
+        L3: both receivers in shooting range on opposite sides of the goal
+            axis, the carrier 1.5-3 m upfield of their midpoint, one lane
+            covered as on L2. Rewards as on the two-robot drill: the strict
+            pass pays once, the goal after it is the terminal.
+        L4: the L3 geometry with the heuristic active; the hunter starts on
+            the covered lane, halfway between carrier and receiver, the
+            keeper in its goal.
+        The carrier faces the bisector of the two lanes (+-30 deg), so which
+        lane is covered is visible only through the opponent's position."""
+        perm = rng.permutation(self.n_yellow)
+        c_idx, a_idx, b_idx = int(perm[0]), int(perm[1]), int(perm[2])
+        if level == 2:
+            self._episode_scenario = "level2"
+            cx = float(rng.uniform(-2.5, -0.5))
+            cy = float(rng.uniform(-1.5, 1.5))
+            ang = float(rng.uniform(-math.pi, math.pi))
+            d = float(rng.uniform(1.5, 3.0))
+            ax_, ay_ = self._clip_field(cx + d * math.cos(ang), cy + d * math.sin(ang), margin=0.5)
+            side = 1.0 if rng.random() < 0.5 else -1.0
+            bx_, by_ = ax_, ay_
+            for _ in range(20):
+                ang2 = ang + side * math.radians(float(rng.uniform(60.0, 150.0)))
+                d2 = float(rng.uniform(1.5, 3.0))
+                bx_, by_ = self._clip_field(cx + d2 * math.cos(ang2), cy + d2 * math.sin(ang2), margin=0.5)
+                if math.hypot(bx_ - ax_, by_ - ay_) >= 1.0 and math.hypot(bx_ - cx, by_ - cy) >= 1.2:
+                    break
+        else:
+            self._episode_scenario = f"level{level}"
+            side = 1.0 if rng.random() < 0.5 else -1.0
+            ax_ = float(rng.uniform(-max_x + 1.0, -max_x + 2.3))
+            ay_ = side * float(rng.uniform(0.4, 1.2))
+            for _ in range(20):   # receivers at least 1.2 m apart
+                bx_ = float(rng.uniform(-max_x + 1.0, -max_x + 2.3))
+                by_ = -side * float(rng.uniform(0.4, 1.2))
+                if math.hypot(bx_ - ax_, by_ - ay_) >= 1.2:
+                    break
+            mid_x, mid_y = (ax_ + bx_) / 2.0, (ay_ + by_) / 2.0
+            # Carrier upfield of the receivers' midpoint, and at least
+            # 1.5 m from BOTH receivers so every lane has room for the
+            # covering blue (resampled, the midpoint alone allowed 0.5 m).
+            for _ in range(30):
+                ang = float(rng.uniform(-math.radians(75.0), math.radians(75.0)))
+                d = float(rng.uniform(1.5, 3.0))
+                cx, cy = self._clip_field(mid_x + d * math.cos(ang), mid_y + d * math.sin(ang), margin=0.5)
+                cx = min(cx, 0.5)  # stay clear of the parked blue
+                if min(math.hypot(cx - ax_, cy - ay_), math.hypot(cx - bx_, cy - by_)) >= 1.5:
+                    break
+        # Headings: carrier toward the bisector of the two lanes, receivers
+        # toward the carrier, all +-30 deg; ball at the carrier's dribbler.
+        to_a = np.array([ax_ - cx, ay_ - cy])
+        to_a = to_a / max(1e-6, float(np.linalg.norm(to_a)))
+        to_b = np.array([bx_ - cx, by_ - cy])
+        to_b = to_b / max(1e-6, float(np.linalg.norm(to_b)))
+        bis = to_a + to_b
+        bis = to_a if float(np.linalg.norm(bis)) < 1e-3 else bis / float(np.linalg.norm(bis))
+        theta_c = math.degrees(math.atan2(bis[1], bis[0])) + float(rng.uniform(-30.0, 30.0))
+        theta_a = math.degrees(math.atan2(cy - ay_, cx - ax_)) + float(rng.uniform(-30.0, 30.0))
+        theta_b = math.degrees(math.atan2(cy - by_, cx - bx_)) + float(rng.uniform(-30.0, 30.0))
+        ball_x, ball_y = self._ball_in_front(rng, cx, cy, bis)
+        pos.ball = Ball(x=ball_x, y=ball_y)
+        # The covered lane: a blue between the carrier and one receiver.
+        # The covering blue: on L4 the hunter 40-60 % of the way down the
+        # covered lane, on L2/L3 a parked blue 0.4-0.6 m in front of the
+        # covered receiver (never closer than 0.6 m to the carrier). If the
+        # spot lands within 0.5 m of the FREE receiver (the lanes can run
+        # close together in the shooting zone) the other lane is covered.
+        frac = float(rng.uniform(0.4, 0.6))
+        off = float(rng.uniform(0.4, 0.6))
+        first = rng.random() < 0.5
+        for covered_a in (first, not first):
+            rx, ry, u = (ax_, ay_, to_a) if covered_a else (bx_, by_, to_b)
+            fx, fy = (bx_, by_) if covered_a else (ax_, ay_)
+            lane = math.hypot(rx - cx, ry - cy)
+            if level == 4:
+                blx, bly = cx + float(u[0]) * lane * frac, cy + float(u[1]) * lane * frac
+            else:
+                o = min(off, max(0.3, lane - 0.6))
+                blx, bly = rx - float(u[0]) * o, ry - float(u[1]) * o
+            if math.hypot(blx - fx, bly - fy) >= 0.5:
+                break
+        cover = Robot(x=blx, y=bly, theta=math.degrees(math.atan2(cy - bly, cx - blx)))
+        if level == 4:
+            blues = [cover, Robot(x=float(rng.uniform(-max_x + 0.35, -max_x + 0.7)),
+                                  y=float(rng.uniform(-0.4, 0.4)), theta=0.0)]
+        else:
+            for _ in range(10):   # the parked blue clear of every yellow
+                px, py = float(rng.uniform(1.5, max_x - 0.5)), float(rng.uniform(-2.0, 2.0))
+                if all(math.hypot(px - x, py - y) >= 0.5 for x, y in ((cx, cy), (ax_, ay_), (bx_, by_))):
+                    break
+            blues = [cover, Robot(x=px, y=py, theta=float(rng.uniform(-180, 180)))]
+        yellows = [None] * self.n_yellow
+        yellows[c_idx] = Robot(x=cx, y=cy, theta=theta_c)
+        yellows[a_idx] = Robot(x=ax_, y=ay_, theta=theta_a)
+        yellows[b_idx] = Robot(x=bx_, y=by_, theta=theta_b)
+        extra = [i for i in range(self.n_yellow) if yellows[i] is None]
+        spots = self._extra_yellow_spots(
+            rng, [(cx, cy), (ax_, ay_), (bx_, by_)] + [(b.x, b.y) for b in blues], len(extra),
+            far_from=(cx, cy, max(math.hypot(ax_ - cx, ay_ - cy), math.hypot(bx_ - cx, by_ - cy)) + 0.5),
+        )
+        for i, (x, y) in zip(extra, spots):
+            yellows[i] = Robot(x=x, y=y, theta=float(rng.uniform(-180, 180)))
+        for i, r in enumerate(yellows):
+            pos.robots_yellow[i] = r
+        for i, b in enumerate(blues):
+            pos.robots_blue[i] = b
+        self._drill_covered = (rx, ry)   # for the spawn figure / audits
+        return pos
+
     def _drill_frame(self, pos, rng, max_x, carrier_idx, cx, cy, mx, my, mate_idx=None):
         """Shared tail of the pass-drill spawns: carrier at (cx, cy) with the
         ball at its dribbler, mate at (mx, my), both facing each other within
@@ -2227,6 +2370,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         rng = self.np_random
         max_x = self.field.length / 2.0
         level = int(getattr(self, "curriculum_level", 5))
+
+        if level in (2, 3, 4) and self.n_yellow >= 3:
+            # Three or more robots: the drills offer two receivers with one
+            # lane covered (see _drill_frame_multi). The two-robot drills
+            # below are untouched.
+            return self._drill_frame_multi(pos, rng, max_x, level)
 
         if level <= 1:
             # LEVEL 1 — gestellte Torchance.

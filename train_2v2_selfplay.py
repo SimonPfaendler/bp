@@ -311,6 +311,10 @@ class StatsCallback(BaseCallback):
         self.passes_strict_buffer = deque(maxlen=300)
         self.sasp_buffer = deque(maxlen=300)   # scored after a STRICT pass
         self.foul_buffer = deque(maxlen=300)   # strict dribbling rule fouls
+        # Team-size diagnostics (3v2): how many yellows carried the ball,
+        # and how many strict passes went to the farther team-mate.
+        self.touched_buffer = deque(maxlen=300)
+        self.farther_buffer = deque(maxlen=300)
         self.ball_oob_buffer = deque(maxlen=300)   # restarts="on": events/episode
         self.difficulty_buffer = deque(maxlen=100)   # reverse curriculum
         self.robot_oob_buffer = deque(maxlen=300)
@@ -379,6 +383,9 @@ class StatsCallback(BaseCallback):
                 self.sasp_buffer.append(float(infos[i]["scored_after_strict_pass"]))
             if "dribble_foul" in infos[i]:
                 self.foul_buffer.append(float(infos[i]["dribble_foul"]))
+            if "yellows_touched" in infos[i]:
+                self.touched_buffer.append(float(infos[i]["yellows_touched"]))
+                self.farther_buffer.append(float(infos[i].get("strict_to_farther_mate", 0.0)))
             opp = infos[i].get("opponent", "heuristic")
             pool_ep = opp not in ("heuristic", "static")
             o = self.opp["pool" if pool_ep else "heuristic"]
@@ -458,6 +465,9 @@ class StatsCallback(BaseCallback):
             self.logger.record(
                 "rollout/dribble_foul_per_episode", float(np.mean(self.foul_buffer))
             )
+        if self.touched_buffer:
+            self.logger.record("rollout/yellows_touched_per_episode", float(np.mean(self.touched_buffer)))
+            self.logger.record("rollout/strict_to_farther_mate_per_episode", float(np.mean(self.farther_buffer)))
         if self.difficulty_buffer:
             self.logger.record(
                 "curriculum/difficulty", float(np.mean(self.difficulty_buffer))

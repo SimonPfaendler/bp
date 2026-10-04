@@ -22,13 +22,13 @@ from stable_baselines3.common.vec_env.base_vec_env import (
 )
 
 
-def _resolve_pair_indices(n_pairs: int, indices: VecEnvIndices) -> List[int]:
-    """Map agent-slot indices -> unique pair indices."""
+def _resolve_pair_indices(n_pairs: int, indices: VecEnvIndices, n_agents: int = 2) -> List[int]:
+    """Map agent-slot indices -> unique pair indices (n_agents slots per env)."""
     if indices is None:
         return list(range(n_pairs))
     if isinstance(indices, int):
         indices = [indices]
-    return sorted({int(i) // 2 for i in indices})
+    return sorted({int(i) // n_agents for i in indices})
 
 
 def _resolve_joint_indices(n_pairs: int, indices: VecEnvIndices) -> List[int]:
@@ -47,8 +47,11 @@ class DummyPairVecEnv(VecEnv):
         self.envs = [fn() for fn in env_fns]
         self.n_pairs = len(self.envs)
         sample = self.envs[0]
+        # Agents (slots) per env: the leading axis of the env's stacked
+        # observation — 2 for 2v2, 3 for a three-robot team.
+        self.n_agents = int(sample.observation_space.shape[0])
         super().__init__(
-            num_envs=2 * self.n_pairs,
+            num_envs=self.n_agents * self.n_pairs,
             observation_space=sample.single_observation_space,
             action_space=sample.single_action_space,
         )
@@ -60,10 +63,10 @@ class DummyPairVecEnv(VecEnv):
         self._pending_seeds: List[Optional[int]] = [None] * self.n_pairs
 
     def reset(self) -> np.ndarray:
+        a = self.n_agents
         for i, env in enumerate(self.envs):
             obs, _ = env.reset(seed=self._pending_seeds[i])
-            self._buf_obs[2 * i] = obs[0]
-            self._buf_obs[2 * i + 1] = obs[1]
+            self._buf_obs[a * i:a * (i + 1)] = obs
         self._pending_seeds = [None] * self.n_pairs
         return self._buf_obs.copy()
 
@@ -71,34 +74,30 @@ class DummyPairVecEnv(VecEnv):
         self._actions = actions
 
     def step_wait(self):
+        a = self.n_agents
         rewards = np.zeros(self.num_envs, dtype=np.float32)
         dones = np.zeros(self.num_envs, dtype=bool)
         infos: List[dict] = [{} for _ in range(self.num_envs)]
         for i, env in enumerate(self.envs):
-            pair_action = np.stack(
-                [self._actions[2 * i], self._actions[2 * i + 1]], axis=0
-            )
+            pair_action = np.asarray(self._actions[a * i:a * (i + 1)])
             obs, r, done, truncated, info = env.step(pair_action)
             terminal = bool(done) or bool(truncated)
             if terminal:
                 terminal_obs = obs.copy()
                 obs, _ = env.reset()
-                for k in (0, 1):
+                for k in range(a):
                     info_k = dict(info)
                     info_k["terminal_observation"] = terminal_obs[k]
                     info_k["TimeLimit.truncated"] = bool(
                         truncated and not done
                     )
-                    infos[2 * i + k] = info_k
+                    infos[a * i + k] = info_k
             else:
-                infos[2 * i] = dict(info)
-                infos[2 * i + 1] = dict(info)
-            self._buf_obs[2 * i] = obs[0]
-            self._buf_obs[2 * i + 1] = obs[1]
-            rewards[2 * i] = r[0]
-            rewards[2 * i + 1] = r[1]
-            dones[2 * i] = terminal
-            dones[2 * i + 1] = terminal
+                for k in range(a):
+                    infos[a * i + k] = dict(info)
+            self._buf_obs[a * i:a * (i + 1)] = obs
+            rewards[a * i:a * (i + 1)] = r
+            dones[a * i:a * (i + 1)] = terminal
         return self._buf_obs.copy(), rewards, dones, infos
 
     def close(self) -> None:
@@ -112,7 +111,7 @@ class DummyPairVecEnv(VecEnv):
         indices: VecEnvIndices = None,
         **method_kwargs,
     ):
-        pair_idx = _resolve_pair_indices(self.n_pairs, indices)
+        pair_idx = _resolve_pair_indices(self.n_pairs, indices, self.n_agents)
         return [
             getattr(self.envs[i], method_name)(*method_args, **method_kwargs)
             for i in pair_idx
@@ -126,12 +125,12 @@ class DummyPairVecEnv(VecEnv):
             slot_indices = [indices]
         else:
             slot_indices = list(indices)
-        return [getattr(self.envs[int(i) // 2], attr_name) for i in slot_indices]
+        return [getattr(self.envs[int(i) // self.n_agents], attr_name) for i in slot_indices]
 
     def set_attr(
         self, attr_name: str, value: Any, indices: VecEnvIndices = None
     ) -> None:
-        for i in _resolve_pair_indices(self.n_pairs, indices):
+        for i in _resolve_pair_indices(self.n_pairs, indices, self.n_agents):
             setattr(self.envs[i], attr_name, value)
 
     def env_is_wrapped(self, wrapper_class, indices: VecEnvIndices = None):
@@ -181,7 +180,7 @@ def _pair_worker(remote, parent_remote, env_fn_wrapper):
                         obs, _ = env.reset()
                     except Exception:
                         raise
-                    zero_r = np.zeros(2, dtype=np.float32)
+                    zero_r = np.zeros(int(env.action_space.shape[0]), dtype=np.float32)
                     err_info = {"worker_error": repr(e)}
                     remote.send(
                             (obs, zero_r, True, False, err_info, obs.copy())
@@ -236,14 +235,16 @@ class SubprocPairVecEnv(VecEnv):
             self.processes.append(p)
             work_remote.close()
 
-        # Probe the first env for spaces.
+        # Probe the first env for spaces and the agents per env.
         self.remotes[0].send(("get_attr", "single_observation_space"))
         obs_space = self.remotes[0].recv()
         self.remotes[0].send(("get_attr", "single_action_space"))
         act_space = self.remotes[0].recv()
+        self.remotes[0].send(("get_attr", "observation_space"))
+        self.n_agents = int(self.remotes[0].recv().shape[0])
 
         super().__init__(
-            num_envs=2 * self.n_pairs,
+            num_envs=self.n_agents * self.n_pairs,
             observation_space=obs_space,
             action_space=act_space,
         )
@@ -254,45 +255,41 @@ class SubprocPairVecEnv(VecEnv):
         self._pending_seeds: List[Optional[int]] = [None] * self.n_pairs
 
     def reset(self):
+        a = self.n_agents
         for remote, seed in zip(self.remotes, self._pending_seeds):
             remote.send(("reset", seed))
         for i, remote in enumerate(self.remotes):
             obs, _ = remote.recv()
-            self._buf_obs[2 * i] = obs[0]
-            self._buf_obs[2 * i + 1] = obs[1]
+            self._buf_obs[a * i:a * (i + 1)] = obs
         self._pending_seeds = [None] * self.n_pairs
         return self._buf_obs.copy()
 
     def step_async(self, actions: np.ndarray) -> None:
+        a = self.n_agents
         for i, remote in enumerate(self.remotes):
-            pair_action = np.stack(
-                [actions[2 * i], actions[2 * i + 1]], axis=0
-            )
-            remote.send(("step", pair_action))
+            remote.send(("step", np.asarray(actions[a * i:a * (i + 1)])))
         self.waiting = True
 
     def step_wait(self):
+        a = self.n_agents
         rewards = np.zeros(self.num_envs, dtype=np.float32)
         dones = np.zeros(self.num_envs, dtype=bool)
         infos: List[dict] = [{} for _ in range(self.num_envs)]
         for i, remote in enumerate(self.remotes):
             obs, r, done, truncated, info, terminal_obs = remote.recv()
             terminal = done or truncated
-            self._buf_obs[2 * i] = obs[0]
-            self._buf_obs[2 * i + 1] = obs[1]
-            rewards[2 * i] = r[0]
-            rewards[2 * i + 1] = r[1]
-            dones[2 * i] = terminal
-            dones[2 * i + 1] = terminal
+            self._buf_obs[a * i:a * (i + 1)] = obs
+            rewards[a * i:a * (i + 1)] = r
+            dones[a * i:a * (i + 1)] = terminal
             if terminal:
-                for k in (0, 1):
+                for k in range(a):
                     info_k = dict(info)
                     info_k["terminal_observation"] = terminal_obs[k]
                     info_k["TimeLimit.truncated"] = bool(truncated and not done)
-                    infos[2 * i + k] = info_k
+                    infos[a * i + k] = info_k
             else:
-                infos[2 * i] = dict(info)
-                infos[2 * i + 1] = dict(info)
+                for k in range(a):
+                    infos[a * i + k] = dict(info)
         self.waiting = False
         return self._buf_obs.copy(), rewards, dones, infos
 
@@ -315,7 +312,7 @@ class SubprocPairVecEnv(VecEnv):
         indices: VecEnvIndices = None,
         **method_kwargs,
     ):
-        pair_idx = _resolve_pair_indices(self.n_pairs, indices)
+        pair_idx = _resolve_pair_indices(self.n_pairs, indices, self.n_agents)
         for i in pair_idx:
             self.remotes[i].send(
                 ("env_method", (method_name, method_args, method_kwargs))
@@ -330,11 +327,12 @@ class SubprocPairVecEnv(VecEnv):
         else:
             slot_indices = list(indices)
         # Group by pair to avoid duplicate IPC roundtrips.
-        unique_pairs = sorted({int(i) // 2 for i in slot_indices})
+        a = self.n_agents
+        unique_pairs = sorted({int(i) // a for i in slot_indices})
         for i in unique_pairs:
             self.remotes[i].send(("get_attr", attr_name))
         results = {i: self.remotes[i].recv() for i in unique_pairs}
-        return [results[int(i) // 2] for i in slot_indices]
+        return [results[int(i) // a] for i in slot_indices]
 
     def set_attr(
         self, attr_name: str, value: Any, indices: VecEnvIndices = None

@@ -16,7 +16,7 @@ def run_experiment(
     defense_frame_prob=None, foul_restart=None, defense_difficulty=None,
     critic_warmup_steps=None, frame_stack=None, action_repeat=None,
     blue_kick_speed=None, run_name=None, drop_init_buffer=False,
-    opponent_pool=None, pool_frac=None, pass_bonus=None,
+    opponent_pool=None, pool_frac=None, pass_bonus=None, n_yellow=None,
 ):
     # difficulty="inherit": continue at the difficulty the init checkpoint's
     # segment ENDED at. Resolved here, inside the job, because in a chain
@@ -98,6 +98,8 @@ def run_experiment(
         cmd += f" --max_minutes {max_minutes}"
     if pass_bonus is not None:
         cmd += f" --pass_bonus {pass_bonus}"
+    if n_yellow is not None:
+        cmd += f" --n_yellow {n_yellow}"
     if opponent_pool:
         cmd += f" --opponent_pool {opponent_pool}"
         if pool_frac is not None:
@@ -282,6 +284,7 @@ def main():
                 "DIFF_THR": ("difficulty_threshold",),
                 "DIFF_STEP": ("difficulty_step",), "DIFF_WIN": ("difficulty_window",),
                 "LEVEL": ("curriculum_start_level",),
+                "N_YELLOW": ("n_yellow",),
             }
             for var, keys in mapping.items():
                 if os.environ.get(var) not in (None, ""):
@@ -358,6 +361,9 @@ def main():
     # random-action steps and the critic keeps its data).
     repeat = os.environ.get("REPEAT"); repeat = int(repeat) if repeat else None
     blue_kick = os.environ.get("BLUE_KICK"); blue_kick = float(blue_kick) if blue_kick else None
+    # N_YELLOW=3: three learning robots against the two-robot heuristic
+    # (new obs layout, so the chain must start from scratch).
+    n_yellow = os.environ.get("N_YELLOW"); n_yellow = int(n_yellow) if n_yellow else None
     # Default "auto": the 09-26 segment ran with BUF unset ("off") and so
     # started with an empty buffer + 10k random actions + critic warm-up on
     # top of a warm policy. "auto" is a no-op without INIT_PATH and refuses
@@ -379,6 +385,7 @@ def main():
         os.environ.get("POOL") or None, os.environ.get("POOL_FRAC") or None,
         # PASS_BONUS=0 with SOLO=10: no payment for passing, only goals.
         os.environ.get("PASS_BONUS") or None,
+        n_yellow,
     )
     print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} on {partition} "
           f"for {slurm_time} seed={seed} run_name={run_name or 'auto'} "
@@ -391,7 +398,7 @@ def main():
           f"def_prob={def_prob}, foul_restart={foul_restart or 'off'}, def_diff={def_diff}, "
           f"critic_warmup={crit_warm}, frame_stack={stack}, "
           f"action_repeat={repeat}, blue_kick={blue_kick}, load_buffer={load_buffer}, "
-          f"steps={total_steps}, time_min={max_minutes}]")
+          f"n_yellow={n_yellow or 2}, steps={total_steps}, time_min={max_minutes}]")
     return job.job_id
 
 

@@ -48,14 +48,9 @@ from stable_baselines3 import SAC
 
 import masac_policy  # noqa: F401 — registers MASACPolicy for checkpoint unpickling
 from ssl_rl_2v2_selfplay import (
-    EPISODE_STATE_DIM,
-    ROLE_INDEX_DIM,
-    SINGLE_OBS_DIM_BASE,
     SSL2v2SelfPlayEnv,
+    single_obs_dim as _single_obs_dim,
 )
-
-OBS_NO_ROLE = SINGLE_OBS_DIM_BASE + EPISODE_STATE_DIM          # 56
-OBS_ROLE = OBS_NO_ROLE + ROLE_INDEX_DIM                        # 58
 
 
 def _sidecar(model_path):
@@ -71,30 +66,33 @@ def _sidecar(model_path):
     return {}, None
 
 
-def _infer_layout(model_obs_dim, frame_stack):
-    """(frame_stack, single_obs_dim, role_index) for a checkpoint.
+def _infer_layout(model_obs_dim, frame_stack, n_yellow=2):
+    """(frame_stack, single_obs_dim, role_index) for a checkpoint of a team
+    of n_yellow robots: 56 / 58 dims for two, 65 / 68 for three.
 
-    56 and 58 share no multiple below 1624, so when the stack depth is
-    unknown the obs dim identifies it unambiguously."""
+    The two widths share no multiple below their product, so when the
+    stack depth is unknown the obs dim identifies it unambiguously."""
+    no_role = _single_obs_dim(n_yellow, False)
+    with_role = _single_obs_dim(n_yellow, True)
     if frame_stack is None:
-        if model_obs_dim % OBS_NO_ROLE == 0:
-            frame_stack = model_obs_dim // OBS_NO_ROLE
-        elif model_obs_dim % OBS_ROLE == 0:
-            frame_stack = model_obs_dim // OBS_ROLE
+        if model_obs_dim % no_role == 0:
+            frame_stack = model_obs_dim // no_role
+        elif model_obs_dim % with_role == 0:
+            frame_stack = model_obs_dim // with_role
         else:
             raise SystemExit(
                 f"Cannot infer frame_stack from obs dim {model_obs_dim} "
-                f"(not a multiple of {OBS_NO_ROLE} or {OBS_ROLE}); "
-                f"pass --frame_stack explicitly."
+                f"(not a multiple of {no_role} or {with_role} for a team of "
+                f"{n_yellow}); pass --frame_stack / --n_yellow explicitly."
             )
     single = model_obs_dim // frame_stack
-    if single not in (OBS_NO_ROLE, OBS_ROLE):
+    if single not in (no_role, with_role):
         raise SystemExit(
             f"obs dim {model_obs_dim} / frame_stack {frame_stack} = {single}, "
-            f"expected {OBS_NO_ROLE} or {OBS_ROLE}. Older checkpoints "
-            f"(52-dim, pre obs-repair) are not supported here."
+            f"expected {no_role} or {with_role} for a team of {n_yellow}. "
+            f"Older checkpoints (52-dim, pre obs-repair) are not supported here."
         )
-    return frame_stack, single, single == OBS_ROLE
+    return frame_stack, single, single == with_role
 
 
 class FrameStacker:
@@ -171,6 +169,8 @@ def main():
     # --- checkpoint I/O layout (sidecar/inferred unless given) ---
     parser.add_argument("--frame_stack", type=int, default=None)
     parser.add_argument("--action_repeat", type=int, default=None)
+    parser.add_argument("--n_yellow", type=int, default=None,
+                        help="Robots on the yellow side (sidecar, else 2).")
     parser.add_argument("--blue_action_repeat", type=int, default=None,
                         help="Decision rate of a frozen blue checkpoint "
                              "(physics steps per decision). Default: from "
@@ -201,8 +201,9 @@ def main():
     side, side_path = _sidecar(args.model_path)
 
     frame_stack = args.frame_stack or side.get("frame_stack")
+    n_yellow = int(args.n_yellow or side.get("n_yellow") or 2)
     frame_stack, single_obs_dim, role_index = _infer_layout(
-        model_obs_dim, frame_stack
+        model_obs_dim, frame_stack, n_yellow
     )
     action_repeat = args.action_repeat or side.get("action_repeat") or 1
 
@@ -235,7 +236,15 @@ def main():
         blue_heuristic=args.blue_heuristic,
         pass_scenario_prob=args.pass_prob,
         role_index=role_index,
+        n_yellow=n_yellow,
         action_repeat=int(action_repeat),
+        # Pin the level: the env promotes itself to L5 after curriculum_window
+        # episodes at >= 90 % success, which turned a 300-episode drill eval
+        # into 200 drill episodes plus 100 of the open game.
+        curriculum_start_level=args.level, curriculum_target_level=args.level,
+        # Likewise freeze the reverse-curriculum difficulty at the value
+        # given: an eval must not promote itself.
+        difficulty_threshold=1.01,
         **rules,
     )
     for k in ("difficulty", "defense_frame_prob", "defense_difficulty",
@@ -262,7 +271,7 @@ def main():
     print(f"Yellow:  {args.model_path}")
     print(f"         obs_dim={model_obs_dim} = {single_obs_dim} x "
           f"frame_stack {frame_stack}, role_index={role_index}, "
-          f"action_repeat={action_repeat}"
+          f"n_yellow={n_yellow}, action_repeat={action_repeat}"
           + (f"  [sidecar: {side_path}]" if side_path else "  [no sidecar: inferred]"))
     print(f"Blue:    {blue_desc}")
     task = {k: env_kwargs[k] for k in sorted(env_kwargs)

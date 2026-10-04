@@ -174,7 +174,19 @@ ROLE_INDEX_DIM = 2
 # `blue_obs[..., :frozen_obs_dim]` still yields exactly the legacy layout.
 EPISODE_STATE_DIM = 4
 SINGLE_ACT_DIM = 6
-N_YELLOW = 2
+N_YELLOW = 2            # default team size; the env takes n_yellow=...
+MATE_BLOCK_DIM = 9      # one MATE block per team-mate, see _egocentric_obs
+
+
+def base_obs_dim(n_yellow: int) -> int:
+    """Base layout of one yellow robot: 52 dims for a team of two (one MATE
+    block), MATE_BLOCK_DIM more for every further team-mate."""
+    return SINGLE_OBS_DIM_BASE + MATE_BLOCK_DIM * (int(n_yellow) - 2)
+
+
+def single_obs_dim(n_yellow: int, role_index: bool) -> int:
+    """Full per-robot obs dim: base + episode state + one-hot id (n dims)."""
+    return base_obs_dim(n_yellow) + EPISODE_STATE_DIM + (int(n_yellow) if role_index else 0)
 # Strict pass criteria — measurement everywhere, terminal reward on the L2
 # drill. The loose +3 detector in _calculate_team_reward_and_done fires on
 # fumble + pick-up (replay audit 2026-09-15: 0 of 335 L1 events had the ball
@@ -424,11 +436,8 @@ class _TeamPassTracker:
             else:
                 self._strict_pending = None
 
-        current = None
-        if has[0] and not has[1]:
-            current = 0
-        elif has[1] and not has[0]:
-            current = 1
+        holders = [i for i, h in enumerate(has) if h]
+        current = holders[0] if len(holders) == 1 else None
         if current is not None:
             if (
                 self.last_carrier is not None
@@ -444,14 +453,14 @@ class _TeamPassTracker:
             self.opp_touched = False
 
         # Release bookkeeping, after the detector.
-        if has[0] or has[1]:
+        if any(has):
             self._release = None
         elif self.last_carrier is not None and self._release is None:
             self._release = (
                 self.last_carrier,
                 (ball.v_x, ball.v_y),
                 (ball.x, ball.y),
-                ((team[0].x, team[0].y), (team[1].x, team[1].y)),
+                tuple((r.x, r.y) for r in team),
             )
 
 
@@ -482,9 +491,9 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
     """2v2 self-play env. Yellow side is exposed to SB3 via PairVecEnv;
     blue side is computed internally from a frozen SAC checkpoint.
 
-    Step takes yellow actions of shape (2, 6) and returns:
-      obs:    (2, 38) float32
-      reward: (2,)    float32  (yellow team reward, duplicated)
+    Step takes yellow actions of shape (n_yellow, 6) and returns:
+      obs:    (n_yellow, single_obs_dim) float32
+      reward: (n_yellow,) float32  (yellow team reward, duplicated)
       done:   bool
       truncated: bool
       info:   dict
@@ -516,11 +525,23 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         blue_kick_speed=6.0,
         frozen_action_repeat=None,
         pass_bonus=None,
+        n_yellow=N_YELLOW,
     ):
+        # Size of the learning team. 2 is the 2v2 of the whole project and
+        # stays bit-identical (same RNG draws, same layout); 3 gives every
+        # robot two MATE blocks (closest first), a one-hot id of three and
+        # a start position for the robot the drills do not script. Blue is
+        # always the two-robot side: a frozen learned opponent and the
+        # staged pass scenarios are two-robot code and refused above 2.
+        self.n_yellow = int(n_yellow)
+        assert self.n_yellow >= 2, n_yellow
+        if self.n_yellow != 2:
+            assert not frozen_path, "a frozen opponent needs n_yellow == 2"
+            assert float(pass_scenario_prob) == 0.0, "pass scenarios need n_yellow == 2"
         super().__init__(
             field_type=1,
             n_robots_blue=N_BLUE,
-            n_robots_yellow=N_YELLOW,
+            n_robots_yellow=self.n_yellow,
             time_step=0.025,
             render_mode=render_mode,
         )
@@ -650,9 +671,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # so the shared policy can specialize into roles (carrier/receiver,
         # attacker/defender).
         self.role_index = role_index
-        self.single_obs_dim = SINGLE_OBS_DIM_BASE + EPISODE_STATE_DIM + (
-            ROLE_INDEX_DIM if role_index else 0
-        )
+        self.single_obs_dim = single_obs_dim(self.n_yellow, role_index)
 
         # OOB curriculum: skip robot-OOB termination during the first
         # `oob_grace_steps` per-env steps so early-stage agents get more
@@ -678,11 +697,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         )
         self.observation_space = Box(
             low=-self.NORM_BOUNDS, high=self.NORM_BOUNDS,
-            shape=(N_YELLOW, self.single_obs_dim), dtype=np.float32,
+            shape=(self.n_yellow, self.single_obs_dim), dtype=np.float32,
         )
         self.action_space = Box(
             low=-1.0, high=1.0,
-            shape=(N_YELLOW, SINGLE_ACT_DIM), dtype=np.float32,
+            shape=(self.n_yellow, SINGLE_ACT_DIM), dtype=np.float32,
         )
 
         self.max_v_cmd = 2.0
@@ -708,10 +727,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.max_dribble_dist = 1.0
         self.min_release_distance = 0.1
         self.robot_ball_contact = 0.12
-        self.is_dribbling_y = [False, False]
-        self.dribble_start_pos_y = [None, None]
-        self.must_release_y = [False, False]
-        self.dribble_ban_y = [None, None]   # strict rule: None | "pending" | "armed"
+        self.is_dribbling_y = [False] * self.n_yellow
+        self.dribble_start_pos_y = [None] * self.n_yellow
+        self.must_release_y = [False] * self.n_yellow
+        self.dribble_ban_y = [None] * self.n_yellow   # strict rule: None | "pending" | "armed"
         self._dribble_foul = False
         self._dribble_foul_by = None        # index of the yellow that committed it
         self.dribble_foul_in_episode = 0
@@ -719,7 +738,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self._restart_pending = False       # restarts="on": reposition after this step
         self._restart_spec = None           # (kind, taker, x, y) for the ball restart
         self._freeze = None                 # {team, until, bx, by}: held still after a restart
-        self._outside = {("y", 0): False, ("y", 1): False, ("b", 0): False, ("b", 1): False}
+        self._outside = {key: False for key in self._robot_keys()}
         self.ball_restarts = 0
         self.robot_restarts = 0
         self.is_dribbling_b = [False, False]
@@ -813,10 +832,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self._drill_release_step = None  # pass drills: step of the first release
         self._l3_pass_step = None        # L3: step of the (first) strict pass
         self.blue_goal_scored = False
-        self.is_dribbling_y = [False, False]
-        self.dribble_start_pos_y = [None, None]
-        self.must_release_y = [False, False]
-        self.dribble_ban_y = [None, None]   # strict rule: None | "pending" | "armed"
+        self.is_dribbling_y = [False] * self.n_yellow
+        self.dribble_start_pos_y = [None] * self.n_yellow
+        self.must_release_y = [False] * self.n_yellow
+        self.dribble_ban_y = [None] * self.n_yellow   # strict rule: None | "pending" | "armed"
         self._dribble_foul = False
         self._dribble_foul_by = None        # index of the yellow that committed it
         self.dribble_foul_in_episode = 0
@@ -824,7 +843,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self._restart_pending = False       # restarts="on": reposition after this step
         self._restart_spec = None           # (kind, taker, x, y) for the ball restart
         self._freeze = None                 # {team, until, bx, by}: held still after a restart
-        self._outside = {("y", 0): False, ("y", 1): False, ("b", 0): False, ("b", 1): False}
+        self._outside = {key: False for key in self._robot_keys()}
         self.ball_restarts = 0
         self.robot_restarts = 0
         self.is_dribbling_b = [False, False]
@@ -860,8 +879,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.current_step += 1
         self.total_steps += 1
         yellow_action = np.asarray(yellow_action, dtype=np.float32)
-        assert yellow_action.shape == (N_YELLOW, SINGLE_ACT_DIM), (
-            f"expected ({N_YELLOW},{SINGLE_ACT_DIM}), "
+        assert yellow_action.shape == (self.n_yellow, SINGLE_ACT_DIM), (
+            f"expected ({self.n_yellow},{SINGLE_ACT_DIM}), "
             f"got {yellow_action.shape}"
         )
 
@@ -984,31 +1003,42 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
     # ---------- observation ----------
 
+    def _yellows(self):
+        return tuple(self.frame.robots_yellow[i] for i in range(self.n_yellow))
+
+    def _blues(self):
+        return tuple(self.frame.robots_blue[i] for i in range(N_BLUE))
+
+    def _robot_keys(self):
+        """(team, index) of every robot, yellows first — the order of the
+        command list and of the out-of-bounds bookkeeping."""
+        return [("y", i) for i in range(self.n_yellow)] + [("b", i) for i in range(N_BLUE)]
+
     def _stacked_obs_yellow(self) -> np.ndarray:
-        ya, yb = self.frame.robots_yellow[0], self.frame.robots_yellow[1]
-        opp = (self.frame.robots_blue[0], self.frame.robots_blue[1])
-        obs_a = self._egocentric_obs(
-            self_robot=ya, mate=yb, opp_list=opp,
-            attack_goal_x=-self.field.length / 2.0,
-            is_yellow=True, idx=0,
-        )
-        obs_b = self._egocentric_obs(
-            self_robot=yb, mate=ya, opp_list=opp,
-            attack_goal_x=-self.field.length / 2.0,
-            is_yellow=True, idx=1,
-        )
-        return np.stack([obs_a, obs_b], axis=0).astype(np.float32)
+        yellows = self._yellows()
+        opp = self._blues()
+        obs = [
+            self._egocentric_obs(
+                self_robot=yellows[i],
+                mates=[m for j, m in enumerate(yellows) if j != i],
+                opp_list=opp,
+                attack_goal_x=-self.field.length / 2.0,
+                is_yellow=True, idx=i,
+            )
+            for i in range(self.n_yellow)
+        ]
+        return np.stack(obs, axis=0).astype(np.float32)
 
     def _stacked_obs_blue(self) -> np.ndarray:
         ba, bb = self.frame.robots_blue[0], self.frame.robots_blue[1]
-        opp = (self.frame.robots_yellow[0], self.frame.robots_yellow[1])
+        opp = self._yellows()
         obs_a = self._egocentric_obs(
-            self_robot=ba, mate=bb, opp_list=opp,
+            self_robot=ba, mates=[bb], opp_list=opp,
             attack_goal_x=+self.field.length / 2.0,
             is_yellow=False, idx=0,
         )
         obs_b = self._egocentric_obs(
-            self_robot=bb, mate=ba, opp_list=opp,
+            self_robot=bb, mates=[ba], opp_list=opp,
             attack_goal_x=+self.field.length / 2.0,
             is_yellow=False, idx=1,
         )
@@ -1067,7 +1097,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         ], dtype=np.float32)
 
     def _egocentric_obs(
-        self, self_robot, mate, opp_list,
+        self, self_robot, mates, opp_list,
         attack_goal_x, is_yellow, idx,
     ) -> np.ndarray:
         """World-frame obs layout, modelled on the 1v1 env (which worked).
@@ -1078,7 +1108,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         kept as convenience features — they are mirror-anti-invariant
         (negate under y-reflection).
 
-        Layout (52 base dims):
+        Layout (52 base dims for a team of two; one MATE block per team-mate,
+        closest first, so a team of three has 61):
             [ 0:5 ] BALL      pos(x,y), vel(x,y), dist_ball_goal
             [ 5:18] SELF      pos, sin/cos θ, vel, v_theta, infrared,
                               dist_to_ball, rel_angle_ball, rel_angle_goal,
@@ -1149,10 +1180,15 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         banned = is_yellow and self.dribble_ban_y[idx] is not None
         must_release_flag = 1.0 if (must_release[idx] or banned) else 0.0
 
-        # Mate
-        mate_theta = math.radians(mate.theta)
-        mate_dist_ball = math.hypot(mate.x - ball.x, mate.y - ball.y)
-        mate_has_ball = (mate_dist_ball < 0.12) or mate.infrared
+        # Mates, closest to self first (a team of two has exactly one).
+        mates = sorted(
+            mates,
+            key=lambda m: math.hypot(m.x - self_robot.x, m.y - self_robot.y),
+        )
+        mate_dist_ball = [math.hypot(m.x - ball.x, m.y - ball.y) for m in mates]
+        mate_has_ball = any(
+            (d < 0.12) or m.infrared for m, d in zip(mates, mate_dist_ball)
+        )
 
         # Opponents, sorted closest first.
         opp_sorted = sorted(
@@ -1171,7 +1207,23 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
         # Team flags
         team_has_ball = 1.0 if (self_has_ball or mate_has_ball) else 0.0
-        i_am_closer = 1.0 if self_dist_ball < mate_dist_ball else 0.0
+        i_am_closer = 1.0 if all(self_dist_ball < d for d in mate_dist_ball) else 0.0
+
+        # MATE (9 per team-mate, closest first); slots 18-26 for the first.
+        mate_dims = []
+        for m, m_dist in zip(mates, mate_dist_ball):
+            m_theta = math.radians(m.theta)
+            mate_dims += [
+                self.norm_pos(m.x),                     # 18
+                self.norm_pos(m.y),                     # 19
+                math.sin(m_theta),                      # 20
+                math.cos(m_theta),                      # 21
+                self.norm_v(m.v_x),                     # 22
+                self.norm_v(m.v_y),                     # 23
+                self.norm_w(m.v_theta),                 # 24
+                1.0 if m.infrared else 0.0,             # 25
+                m_dist / max_dist,                      # 26
+            ]
 
         obs = np.array(
             [
@@ -1195,17 +1247,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 rel_angle_goal / math.pi,               # 15
                 dribble_meter,                          # 16
                 must_release_flag,                      # 17
-                # MATE (9)
-                self.norm_pos(mate.x),                  # 18
-                self.norm_pos(mate.y),                  # 19
-                math.sin(mate_theta),                   # 20
-                math.cos(mate_theta),                   # 21
-                self.norm_v(mate.v_x),                  # 22
-                self.norm_v(mate.v_y),                  # 23
-                self.norm_w(mate.v_theta),              # 24
-                1.0 if mate.infrared else 0.0,          # 25
-                mate_dist_ball / max_dist,              # 26
-                # OPP1 (closest) (10)
+            ]
+            + mate_dims
+            + [
+                # OPP1 (closest) (10) — slot numbers for a team of two
                 self.norm_pos(opp1.x),                  # 27
                 self.norm_pos(opp1.y),                  # 28
                 math.sin(opp1_theta),                   # 29
@@ -1244,15 +1289,19 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # negate; cos(θ) negates and sin(θ) stays; v_θ negates (angular
             # velocity reverses under reflection); rel_angle_* negate (they
             # flip under left↔right reflection); scalars/distances/flags stay.
-            for slot in (
-                0, 2,                # ball: x, v_x
-                5, 8, 9, 11,         # self: x, cos, v_x, v_theta
-                14, 15,              # self: rel_angle_ball, rel_angle_goal
-                18, 21, 22, 24,      # mate: x, cos, v_x, v_theta
-                27, 30, 31, 33,      # opp1: x, cos, v_x, v_theta
-                37, 40, 41, 43,      # opp2: x, cos, v_x, v_theta
-                46, 48,              # pred: x, dx
-            ):
+            # Slots for a team of two: 0, 2 (ball x, v_x); 5, 8, 9, 11 (self
+            # x, cos, v_x, v_theta); 14, 15 (rel angles); 18, 21, 22, 24
+            # (mate); 27, 30, 31, 33 (opp1); 37, 40, 41, 43 (opp2); 46, 48
+            # (pred x, dx). Computed from the block offsets so a bigger team
+            # (more MATE blocks) mirrors the same fields.
+            o1 = 18 + MATE_BLOCK_DIM * len(mates)
+            o2, pr = o1 + 10, o1 + 19
+            slots = [0, 2, 5, 8, 9, 11, 14, 15]
+            for j in range(len(mates)):
+                b = 18 + MATE_BLOCK_DIM * j
+                slots += [b, b + 3, b + 4, b + 6]
+            slots += [o1, o1 + 3, o1 + 4, o1 + 6, o2, o2 + 3, o2 + 4, o2 + 6, pr, pr + 2]
+            for slot in slots:
                 obs[slot] = -obs[slot]
 
         # Appended after the base so `blue_obs[..., :frozen_obs_dim]` still
@@ -1266,7 +1315,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # checkpoint widens into the 58-dim layout by zero-init of the
             # two trailing columns (train_2v2_selfplay._fit_param) — the
             # policy starts function-identical and can then diverge per role.
-            role = np.zeros(ROLE_INDEX_DIM, dtype=np.float32)
+            role = np.zeros(self.n_yellow, dtype=np.float32)
             role[idx] = 1.0
             obs = np.concatenate([obs, role]).astype(np.float32)
         return obs
@@ -1275,7 +1324,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
     def _update_dribble_state(self):
         ball = self.frame.ball
-        yellows = (self.frame.robots_yellow[0], self.frame.robots_yellow[1])
+        yellows = self._yellows()
         teams = (
             (
                 yellows,
@@ -1431,16 +1480,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
     def _build_commands(self, yellow_action, blue_action):
         cmds = []
-        cmds.append(self._robot_command(
-            self.frame.robots_yellow[0], yellow_action[0],
-            self.must_release_y[0] or self.dribble_ban_y[0] is not None,
-            yellow=True,
-        ))
-        cmds.append(self._robot_command(
-            self.frame.robots_yellow[1], yellow_action[1],
-            self.must_release_y[1] or self.dribble_ban_y[1] is not None,
-            yellow=True,
-        ))
+        for i in range(self.n_yellow):
+            cmds.append(self._robot_command(
+                self.frame.robots_yellow[i], yellow_action[i],
+                self.must_release_y[i] or self.dribble_ban_y[i] is not None,
+                yellow=True,
+            ))
         # Level 1 is a STAGED SCORING CHANCE and presupposes passive blues
         # ("parked far from the goal mouth"). An active heuristic turns it
         # into a race that a fresh policy loses (observed: success 0.0 at
@@ -1477,7 +1522,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         if self.restarts == "on" and any(self._outside.values()):
             # Out of bounds: drive straight back toward the field centre,
             # no kick, no dribbler, while everyone else plays on.
-            for k, key in enumerate((("y", 0), ("y", 1), ("b", 0), ("b", 1))):
+            for k, key in enumerate(self._robot_keys()):
                 if not self._outside[key]:
                     continue
                 robot = (self.frame.robots_yellow if key[0] == "y"
@@ -1491,8 +1536,9 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         frozen = self._frozen_team() if self._freeze is not None else None
         if frozen is not None:
             # Restart in progress: the non-taking team stands still.
-            lo = 0 if frozen == "y" else 2
-            for k in (lo, lo + 1):
+            ks = (range(self.n_yellow) if frozen == "y"
+                  else range(self.n_yellow, self.n_yellow + N_BLUE))
+            for k in ks:
                 c = cmds[k]
                 cmds[k] = Robot(
                     yellow=c.yellow, id=c.id, v_x=0.0, v_y=0.0, v_theta=0.0,
@@ -1506,9 +1552,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         skills return kick magnitude directly. Same shape as 2v1's
         _blue_command pattern.
         """
-        yellows = (
-            self.frame.robots_yellow[0], self.frame.robots_yellow[1],
-        )
+        yellows = self._yellows()
         if personality == "defensive":
             cmd = blue_defender_heuristic_2v2(self, robot, yellows)
         elif personality == "keeper":
@@ -1529,7 +1573,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
     def _get_commands(self, action):
         return self._build_commands(
-            np.zeros((N_YELLOW, SINGLE_ACT_DIM), dtype=np.float32),
+            np.zeros((self.n_yellow, SINGLE_ACT_DIM), dtype=np.float32),
             np.zeros((N_BLUE, SINGLE_ACT_DIM), dtype=np.float32),
         )
 
@@ -1553,16 +1597,16 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
     def _calculate_team_reward_and_done(self) -> Tuple[np.ndarray, bool, bool]:
         ball = self.frame.ball
-        ya, yb = self.frame.robots_yellow[0], self.frame.robots_yellow[1]
-        yellows = (ya, yb)
-        blues = (self.frame.robots_blue[0], self.frame.robots_blue[1])
+        yellows = self._yellows()
+        blues = self._blues()
+        n = len(yellows)
 
         max_x = self.field.length / 2.0
         max_y = self.field.width / 2.0
         max_dist = math.hypot(self.field.length, self.field.width)
         goal_half_width = self.field.goal_width / 2.0
 
-        rewards = np.zeros(2, dtype=np.float32)
+        rewards = np.zeros(n, dtype=np.float32)
         done = False
         truncated = False
 
@@ -1632,8 +1676,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # counts YELLOW excursions only — it is the yellow-behaviour
             # metric (driving out to stall blue's attack); blue's are the
             # heuristic's business and used to inflate it.
-            for key, r in ((("y", 0), yellows[0]), (("y", 1), yellows[1]),
-                           (("b", 0), blues[0]), (("b", 1), blues[1])):
+            for key, r in zip(self._robot_keys(), yellows + blues):
                 out = abs(r.x) > max_x or abs(r.y) > max_y
                 if out and not self._outside[key]:
                     if key[0] == "y":
@@ -1705,38 +1748,40 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             return rewards, done, truncated
 
         if self.reward_type == "dense":
-            dist_a = math.hypot(ya.x - ball.x, ya.y - ball.y)
-            dist_b = math.hypot(yb.x - ball.x, yb.y - ball.y)
-            dists = (dist_a, dist_b)
-            ya_has = (dist_a < 0.12) or ya.infrared
-            yb_has = (dist_b < 0.12) or yb.infrared
+            dists = [math.hypot(r.x - ball.x, r.y - ball.y) for r in yellows]
+            any_has = any(
+                (d < 0.12) or r.infrared for r, d in zip(yellows, dists)
+            )
 
             # Robot→Ball signed delta — per agent. Only progress signal.
             # Rewards moving toward the ball, penalizes moving away.
             if self.last_dist_to_ball is None:
-                self.last_dist_to_ball = [dist_a, dist_b]
+                self.last_dist_to_ball = list(dists)
             team_shaping = self.shaping in ("team", "team_def") and not drill
             # On the pass drills only the approach is rewarded; the ball
             # moving away is what a kick looks like from the kicker's side.
             no_exits = self.restarts == "on"
             lo = 0.0 if (drill or team_shaping or no_exits) else -0.05
-            closer = 0 if dist_a <= dist_b else 1
-            for i in range(2):
+            # The closer yellow; a tie goes to the lower index.
+            closer = min(range(n), key=lambda i: (dists[i], i))
+            for i in range(n):
                 if team_shaping and i != closer:
                     continue
                 delta = self.last_dist_to_ball[i] - dists[i]
                 rewards[i] += float(np.clip(delta * 0.5, lo, 0.05))
-            self.last_dist_to_ball = [dist_a, dist_b]
+            self.last_dist_to_ball = list(dists)
 
             if team_shaping:
-                # Off-ball yellow: potential-based progress toward the attack
+                # Off-ball yellows: potential-based progress toward the attack
                 # goal while the team has the ball — the run into the zone.
                 gx = -self.field.length / 2.0
-                d_goal = [math.hypot(r.x - gx, r.y) for r in (ya, yb)]
-                if self.last_dist_to_goal_y is not None and (ya_has or yb_has):
-                    j = 1 - closer
-                    prog = self.last_dist_to_goal_y[j] - d_goal[j]
-                    rewards[j] += float(np.clip(prog * 0.5, -0.05, 0.05))
+                d_goal = [math.hypot(r.x - gx, r.y) for r in yellows]
+                if self.last_dist_to_goal_y is not None and any_has:
+                    for j in range(n):
+                        if j == closer:
+                            continue
+                        prog = self.last_dist_to_goal_y[j] - d_goal[j]
+                        rewards[j] += float(np.clip(prog * 0.5, -0.05, 0.05))
                 self.last_dist_to_goal_y = d_goal
 
             # Ball→Goal signed delta — shared. Rewards ball moving toward
@@ -1757,7 +1802,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # Anti-passivity: whenever a Yellow holds the ball, small negative
             # per step. Prevents "hold ball, don't shoot" degenerate policy.
             # Off under shaping="team": waiting for the mate is the point.
-            if ya_has or yb_has:
+            if any_has:
                 if not team_shaping:
                     rewards -= 0.003
                 self.team_possession_steps += 1
@@ -1775,18 +1820,14 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # Pass detection: +3 shared event bonus. Receiver must be at true
         # contact distance (0.13 ≈ robot hull + ball) or have infrared —
         # tighter than the old 0.20 fly-by radius.
-        ya_has_pass = (
-            math.hypot(ya.x - ball.x, ya.y - ball.y) < 0.13
-        ) or ya.infrared
-        yb_has_pass = (
-            math.hypot(yb.x - ball.x, yb.y - ball.y) < 0.13
-        ) or yb.infrared
+        has_pass = tuple(
+            (math.hypot(r.x - ball.x, r.y - ball.y) < 0.13) or r.infrared
+            for r in yellows
+        )
         blue_has = any(
             (math.hypot(b.x - ball.x, b.y - ball.y) < 0.13) or b.infrared
             for b in blues
         )
-
-        has_pass = (ya_has_pass, yb_has_pass)
 
         if blue_has:
             self.blue_touched_since_yellow = True
@@ -1812,11 +1853,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             else:
                 self._strict_pending = None
 
-        current_carrier = None
-        if ya_has_pass and not yb_has_pass:
-            current_carrier = 0
-        elif yb_has_pass and not ya_has_pass:
-            current_carrier = 1
+        holders = [i for i, h in enumerate(has_pass) if h]
+        current_carrier = holders[0] if len(holders) == 1 else None
         if current_carrier is not None:
             if (
                 self.last_yellow_carrier is not None
@@ -1840,21 +1878,22 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # the release that led to this step. The first step after a carrier
         # loses the ball records ball velocity and both yellows' positions:
         # that is the kick, judged before anyone knows where the ball ends up.
-        if ya_has_pass or yb_has_pass:
+        if any(has_pass):
             self._release = None
         elif self.last_yellow_carrier is not None and self._release is None:
             self._release = (
                 self.last_yellow_carrier,
                 (ball.v_x, ball.v_y),
                 (ball.x, ball.y),
-                ((ya.x, ya.y), (yb.x, yb.y)),
+                tuple((r.x, r.y) for r in yellows),
             )
             if drill and self._drill_release_step is None:
                 # Drill stage 1: the first release pays for a kick-speed ball
                 # heading for the mate, received or not. This is the signal
                 # that exists under exploration; the strict pass does not.
                 self._drill_release_step = self.current_step
-                if self._is_strict_release(1 - self.last_yellow_carrier):
+                if any(self._is_strict_release(j) for j in range(n)
+                       if j != self.last_yellow_carrier):
                     rewards += DRILL_AIMED_KICK_BONUS
 
         if strict_event and not drill and self.pass_gate == "strict":
@@ -1979,8 +2018,13 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # facing its mate, with the ball at its dribbler. The mate is
             # left where it is, so the pass has a real receiver to find.
             team = cur.robots_yellow if taker == "y" else cur.robots_blue
-            taker_idx = min(range(2), key=lambda i: math.hypot(team[i].x - bx, team[i].y - by))
-            mate = team[1 - taker_idx]
+            n_team = self.n_yellow if taker == "y" else N_BLUE
+            taker_idx = min(range(n_team), key=lambda i: math.hypot(team[i].x - bx, team[i].y - by))
+            # The receiver it faces: the next-nearest team-mate to the spot
+            # (the only one in a team of two).
+            mate_idx = min((i for i in range(n_team) if i != taker_idx),
+                           key=lambda i: math.hypot(team[i].x - bx, team[i].y - by))
+            mate = team[mate_idx]
             tx, ty = clamp(bx, by)
             # Face the mate's CLAMPED position (it may be outside the field
             # itself, an excursion is no stoppage): from a spot on the
@@ -2000,11 +2044,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             dist = math.hypot(mx - tx, my - ty)
             if dist < 2.0 * RESTART_TAKER_OFFSET:
                 mx, my = clamp(tx + dx * 2.0 * RESTART_TAKER_OFFSET, ty + dy * 2.0 * RESTART_TAKER_OFFSET)
-            new[(taker, 1 - taker_idx)] = (mx, my, float(mate.theta))
+            new[(taker, mate_idx)] = (mx, my, float(mate.theta))
             placed.append((mx, my))
         pos.ball = Ball(x=bx, y=by, v_x=0.0, v_y=0.0)
         for key, team_in in (("y", cur.robots_yellow), ("b", cur.robots_blue)):
-            for i in range(2):
+            for i in range(self.n_yellow if key == "y" else N_BLUE):
                 if (key, i) in new:
                     continue
                 r = team_in[i]
@@ -2021,7 +2065,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # Insert in index order: the simulator reads the dicts in insertion
         # order and would otherwise swap the ids.
         for key, team_out in (("y", pos.robots_yellow), ("b", pos.robots_blue)):
-            for i in range(2):
+            for i in range(self.n_yellow if key == "y" else N_BLUE):
                 x, y, theta = new[(key, i)]
                 team_out[i] = Robot(x=x, y=y, theta=theta)
         self._freeze = None
@@ -2090,10 +2134,42 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
 
     # ---------- initial positions ----------
 
-    def _drill_frame(self, pos, rng, max_x, carrier_idx, cx, cy, mx, my):
+    def _draw_pair(self, rng):
+        """(carrier_idx, mate_idx) of a drill. A team of two draws one bit,
+        as it always did; a bigger team draws a permutation."""
+        if self.n_yellow == 2:
+            carrier_idx = int(rng.integers(0, 2))
+            return carrier_idx, 1 - carrier_idx
+        perm = rng.permutation(self.n_yellow)
+        return int(perm[0]), int(perm[1])
+
+    def _extra_yellow_spots(self, rng, taken, n_extra, far_from=None):
+        """Start positions for the yellows a frame does not script (a team
+        of two has none, and nothing is drawn): on the own half, >= 0.6 m
+        from every position in `taken` and, with far_from = (x, y, r), at
+        least r from that point — a bystander never stands closer to the
+        drill's carrier than its receiver does."""
+        out = []
+        for _ in range(n_extra):
+            x = y = None
+            for _ in range(40):
+                x, y = float(rng.uniform(0.5, 3.5)), float(rng.uniform(-2.5, 2.5))
+                ok = all(math.hypot(x - tx, y - ty) >= 0.6 for tx, ty in taken + out)
+                if ok and far_from is not None:
+                    ok = math.hypot(x - far_from[0], y - far_from[1]) >= far_from[2]
+                if ok:
+                    break
+            out.append((x, y))
+        return out
+
+    def _drill_frame(self, pos, rng, max_x, carrier_idx, cx, cy, mx, my, mate_idx=None):
         """Shared tail of the pass-drill spawns: carrier at (cx, cy) with the
         ball at its dribbler, mate at (mx, my), both facing each other within
-        ±30° so the carrier still has to aim, blues parked on the far half."""
+        ±30° so the carrier still has to aim, blues parked on the far half.
+        Any further yellow starts on its own half, farther from the carrier
+        than the mate, so the drill keeps one receiver."""
+        if mate_idx is None:
+            mate_idx = 1 - carrier_idx
         to_mate = np.array([mx - cx, my - cy])
         to_mate = to_mate / max(1e-6, float(np.linalg.norm(to_mate)))
         base = math.degrees(math.atan2(to_mate[1], to_mate[0]))
@@ -2101,16 +2177,30 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         theta_m = base + 180.0 + float(rng.uniform(-30.0, 30.0))
         bx, by = self._ball_in_front(rng, cx, cy, to_mate)
         pos.ball = Ball(x=bx, y=by)
-        yellows = [None, None]
+        yellows = [None] * self.n_yellow
         yellows[carrier_idx] = Robot(x=cx, y=cy, theta=theta_c)
-        yellows[1 - carrier_idx] = Robot(x=mx, y=my, theta=theta_m)
-        pos.robots_yellow[0], pos.robots_yellow[1] = yellows
-        for i in range(2):
-            pos.robots_blue[i] = Robot(
+        yellows[mate_idx] = Robot(x=mx, y=my, theta=theta_m)
+        blues = [
+            Robot(
                 x=float(rng.uniform(1.5, max_x - 0.5)),
                 y=float(rng.uniform(-2.0, 2.0)),
                 theta=float(rng.uniform(-180, 180)),
             )
+            for _ in range(N_BLUE)
+        ]
+        extra = [i for i in range(self.n_yellow) if yellows[i] is None]
+        spots = self._extra_yellow_spots(
+            rng, [(cx, cy), (mx, my)] + [(b.x, b.y) for b in blues], len(extra),
+            far_from=(cx, cy, math.hypot(mx - cx, my - cy) + 0.5),
+        )
+        for i, (x, y) in zip(extra, spots):
+            yellows[i] = Robot(x=x, y=y, theta=float(rng.uniform(-180, 180)))
+        # Insert in index order: the simulator reads the dicts in insertion
+        # order and would otherwise swap the ids.
+        for i, r in enumerate(yellows):
+            pos.robots_yellow[i] = r
+        for i, b in enumerate(blues):
+            pos.robots_blue[i] = b
         return pos
 
     def _get_initial_positions_frame(self) -> Frame:
@@ -2168,6 +2258,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 y=float(rng.uniform(-2.0, 2.0)),
                 theta=float(rng.uniform(-180, 180)),
             )
+            taken = [(r.x, r.y) for r in list(pos.robots_yellow.values()) + list(pos.robots_blue.values())]
+            for i, (x, y) in zip(range(2, self.n_yellow),
+                                 self._extra_yellow_spots(rng, taken, self.n_yellow - 2)):
+                pos.robots_yellow[i] = Robot(x=x, y=y, theta=float(rng.uniform(-180, 180)))
             return pos
 
         if level == 2:
@@ -2175,7 +2269,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # kick-and-receive at all when nothing else pays? Heading jitter
             # ±30° so the carrier still has to aim, blues out of the way.
             self._episode_scenario = "level2"
-            carrier_idx = int(rng.integers(0, 2))
+            carrier_idx, mate_idx = self._draw_pair(rng)
             cx = float(rng.uniform(-2.5, -0.5))
             cy = float(rng.uniform(-1.5, 1.5))
             ang = float(rng.uniform(-math.pi, math.pi))
@@ -2184,7 +2278,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 cx + d * math.cos(ang), cy + d * math.sin(ang), margin=0.5
             )
             return self._drill_frame(
-                pos, rng, max_x, carrier_idx, cx, cy, mx, my
+                pos, rng, max_x, carrier_idx, cx, cy, mx, my, mate_idx=mate_idx
             )
 
         if level in (3, 4):
@@ -2196,7 +2290,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # is active (see _build_commands): blue 0 hunts the ball, blue 1
             # drops onto the shot line. The bridge between the drills and L5.
             self._episode_scenario = f"level{level}"
-            carrier_idx = int(rng.integers(0, 2))
+            carrier_idx, mate_idx = self._draw_pair(rng)
             mx = float(rng.uniform(-max_x + 1.0, -max_x + 2.3))
             my = float(rng.uniform(-1.2, 1.2))
             # Carrier anywhere in the half-plane away from the goal.
@@ -2207,7 +2301,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             )
             cx = min(cx, 0.5)  # stay clear of the parked blues
             pos = self._drill_frame(
-                pos, rng, max_x, carrier_idx, cx, cy, mx, my
+                pos, rng, max_x, carrier_idx, cx, cy, mx, my, mate_idx=mate_idx
             )
             if level == 4:
                 # From the parking zone the blues never arrive inside a
@@ -2254,16 +2348,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             x=float(rng.uniform(-3, 3)),
             y=float(rng.uniform(-2, 2)),
         )
-        pos.robots_yellow[0] = Robot(
-            x=float(rng.uniform(0.2, 3.5)),
-            y=float(rng.uniform(-2.5, 2.5)),
-            theta=float(rng.uniform(-180, 180)),
-        )
-        pos.robots_yellow[1] = Robot(
-            x=float(rng.uniform(0.2, 3.5)),
-            y=float(rng.uniform(-2.5, 2.5)),
-            theta=float(rng.uniform(-180, 180)),
-        )
+        for i in range(self.n_yellow):
+            pos.robots_yellow[i] = Robot(
+                x=float(rng.uniform(0.2, 3.5)),
+                y=float(rng.uniform(-2.5, 2.5)),
+                theta=float(rng.uniform(-180, 180)),
+            )
         pos.robots_blue[0] = Robot(
             x=float(rng.uniform(-3.5, -0.2)),
             y=float(rng.uniform(-2.5, 2.5)),
@@ -2321,20 +2411,29 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 break
             fx, fy = float(rng.uniform(0.2, 3.5)), float(rng.uniform(-2.5, 2.5))
         theta_f = float(rng.uniform(-180.0, 180.0))
-        defender = int(rng.integers(2))
+        defender = int(rng.integers(self.n_yellow))
         self._defense_defender = defender  # for the audit tools
-        yellows = [None, None]
+        free = min(i for i in range(self.n_yellow) if i != defender)
+        yellows = [None] * self.n_yellow
         yellows[defender] = Robot(x=dx, y=dy, theta=theta_d)
-        yellows[1 - defender] = Robot(x=fx, y=fy, theta=theta_f)
-        pos.robots_yellow[0], pos.robots_yellow[1] = yellows
-        pos.robots_blue[0] = Robot(
-            x=hx, y=hy, theta=math.degrees(math.atan2(by - hy, bx - hx)),
-        )
-        pos.robots_blue[1] = Robot(
+        yellows[free] = Robot(x=fx, y=fy, theta=theta_f)
+        keeper = Robot(
             x=float(rng.uniform(-max_x + 0.35, -max_x + 0.7)),
             y=float(rng.uniform(-0.4, 0.4)),
             theta=0.0,
         )
+        extra = [i for i in range(self.n_yellow) if yellows[i] is None]
+        spots = self._extra_yellow_spots(
+            rng, [(dx, dy), (fx, fy), (hx, hy), (bx, by)], len(extra)
+        )
+        for i, (x, y) in zip(extra, spots):
+            yellows[i] = Robot(x=x, y=y, theta=float(rng.uniform(-180.0, 180.0)))
+        for i, r in enumerate(yellows):
+            pos.robots_yellow[i] = r
+        pos.robots_blue[0] = Robot(
+            x=hx, y=hy, theta=math.degrees(math.atan2(by - hy, bx - hx)),
+        )
+        pos.robots_blue[1] = keeper
         return pos
 
     def _curriculum_frame(self):
@@ -2364,14 +2463,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         b0 = f0.ball
         carrier = int(np.argmin([
             math.hypot(f0.robots_yellow[i].x - b0.x, f0.robots_yellow[i].y - b0.y)
-            for i in range(2)
+            for i in range(self.n_yellow)
         ]))
-        weights = {
-            ("robots_yellow", carrier): g_ball,
-            ("robots_yellow", 1 - carrier): g_mate,
-            ("robots_blue", 0): g_opp,
-            ("robots_blue", 1): g_opp,
-        }
+        weights = {("robots_yellow", i): g_mate for i in range(self.n_yellow)}
+        weights[("robots_yellow", carrier)] = g_ball
+        for i in range(N_BLUE):
+            weights[("robots_blue", i)] = g_opp
 
         def lerp(a, b, g):
             return (1.0 - g) * a + g * b
@@ -2384,7 +2481,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # Insert in index order: the simulator reads the robot dicts in
         # insertion order, so inserting the carrier first would swap ids.
         for team in ("robots_yellow", "robots_blue"):
-            for i in range(2):
+            for i in range(self.n_yellow if team == "robots_yellow" else N_BLUE):
                 g = weights[(team, i)]
                 r0, r1 = getattr(f0, team)[i], getattr(f1, team)[i]
                 getattr(pos, team)[i] = Robot(

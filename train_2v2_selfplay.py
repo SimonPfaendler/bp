@@ -67,11 +67,13 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
                 difficulty_step=0.05, difficulty_window=50, role_index=False,
                 defense_frame_prob=0.0, foul_restart="off",
                 defense_difficulty=1.0, action_repeat=1, blue_kick_speed=6.0,
-                pass_bonus=None):
+                pass_bonus=None, n_yellow=2):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
             pass_bonus=pass_bonus,       # None = the env default (+3)
+            # Robots on the learning side (2 = the 2v2 protocol, 3 = 3v2).
+            n_yellow=n_yellow,
             # k physics steps per decision; blue heuristic shot speed.
             action_repeat=action_repeat,
             blue_kick_speed=blue_kick_speed,
@@ -844,7 +846,7 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   difficulty_window=50, role_index=False,
                   defense_frame_prob=0.0, foul_restart="off",
                   defense_difficulty=1.0, action_repeat=1, blue_kick_speed=6.0,
-                  opponents=None, pass_bonus=None):
+                  opponents=None, pass_bonus=None, n_yellow=2):
     """`opponents`: one entry per env, None = the run's normal opponent, a
     checkpoint path = that frozen policy as blue (opponent pool). A pool env
     plays the open game against its opponent: start positions fully random
@@ -860,7 +862,7 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                 restarts, difficulty, difficulty_threshold, difficulty_step,
                 difficulty_window, role_index, defense_frame_prob,
                 foul_restart, defense_difficulty, action_repeat,
-                blue_kick_speed, pass_bonus=pass_bonus)
+                blue_kick_speed, pass_bonus=pass_bonus, n_yellow=n_yellow)
         return make_env_fn(
             reward_type, seed + i, opp, pass_scenario_prob,
             curriculum_start_level, None, goal_reward_solo,
@@ -897,8 +899,9 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           role_index=False, defense_frame_prob=0.0, foul_restart="off",
           defense_difficulty=1.0, critic_warmup_steps=0, frame_stack=1,
           action_repeat=1, blue_kick_speed=6.0,
-          opponent_pool=None, pool_frac=0.5, pass_bonus=None):
+          opponent_pool=None, pool_frac=0.5, pass_bonus=None, n_yellow=2):
     assert algo in ("masac", "sac"), algo
+    assert int(n_yellow) == 2 or algo == "sac", "a bigger yellow team is wired for independent SAC only"
     assert int(action_repeat) >= 1, action_repeat
     assert int(frame_stack) >= 1, frame_stack
     if int(frame_stack) > 1:
@@ -1002,7 +1005,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
     if pass_bonus is not None:
         print(f"Pass bonus: {float(pass_bonus)} per paying pass (default 3.0)")
     env = build_vec_env(
-        opponents=opponents, pass_bonus=pass_bonus,
+        opponents=opponents, pass_bonus=pass_bonus, n_yellow=int(n_yellow),
         n_envs=n_envs, reward_type=reward_type, seed=seed,
         frozen_path=env_frozen_path, use_subproc=True, algo=algo,
         pass_scenario_prob=initial_pass_prob,
@@ -1071,9 +1074,9 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         if blue_heuristic else f"frozen={frozen_path}"
     )
     if role_index:
-        print("Role index on: obs dims 56-57 are the agent's one-hot id")
+        print(f"Role index on: the last {int(n_yellow)} obs dims are the agent's one-hot id")
     print(
-        f"2v2 {algo_tag} self-play | opponent={opponent} | seed={seed} | "
+        f"{int(n_yellow)}v2 {algo_tag} self-play | opponent={opponent} | seed={seed} | "
         f"envs={n_envs} | vec_slots={env.num_envs} | "
         f"start_level={effective_start_level}"
     )
@@ -1311,6 +1314,10 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
                 saved_level = saved_flags.get("curriculum_start_level")
                 if saved_level is not None and int(saved_level) != int(effective_start_level):
                     diff["curriculum_start_level"] = (saved_level, effective_start_level)
+                # Team size: sidecars before 2026-10-04 have no key (two).
+                saved_n = int(saved_flags.get("n_yellow") or 2)
+                if saved_n != int(n_yellow):
+                    diff["n_yellow"] = (saved_n, int(n_yellow))
                 if diff:
                     print(f"Skipping buffer load: flags differ from the run "
                           f"that wrote it {diff} (saved, current)")
@@ -1503,7 +1510,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
                              "DIFF_WIN", "INIT_PATH", "TOTAL_STEPS", "TIME_MIN",
                              "BLUE", "ROLE", "DEF_PROB", "FOUL", "DEF_DIFF",
                              "CRIT_WARM", "STACK", "REPEAT", "BLUE_KICK", "BUF",
-                             "SLURM_JOB_ID")}
+                             "N_YELLOW", "SLURM_JOB_ID")}
     with open(f"{final}_replay_buffer.json", "w") as _f:
         json.dump(dict(
             action_repeat=int(action_repeat), frame_stack=int(frame_stack),
@@ -1512,6 +1519,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             restarts=restarts, foul_restart=foul_restart,
             # provenance
             role_index=bool(role_index), blue_heuristic=blue_heuristic,
+            n_yellow=int(n_yellow),
             blue_kick_speed=float(blue_kick_speed),
             defense_frame_prob=float(defense_frame_prob),
             defense_difficulty=float(defense_difficulty),
@@ -1650,6 +1658,10 @@ if __name__ == "__main__":
     parser.add_argument("--pass_bonus", type=float, default=None,
                         help="Payment per paying pass (default 3.0). 0 with "
                              "--goal_reward_solo 10 = only goals count.")
+    parser.add_argument("--n_yellow", type=int, default=2,
+                        help="Robots on the learning side (2 = 2v2, 3 = 3v2 "
+                             "against the two-robot heuristic). Changes the "
+                             "obs layout, so no warm start across sizes.")
     parser.add_argument("--critic_warmup_steps", type=int, default=0,
                         help="Freeze actor and alpha for this many env steps "
                              "at the start of a (chained) run so the critic "
@@ -1711,7 +1723,7 @@ if __name__ == "__main__":
         blue_kick_speed=args.blue_kick_speed,
         opponent_pool=([p for p in args.opponent_pool.split(",") if p]
                        if args.opponent_pool else None),
-        pool_frac=args.pool_frac,
+        pool_frac=args.pool_frac, n_yellow=args.n_yellow,
         pass_bonus=args.pass_bonus,
         goal_reward_solo=args.goal_reward_solo,
         target_action_std=args.target_action_std,

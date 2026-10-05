@@ -314,7 +314,10 @@ def main():
     diff_thr = os.environ.get("DIFF_THR"); diff_thr = float(diff_thr) if diff_thr else None
     diff_step = os.environ.get("DIFF_STEP"); diff_step = float(diff_step) if diff_step else None
     diff_win = os.environ.get("DIFF_WIN"); diff_win = int(diff_win) if diff_win else None
-    pass_scenario_prob = 0.35 if level == 5 else 0.0
+    # Staged pass scenarios on level 5 (Gen 15). Dead under a reverse
+    # curriculum (DIFF set: the env draws the curriculum frame first), so
+    # pass 0 there — the 3v2 env has no two-robot scenario frames at all.
+    pass_scenario_prob = 0.35 if (level == 5 and diff is None) else 0.0
     reward_type = "dense"
     n_pairs = 24
     seed = int(os.environ.get("SEED", "822"))

@@ -537,7 +537,14 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         assert self.n_yellow >= 2, n_yellow
         if self.n_yellow != 2:
             assert not frozen_path, "a frozen opponent needs n_yellow == 2"
-            assert float(pass_scenario_prob) == 0.0, "pass scenarios need n_yellow == 2"
+            if float(pass_scenario_prob) != 0.0:
+                # The staged pass scenarios are two-robot frames. The
+                # submit script still passes 0.35 on level 5 (dead under a
+                # difficulty, which takes precedence), so switch them off
+                # here instead of refusing the env.
+                print(f"[env] n_yellow={self.n_yellow}: pass_scenario_prob "
+                      f"{pass_scenario_prob} -> 0 (staged pass scenarios are two-robot frames)")
+                pass_scenario_prob = 0.0
         super().__init__(
             field_type=1,
             n_robots_blue=N_BLUE,
@@ -1010,7 +1017,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
     def set_pass_scenario_prob(self, prob: float):
         # Scheduled by PassScenarioScheduleCallback: anneal the staged-scenario
         # share from high (learn to pass) to low (apply passing in chaos).
-        self.pass_scenario_prob = float(prob)
+        # Two-robot frames: a bigger team keeps them off.
+        self.pass_scenario_prob = float(prob) if self.n_yellow == 2 else 0.0
 
     # ---------- observation ----------
 

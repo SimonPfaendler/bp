@@ -543,7 +543,15 @@ class StatsCallback(BaseCallback):
                     self.logger.record(f"opp_{kind}/passes_strict_per_episode", float(np.mean(o["strict"])))
                     self.logger.record(f"opp_{kind}/scored_after_strict_pass_rate", float(np.mean(o["sasp"])))
             for name, buf in self.pool_by.items():
+                # SB3's table printer truncates keys to 36 characters and
+                # refuses two keys that collide after truncation, so the
+                # opponent's name has to fit into 22 characters after
+                # "   success_vs_". Drop the run-name boilerplate first.
                 short = name.replace("_final.zip", "").replace(".zip", "")
+                short = short.replace("c15-PASS_BONUS0-SOLO10_", "goals_")
+                if short.startswith("c15_"):
+                    short = short[4:]
+                short = short[-22:]
                 self.logger.record(f"opp_pool/success_vs_{short}", float(np.mean(buf)))
         for scen, buf in self.drill_success.items():
             if buf:

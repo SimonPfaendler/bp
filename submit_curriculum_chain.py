@@ -321,10 +321,20 @@ def main():
         first_prev = lambda seed: f"{base_tag}_s{seed}_{p['name']}-{p['segs']}"
     if SP_SEGS > 0:
         global POOL
-        pool_seeds = os.environ.get("POOL_SEEDS", "101 102 103 104 105").split()
-        POOL = ",".join(f"models/{base_tag}_s{ps}_L5-{L5_SEGS}_final.zip"
-                        for ps in pool_seeds)
-        log_pool = f"pool = last L5 checkpoint of seeds {' '.join(pool_seeds)}"
+        if os.environ.get("POOL"):
+            # POOL=a.zip,b.zip,...: an explicit opponent list (e.g. a second
+            # league generation that also plays the SP-2 and goals-only
+            # teams) instead of the last L5 checkpoints of POOL_SEEDS.
+            POOL = os.environ["POOL"]
+            missing = [m for m in POOL.split(",") if not os.path.exists(m)]
+            if missing:
+                raise SystemExit(f"POOL: {len(missing)} checkpoint(s) not found: {missing[:3]}")
+            log_pool = f"pool = {len(POOL.split(','))} checkpoints from POOL"
+        else:
+            pool_seeds = os.environ.get("POOL_SEEDS", "101 102 103 104 105").split()
+            POOL = ",".join(f"models/{base_tag}_s{ps}_L5-{L5_SEGS}_final.zip"
+                            for ps in pool_seeds)
+            log_pool = f"pool = last L5 checkpoint of seeds {' '.join(pool_seeds)}"
     chains = {s: segments_for(s, tag, stages, ablate, partition, first_prev(s))
               for s in seeds}
     state_path = f"chain_state_{tag}.json"

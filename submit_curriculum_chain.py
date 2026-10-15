@@ -57,7 +57,7 @@ MANAGED = (
     "LEVEL PASS_GATE SOLO DRIBBLE SHAPING RESTARTS DIFF DIFF_THR DIFF_STEP "
     "DIFF_WIN INIT_PATH TOTAL_STEPS TIME_MIN BLUE ROLE DEF_PROB FOUL DEF_DIFF "
     "CRIT_WARM STACK REPEAT BLUE_KICK BUF TIME PARTITION SEED RUN_NAME AFTER N_YELLOW "
-    "INHERIT DROP_INIT_BUF POOL POOL_FRAC PASS_BONUS"
+    "INHERIT DROP_INIT_BUF POOL POOL_FRAC PASS_BONUS MATCH MATCH_S"
 ).split()
 
 # I/O layout and opponent: identical on every segment, so no boundary ever
@@ -122,6 +122,21 @@ SP_SEGS = int(os.environ.get("SP_SEGS", "0"))
 if SP_SEGS > 0:
     STAGES.append({**STAGES[-1], "name": "SP", "segs": SP_SEGS,
                    "DIFF": "inherit", "keep_buffer": True, "pool": True})
+# Match-play stage, off by default. MP_SEGS=N appends it after the
+# self-play stage (or after L5 without one): the same pool and anchor
+# split, but in match mode (MATCH=1, see KICKOFF_* in the env) — goals do
+# not end the episode, the team that conceded kicks off, windows of
+# MATCH_S (60) seconds, every env at the open-game frame (DIFF=1). The
+# first segment warm-starts from the last checkpoint of the stage before
+# WITHOUT its replay buffer: those goals are terminal and carry the time
+# bonus. The critic re-fits first (CRIT_WARM), as at every boundary.
+#   SP_SEGS=2 MP_SEGS=4 GO=1 LOOP=1 SEEDS="101 102 103 104 105" python submit_curriculum_chain.py
+MP_SEGS = int(os.environ.get("MP_SEGS", "0"))
+if MP_SEGS > 0:
+    STAGES.append({**STAGES[-1], "name": "MP", "segs": MP_SEGS,
+                   "DIFF": "1.0", "MATCH": "1",
+                   "MATCH_S": os.environ.get("MATCH_S", "60"),
+                   "keep_buffer": False, "pool": True})
 POOL = None   # set in main(): comma-separated checkpoint paths
 
 
@@ -319,7 +334,7 @@ def main():
         i = names.index(branch)
         stages, p = STAGES[i:], STAGES[i - 1]
         first_prev = lambda seed: f"{base_tag}_s{seed}_{p['name']}-{p['segs']}"
-    if SP_SEGS > 0:
+    if SP_SEGS > 0 or MP_SEGS > 0:
         global POOL
         if os.environ.get("POOL"):
             # POOL=a.zip,b.zip,...: an explicit opponent list (e.g. a second
@@ -357,6 +372,10 @@ def main():
         f"ablate={ablate or '-'}")
     if SP_SEGS > 0:
         log(f"  self-play stage: {SP_SEGS} segments, {log_pool}, "
+            f"{os.environ.get('POOL_FRAC', '0.5')} of the envs")
+    if MP_SEGS > 0:
+        log(f"  match-play stage: {MP_SEGS} segments, windows of "
+            f"{os.environ.get('MATCH_S', '60')} s, {log_pool}, "
             f"{os.environ.get('POOL_FRAC', '0.5')} of the envs")
     if not go:
         for n, env, _ in next(iter(chains.values())):

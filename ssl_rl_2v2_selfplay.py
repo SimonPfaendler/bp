@@ -263,6 +263,32 @@ RESTART_CLEAR_DIST = 1.0
 RESTART_TAKER_OFFSET = 0.16
 RESTART_IN_PLAY_DIST = 0.05
 RESTART_FREEZE_STEPS = 40
+# Match mode (match_mode=True; needs restarts="on" and foul_restart="on" so
+# that the clock is the only exit): a goal no longer ends the episode. The
+# score is kept, the team that conceded kicks off from the centre spot, and
+# play goes on until match_seconds have passed. Training uses windows of
+# about a minute that start from the run's usual random frame; a full match
+# (evaluation) starts with a kickoff, reset(options={"start": "kickoff_y"}).
+#  * Kickoff: both teams drawn into their own half as in the open-game
+#    frame, the ball on the centre spot RESTART_TAKER_OFFSET in front of the
+#    kicking team's robot (the nearest one; the heuristic's hunter), which
+#    faces a random direction within KICKOFF_TAKER_CONE_DEG of its attack
+#    direction, so the placement does not point it at its mate. Defenders
+#    at least KICKOFF_CLEAR_DIST from the ball and held still until the
+#    ball is in play, as at a free kick.
+#  * Per attack (episode start or kickoff up to the next goal) the pass
+#    state starts over: has_passed, last carrier, opponent touch and the
+#    pass-bonus cap. The cap resets ONLY at a goal; resetting it at a loss
+#    of possession would make ping-pong plus a deliberate turnover pay.
+#  * The time bonus of a goal is dropped (scoring sooner already means more
+#    goals per window), and the time feature of the observation is held at
+#    1.0: the window is a training device, not part of the task, so the
+#    value bootstraps across the cut and the policy gets no clock (Pardo et
+#    al., "Time Limits in Reinforcement Learning", ICML 2018). The layout
+#    keeps its dimensions, so episode-mode checkpoints warm-start as they are.
+KICKOFF_CLEAR_DIST = 0.6        # centre circle (0.5 m) plus the robot radius
+KICKOFF_MATE_DIST = 0.4         # kicking team's other robots, clear of the taker
+KICKOFF_TAKER_CONE_DEG = 60.0
 # foul_restart="on" (with restarts="on"): the strict dribbling foul is what
 # the SSL rules say it is, a free kick for the opponent at the spot, taken
 # through _do_restart like a ball restart, instead of the episodic stand-in
@@ -526,6 +552,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         frozen_action_repeat=None,
         pass_bonus=None,
         n_yellow=N_YELLOW,
+        match_mode=False,
+        match_seconds=60.0,
     ):
         # Size of the learning team. 2 is the 2v2 of the whole project and
         # stays bit-identical (same RNG draws, same layout); 3 gives every
@@ -717,6 +745,18 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.current_step = 0
         self.total_steps = 0
         self.max_steps = 1000
+        # Match mode, see KICKOFF_* above. Off: nothing below reads it.
+        self.match_mode = bool(match_mode)
+        self.match_seconds = float(match_seconds)
+        self._next_start = None      # reset option "start": kickoff_y / kickoff_b
+        self._reset_match_counters()
+        if self.match_mode:
+            assert self.restarts == "on" and self.foul_restart == "on", (
+                "match mode needs restarts='on' and foul_restart='on': "
+                "the clock must be the only way an episode ends")
+            assert curriculum_start_level in (None, 5), (
+                "match mode is the open game (curriculum level 5)")
+            self.max_steps = int(round(self.match_seconds / 0.025))
 
         self.last_dist_ball_goal = None
         self.last_dist_to_ball = None
@@ -871,6 +911,12 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.ep_length = 0
         self.ep_start_time = time.time()
 
+        self._reset_match_counters()
+        # Match mode: options={"start": "kickoff_y" | "kickoff_b"} opens the
+        # episode with that team's kickoff (a full match); without it the
+        # run's usual random frame.
+        self._next_start = (options or {}).get("start") if self.match_mode else None
+
         super().reset(seed=seed, options=options)
         self._maybe_load_frozen()
         obs = self._stacked_obs_yellow()
@@ -952,6 +998,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             if self._blue_pass is not None:
                 info["blue_passes"] = self._blue_pass.passes
                 info["blue_passes_strict"] = self._blue_pass.passes_strict
+            if self.match_mode:
+                self._match_info(info)
             if self._episode_scenario == "pass":
                 info["pass_variant"] = getattr(
                     self, "_episode_pass_variant", "corner"
@@ -983,7 +1031,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 # cannot end in a goal after a strict pass often enough and
                 # would freeze the difficulty. Every other spawn counts, as
                 # before (a drill level carrying a difficulty included).
-                if self._episode_scenario != "defense":
+                if self._episode_scenario != "defense" and not self.match_mode:
                     self._diff_buffer.append(info["scored_after_strict_pass"])
                 if (
                     self.difficulty < 1.0
@@ -1093,7 +1141,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         on either side. Without a tracker (heuristic or static blue, whose
         observation nobody reads) blue gets zeros and shares only the clock.
         """
-        time_remaining = 1.0 - min(
+        # Match mode: no clock in the observation (see KICKOFF_* above).
+        time_remaining = 1.0 if self.match_mode else 1.0 - min(
             1.0, self.current_step / float(self.max_steps)
         )
         if not is_yellow:
@@ -1646,6 +1695,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 rewards -= 0.004 * (1.0 + 2.0 * progress)
 
         if abs(ball.x) > max_x and abs(ball.y) <= goal_half_width:
+            if self.match_mode and not drill:
+                # Match mode: the goal counts and play goes on with a
+                # kickoff for the team that conceded (KICKOFF_* above).
+                self._match_goal(rewards, yellow_scored=ball.x < 0)
+                return rewards, done, truncated
             done = True
             if ball.x < 0:  # Yellow scored
                 if drill and not (
@@ -1763,7 +1817,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             truncated = True
             if self.restarts != "on":
                 rewards -= 1.0
-            self.match_result = -1
+            if self.match_mode:
+                diff = self.match_goals_for - self.match_goals_against
+                self.match_result = (diff > 0) - (diff < 0)
+            else:
+                self.match_result = -1
             return rewards, done, truncated
 
         if self.reward_type == "dense":
@@ -2028,6 +2086,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         positions are copied and only the offenders move; every velocity is
         zeroed by the simulator, as at a real restart. Shaping memories and
         dribble bookkeeping start over so the teleport is not scored."""
+        if self._restart_spec is not None and self._restart_spec[0] == "kickoff":
+            kicker = self._restart_spec[1]
+            self._restart_spec = None
+            self._do_kickoff(kicker)
+            return
         max_x = self.field.length / 2.0
         max_y = self.field.width / 2.0
         cur = self.frame
@@ -2142,6 +2205,157 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             (self.dribble_start_pos_b, None),
         ):
             lst[0] = lst[1] = val
+
+    # ---------- match mode ----------
+
+    def _reset_match_counters(self):
+        """Score and pass totals of the current window (match mode)."""
+        self.match_goals_for = 0
+        self.match_goals_against = 0
+        self.match_goals_after_pass = 0
+        self.match_goals_after_strict_pass = 0
+        self.match_passes = 0
+        self.match_passes_strict = 0
+        self.match_blue_passes = 0
+        self.match_blue_passes_strict = 0
+        self.match_blue_goals_after_strict_pass = 0
+
+    def _match_goal(self, rewards, yellow_scored):
+        """Match mode: book a goal and schedule the kickoff. Same payoff as
+        an episode-ending goal, without the time bonus (KICKOFF_* above)."""
+        if yellow_scored:
+            rewards += (
+                self.goal_reward if self._has_passed()
+                else self.goal_reward_solo
+            )
+            self.match_goals_for += 1
+            self.match_goals_after_pass += int(self.passes_in_episode > 0)
+            self.match_goals_after_strict_pass += int(self.passes_strict_in_episode > 0)
+            kicker = "b"
+        else:
+            rewards -= 5.0
+            self.match_goals_against += 1
+            if self._blue_pass is not None:
+                self.match_blue_goals_after_strict_pass += int(
+                    self._blue_pass.passes_strict > 0)
+            kicker = "y"
+        self._restart_pending = True
+        self._restart_spec = ("kickoff", kicker, 0.0, 0.0)
+
+    def _start_new_attack(self):
+        """Match mode: fold the finished attack's pass counts into the window
+        totals and start the next attack's bookkeeping from zero. The
+        pass-bonus cap resets here, i.e. only at a goal."""
+        self.match_passes += self.passes_in_episode
+        self.match_passes_strict += self.passes_strict_in_episode
+        self.passes_in_episode = 0
+        self.passes_strict_in_episode = 0
+        self._pass_bonuses_paid = 0
+        self._strict_open = None
+        if self._blue_pass is not None:
+            self.match_blue_passes += self._blue_pass.passes
+            self.match_blue_passes_strict += self._blue_pass.passes_strict
+            self._blue_pass.reset()
+        if self._pass_shadow_y is not None:
+            self._pass_shadow_y.reset()
+
+    def _kickoff_frame(self, kicker):
+        """Start positions of a kickoff by `kicker` ("y" or "b"), see
+        KICKOFF_* above. Yellow attacks -x, so its own half is +x."""
+        rng = self.np_random
+        ys = [[float(rng.uniform(0.2, 3.5)), float(rng.uniform(-2.5, 2.5)),
+               float(rng.uniform(-180, 180))] for _ in range(self.n_yellow)]
+        bs = [[float(rng.uniform(-3.5, -0.2)), float(rng.uniform(-2.5, 2.5)),
+               float(rng.uniform(-180, 180))] for _ in range(N_BLUE)]
+        if kicker == "y":
+            team, other, attack_deg = ys, bs, 180.0
+            k = min(range(len(team)), key=lambda i: math.hypot(team[i][0], team[i][1]))
+        else:
+            team, other, attack_deg = bs, ys, 0.0
+            # The heuristic team's hunter (blue 0) takes it: its keeper
+            # would walk back to the goal and leave the ball lying.
+            k = 0 if self.blue_heuristic else min(
+                range(len(team)), key=lambda i: math.hypot(team[i][0], team[i][1]))
+        heading = attack_deg + float(rng.uniform(-KICKOFF_TAKER_CONE_DEG, KICKOFF_TAKER_CONE_DEG))
+        h = math.radians(heading)
+        # Ball on the spot, RESTART_TAKER_OFFSET in front of the dribbler:
+        # within the cone the taker stands in its own half.
+        team[k] = [-RESTART_TAKER_OFFSET * math.cos(h),
+                   -RESTART_TAKER_OFFSET * math.sin(h), heading]
+        for lst, min_d in ((other, KICKOFF_CLEAR_DIST), (team, KICKOFF_MATE_DIST)):
+            for i, r in enumerate(lst):
+                if lst is team and i == k:
+                    continue
+                d = math.hypot(r[0], r[1])
+                if d < min_d:  # radially out; |x| >= 0.2 keeps the half
+                    r[0], r[1] = r[0] * min_d / d, r[1] * min_d / d
+        pos = Frame()
+        pos.ball = Ball(x=0.0, y=0.0)
+        # Insert in index order: the simulator reads the dicts in order.
+        for i, (x, y, th) in enumerate(ys):
+            pos.robots_yellow[i] = Robot(x=x, y=y, theta=th)
+        for i, (x, y, th) in enumerate(bs):
+            pos.robots_blue[i] = Robot(x=x, y=y, theta=th)
+        return pos
+
+    def _do_kickoff(self, kicker):
+        """Match mode: restart play after a goal with a kickoff by `kicker`.
+        Everything a teleport invalidates starts over, as in _do_restart
+        (here for every robot of a team of any size), and a new attack
+        begins."""
+        pos = self._kickoff_frame(kicker)
+        self.rsim.reset(pos)
+        self.frame = self.rsim.get_frame()
+        self.last_frame = self.frame
+        self._freeze = dict(team="b" if kicker == "y" else "y",
+                            until=self.current_step + RESTART_FREEZE_STEPS,
+                            bx=0.0, by=0.0)
+        self.last_dist_ball_goal = None
+        self.last_dist_to_ball = None
+        self.last_ball_pos = None
+        self.last_dist_to_goal_y = None
+        self._release = None
+        self._strict_pending = None
+        self.last_yellow_carrier = None
+        self.blue_touched_since_yellow = False
+        self._dribble_foul = False
+        self._dribble_foul_by = None
+        self.is_dribbling_y = [False] * self.n_yellow
+        self.dribble_start_pos_y = [None] * self.n_yellow
+        self.must_release_y = [False] * self.n_yellow
+        self.dribble_ban_y = [None] * self.n_yellow
+        self.is_dribbling_b = [False] * N_BLUE
+        self.dribble_start_pos_b = [None] * N_BLUE
+        self.must_release_b = [False] * N_BLUE
+        self._outside = {key: False for key in self._robot_keys()}
+        self._blue_hold = 0          # a frozen learned blue decides afresh
+        self._start_new_attack()
+
+    def _match_info(self, info):
+        """Match mode: statistics of the whole window. The legacy keys keep
+        their names with the window as the unit: is_success = window won,
+        blue_goal = window lost, passes = all passes of the window,
+        scored_after_(strict_)pass = share of yellow's goals that followed a
+        (strict) pass. Attacks = goals + 1 (the one running at the cut)."""
+        gf, ga = self.match_goals_for, self.match_goals_against
+        info["is_success"] = 1.0 if gf > ga else 0.0
+        info["blue_goal"] = 1.0 if ga > gf else 0.0
+        info["passes"] = self.match_passes + self.passes_in_episode
+        info["passes_strict"] = self.match_passes_strict + self.passes_strict_in_episode
+        info["scored_after_pass"] = self.match_goals_after_pass / gf if gf else 0.0
+        info["scored_after_strict_pass"] = (
+            self.match_goals_after_strict_pass / gf if gf else 0.0)
+        info["match_goals_for"] = float(gf)
+        info["match_goals_against"] = float(ga)
+        info["match_goals_after_strict_pass"] = float(self.match_goals_after_strict_pass)
+        info["match_attacks"] = float(gf + ga + 1)
+        info["match_seconds"] = self.current_step * 0.025
+        if self._blue_pass is not None:
+            info["blue_passes"] = self.match_blue_passes + self._blue_pass.passes
+            info["blue_passes_strict"] = (
+                self.match_blue_passes_strict + self._blue_pass.passes_strict)
+            info["blue_scored_after_strict_pass"] = (
+                self.match_blue_goals_after_strict_pass / ga if ga else 0.0)
 
     @staticmethod
     def _clear_spot(x, y, bx, by, max_x, max_y, occupied=()):
@@ -2374,6 +2588,15 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         Switch happens externally via set_curriculum_level once the rolling
         success_rate clears the curriculum-callback threshold.
         """
+        if self._next_start in ("kickoff_y", "kickoff_b"):
+            # Match mode: a full match opens with a kickoff (reset option).
+            kicker = self._next_start[-1]
+            self._next_start = None
+            self._episode_scenario = "kickoff"
+            self._freeze = dict(team="b" if kicker == "y" else "y",
+                                until=self.current_step + RESTART_FREEZE_STEPS,
+                                bx=0.0, by=0.0)
+            return self._kickoff_frame(kicker)
         pos = Frame()
         rng = self.np_random
         max_x = self.field.length / 2.0

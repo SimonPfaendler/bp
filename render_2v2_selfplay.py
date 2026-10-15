@@ -131,6 +131,89 @@ def _mean_se(xs):
     return float(xs.mean()), float(xs.std(ddof=1) / math.sqrt(xs.size)) if xs.size > 1 else 0.0
 
 
+def _run_matches(env, model, stacker, args, meta):
+    """--match: each of the n_eps runs is a full match in match mode (goals
+    do not end it; the team that conceded kicks off). The opening kickoff
+    alternates between the teams so that neither starts every match with
+    the ball. Reports goals per match and per minute, win/draw/loss over
+    matches, strict passes per attack and the share of goals after a pass."""
+    print(f"Running {args.n_eps} matches of {args.match_minutes:g} min, "
+          f"deterministic={not args.stochastic}, seed={args.seed}, opening kickoff alternates")
+    print()
+    rows = []
+    cap = env.max_steps // max(1, env.action_repeat) + 10
+    for m in range(args.n_eps):
+        start = "kickoff_y" if m % 2 == 0 else "kickoff_b"
+        obs, _ = env.reset(seed=args.seed + m if m == 0 else None, options={"start": start})
+        if stacker is not None:
+            obs = stacker.reset(obs)
+        info, ret = {}, 0.0
+        for _ in range(cap):
+            action, _ = model.predict(obs, deterministic=not args.stochastic)
+            obs, reward, done, trunc, info = env.step(action)
+            if stacker is not None:
+                obs = stacker.step(obs)
+            if not args.headless:
+                env.render()
+                if args.step_sleep:
+                    time.sleep(args.step_sleep)
+            ret += float(np.mean(reward))
+            if done or trunc:
+                break
+        gf, ga = float(info["match_goals_for"]), float(info["match_goals_against"])
+        row = dict(gf=gf, ga=ga, gasp=float(info["match_goals_after_strict_pass"]),
+                   strict=float(info["passes_strict"]), attacks=float(info["match_attacks"]),
+                   minutes=float(info["match_seconds"]) / 60.0, start=start, ret=ret,
+                   blue_strict=float(info.get("blue_passes_strict", 0.0)),
+                   blue_gasp=float(info.get("blue_scored_after_strict_pass", 0.0)) * ga)
+        rows.append(row)
+        print(f"Match {m + 1:3d}/{args.n_eps}: {int(gf):3d} : {int(ga):<3d} ({start}) | "
+              f"strict passes {int(row['strict'])} = {row['strict'] / row['attacks']:.2f} per attack | "
+              f"goals after a strict pass {int(row['gasp'])} of {int(gf)}"
+              + (f" | blue strict {int(row['blue_strict'])}" if meta["frozen_blue"] else ""))
+
+    n = len(rows)
+    col = lambda k: np.array([r[k] for r in rows], dtype=float)
+    gf, ga, diff = col("gf"), col("ga"), col("gf") - col("ga")
+    minutes = float(col("minutes").sum())
+    wins, draws = int((diff > 0).sum()), int((diff == 0).sum())
+    win, draw, loss = _wilson(wins, n), _wilson(draws, n), _wilson(n - wins - draws, n)
+    gasp_share = float(col("gasp").sum() / gf.sum()) if gf.sum() else 0.0
+    strict_per_attack = float(col("strict").sum() / col("attacks").sum())
+    print()
+    print("=" * 72)
+    print(f"Summary over {n} matches of {args.match_minutes:g} min   [mean ± s.e.; 95 % Wilson CI]")
+    print(f"  goals for / match              {gf.mean():.2f} ± {_mean_se(gf)[1]:.2f}   ({gf.sum() / minutes:.2f} per min)")
+    print(f"  goals against / match          {ga.mean():.2f} ± {_mean_se(ga)[1]:.2f}   ({ga.sum() / minutes:.2f} per min)")
+    print(f"  goal difference / match        {diff.mean():+.2f} ± {_mean_se(diff)[1]:.2f}")
+    print(f"  won / drawn / lost             {win[0]:.2f} [{win[1]:.2f}, {win[2]:.2f}]  "
+          f"{draw[0]:.2f}  {loss[0]:.2f}")
+    print(f"  strict passes / attack         {strict_per_attack:.3f}")
+    print(f"  goals after a strict pass      {gasp_share:.3f} of yellow's goals")
+    blue = {}
+    if meta["frozen_blue"]:
+        blue = dict(blue_strict_passes_per_attack=float(col("blue_strict").sum() / col("attacks").sum()),
+                    blue_goal_after_strict_pass_share=float(col("blue_gasp").sum() / ga.sum()) if ga.sum() else 0.0)
+        print(f"  BLUE strict passes / attack    {blue['blue_strict_passes_per_attack']:.3f}")
+        print(f"  BLUE goals after strict pass   {blue['blue_goal_after_strict_pass_share']:.3f} of blue's goals")
+    summary = dict(
+        **meta["header"], n_matches=n, match_minutes=args.match_minutes,
+        goals_for_per_match=float(gf.mean()), goals_for_per_match_se=_mean_se(gf)[1],
+        goals_against_per_match=float(ga.mean()), goals_against_per_match_se=_mean_se(ga)[1],
+        goal_diff_per_match=float(diff.mean()), goal_diff_per_match_se=_mean_se(diff)[1],
+        goals_for_per_min=float(gf.sum() / minutes), goals_against_per_min=float(ga.sum() / minutes),
+        win_rate=win[0], win_rate_ci=[win[1], win[2]], draw_rate=draw[0], loss_rate=loss[0],
+        strict_passes_per_attack=strict_per_attack, goal_after_strict_pass_share=gasp_share,
+        **blue,
+    )
+    print()
+    print("JSON " + json.dumps(summary))
+    if args.json_out:
+        with open(args.json_out, "a") as f:
+            f.write(json.dumps(summary) + "\n")
+    env.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -193,6 +276,13 @@ def main():
     parser.add_argument("--defense_difficulty", type=float, default=None)
     parser.add_argument("--json_out", default=None,
                         help="Append the summary as one JSON line here.")
+    parser.add_argument("--match", action="store_true",
+                        help="Full matches in match mode: --n_eps matches of "
+                             "--match_minutes, goals do not end them, the "
+                             "opening kickoff alternates. Needs --restarts on "
+                             "--foul_restart on.")
+    parser.add_argument("--match_minutes", type=float, default=10.0,
+                        help="Match length for --match (SSL: two halves of 5 min).")
     args = parser.parse_args()
 
     # ---------------- checkpoint + sidecar ----------------
@@ -254,6 +344,9 @@ def main():
             env_kwargs[k] = v
     if args.blue_action_repeat is not None:
         env_kwargs["frozen_action_repeat"] = args.blue_action_repeat
+    if args.match:
+        env_kwargs["match_mode"] = True
+        env_kwargs["match_seconds"] = 60.0 * float(args.match_minutes)
     env = SSL2v2SelfPlayEnv(**env_kwargs)
     env.set_curriculum_level(args.level)
     frozen_blue = blue_path is not None
@@ -277,9 +370,19 @@ def main():
     task = {k: env_kwargs[k] for k in sorted(env_kwargs)
             if k not in ("reward_type", "render_mode", "frozen_path")}
     print(f"Task:    level {args.level}, " + ", ".join(f"{k}={v}" for k, v in task.items()))
-    print(f"Running {args.n_eps} episodes, deterministic={not args.stochastic}, "
-          f"seed={args.seed}, headless={args.headless}")
-    print()
+    if not args.match:
+        print(f"Running {args.n_eps} episodes, deterministic={not args.stochastic}, "
+              f"seed={args.seed}, headless={args.headless}")
+        print()
+
+    if args.match:
+        return _run_matches(env, model, stacker, args, dict(
+            frozen_blue=frozen_blue,
+            header=dict(model=args.model_path, level=args.level, task=task,
+                        frame_stack=frame_stack, action_repeat=int(action_repeat),
+                        blue=blue_desc, seed=args.seed,
+                        **({"blue_action_repeat": int(env.frozen_action_repeat or 1)}
+                           if frozen_blue else {}))))
 
     # ---------------- rollout ----------------
     keys = ("is_success", "blue_goal", "passes", "passes_strict",

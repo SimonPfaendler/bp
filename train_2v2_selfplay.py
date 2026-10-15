@@ -67,7 +67,8 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
                 difficulty_step=0.05, difficulty_window=50, role_index=False,
                 defense_frame_prob=0.0, foul_restart="off",
                 defense_difficulty=1.0, action_repeat=1, blue_kick_speed=6.0,
-                pass_bonus=None, n_yellow=2):
+                pass_bonus=None, n_yellow=2, match_mode=False,
+                match_seconds=60.0):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
@@ -120,6 +121,10 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
             difficulty_threshold=difficulty_threshold,
             difficulty_step=difficulty_step,
             difficulty_window=difficulty_window,
+            # Match mode: a goal does not end the episode, the team that
+            # conceded kicks off, windows of match_seconds (KICKOFF_* in
+            # the env).
+            match_mode=match_mode, match_seconds=match_seconds,
         )
         env.reset(seed=seed)
         return env
@@ -360,6 +365,11 @@ class StatsCallback(BaseCallback):
         self.opp = {kind: {m: deque(maxlen=300) for m in ("success", "blue_goal", "strict", "sasp")}
                     for kind in ("heuristic", "pool")}
         self.pool_by = {}
+        # Match mode (info carries match_goals_for): per window and kind of
+        # opponent, summed over the last 100 windows.
+        self.match = {kind: {m: deque(maxlen=100) for m in
+                             ("gf", "ga", "win", "strict", "attacks", "gasp", "seconds")}
+                      for kind in ("heuristic", "pool")}
 
     def _on_step(self) -> bool:
         dones = self.locals.get("dones", [])
@@ -397,6 +407,15 @@ class StatsCallback(BaseCallback):
                 self.saw_pool = True
                 self.pool_by.setdefault(opp, deque(maxlen=150)).append(
                     float(infos[i].get("is_success", 0.0)))
+            if "match_goals_for" in infos[i]:
+                mk = self.match["pool" if pool_ep else "heuristic"]
+                mk["gf"].append(float(infos[i]["match_goals_for"]))
+                mk["ga"].append(float(infos[i]["match_goals_against"]))
+                mk["win"].append(float(infos[i].get("is_success", 0.0)))
+                mk["strict"].append(float(infos[i].get("passes_strict", 0.0)))
+                mk["attacks"].append(float(infos[i]["match_attacks"]))
+                mk["gasp"].append(float(infos[i].get("match_goals_after_strict_pass", 0.0)))
+                mk["seconds"].append(float(infos[i].get("match_seconds", 0.0)))
             # Pool envs sit at difficulty 1.0 on the "curriculum" frame by
             # construction; they must not move the curriculum statistics
             # (difficulty_end is what the next segment inherits).
@@ -553,6 +572,20 @@ class StatsCallback(BaseCallback):
                     short = short[4:]
                 short = short[-22:]
                 self.logger.record(f"opp_pool/success_vs_{short}", float(np.mean(buf)))
+        for kind, mk in self.match.items():
+            if mk["gf"]:
+                # Rates over the summed windows; keys stay under SB3's
+                # 36-character limit ("match_heur/..." / "match_pool/...").
+                tag = "match_heur" if kind == "heuristic" else "match_pool"
+                minutes = max(1e-9, float(np.sum(mk["seconds"])) / 60.0)
+                gf, ga = float(np.sum(mk["gf"])), float(np.sum(mk["ga"]))
+                self.logger.record(f"{tag}/goals_for_per_min", gf / minutes)
+                self.logger.record(f"{tag}/goals_against_per_min", ga / minutes)
+                self.logger.record(f"{tag}/window_win_rate", float(np.mean(mk["win"])))
+                self.logger.record(f"{tag}/strict_per_attack",
+                                   float(np.sum(mk["strict"])) / max(1.0, float(np.sum(mk["attacks"]))))
+                self.logger.record(f"{tag}/goal_after_pass_share",
+                                   float(np.sum(mk["gasp"])) / gf if gf else 0.0)
         for scen, buf in self.drill_success.items():
             if buf:
                 self.logger.record(f"scenario_{scen}/success_rate", float(np.mean(buf)))
@@ -864,7 +897,8 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   difficulty_window=50, role_index=False,
                   defense_frame_prob=0.0, foul_restart="off",
                   defense_difficulty=1.0, action_repeat=1, blue_kick_speed=6.0,
-                  opponents=None, pass_bonus=None, n_yellow=2):
+                  opponents=None, pass_bonus=None, n_yellow=2,
+                  match_mode=False, match_seconds=60.0):
     """`opponents`: one entry per env, None = the run's normal opponent, a
     checkpoint path = that frozen policy as blue (opponent pool). A pool env
     plays the open game against its opponent: start positions fully random
@@ -880,7 +914,8 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                 restarts, difficulty, difficulty_threshold, difficulty_step,
                 difficulty_window, role_index, defense_frame_prob,
                 foul_restart, defense_difficulty, action_repeat,
-                blue_kick_speed, pass_bonus=pass_bonus, n_yellow=n_yellow)
+                blue_kick_speed, pass_bonus=pass_bonus, n_yellow=n_yellow,
+                match_mode=match_mode, match_seconds=match_seconds)
         return make_env_fn(
             reward_type, seed + i, opp, pass_scenario_prob,
             curriculum_start_level, None, goal_reward_solo,
@@ -888,7 +923,8 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
             restarts, 1.0, difficulty_threshold, difficulty_step,
             difficulty_window, role_index, 0.0,
             foul_restart, defense_difficulty, action_repeat,
-            blue_kick_speed, pass_bonus=pass_bonus)
+            blue_kick_speed, pass_bonus=pass_bonus,
+            match_mode=match_mode, match_seconds=match_seconds)
     fns = [_fn(i) for i in range(n_envs)]
     if algo == "masac":
         # Joint variants keep the 2-agent pairing intact so the replay buffer
@@ -917,7 +953,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           role_index=False, defense_frame_prob=0.0, foul_restart="off",
           defense_difficulty=1.0, critic_warmup_steps=0, frame_stack=1,
           action_repeat=1, blue_kick_speed=6.0,
-          opponent_pool=None, pool_frac=0.5, pass_bonus=None, n_yellow=2):
+          opponent_pool=None, pool_frac=0.5, pass_bonus=None, n_yellow=2,
+          match_mode=False, match_seconds=60.0):
     assert algo in ("masac", "sac"), algo
     assert int(n_yellow) == 2 or algo == "sac", "a bigger yellow team is wired for independent SAC only"
     assert int(action_repeat) >= 1, action_repeat
@@ -1045,7 +1082,11 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         defense_difficulty=defense_difficulty,
         action_repeat=int(action_repeat),
         blue_kick_speed=blue_kick_speed,
+        match_mode=bool(match_mode), match_seconds=float(match_seconds),
     )
+    if match_mode:
+        print(f"Match mode: goals do not end the episode, kickoff after each "
+              f"goal, windows of {float(match_seconds):.0f} s")
     if int(action_repeat) > 1:
         print(f"Action repeat: {action_repeat} physics steps per decision "
               f"({40 // int(action_repeat)} Hz); step counts below are decisions")
@@ -1336,6 +1377,11 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
                 saved_n = int(saved_flags.get("n_yellow") or 2)
                 if saved_n != int(n_yellow):
                     diff["n_yellow"] = (saved_n, int(n_yellow))
+                # Match mode stores non-terminal goals without the time
+                # bonus; sidecars before 2026-10-15 have no key (episodes).
+                saved_match = bool(saved_flags.get("match_mode") or False)
+                if saved_match != bool(match_mode):
+                    diff["match_mode"] = (saved_match, bool(match_mode))
                 if diff:
                     print(f"Skipping buffer load: flags differ from the run "
                           f"that wrote it {diff} (saved, current)")
@@ -1528,7 +1574,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
                              "DIFF_WIN", "INIT_PATH", "TOTAL_STEPS", "TIME_MIN",
                              "BLUE", "ROLE", "DEF_PROB", "FOUL", "DEF_DIFF",
                              "CRIT_WARM", "STACK", "REPEAT", "BLUE_KICK", "BUF",
-                             "N_YELLOW", "SLURM_JOB_ID")}
+                             "N_YELLOW", "MATCH", "MATCH_S", "SLURM_JOB_ID")}
     with open(f"{final}_replay_buffer.json", "w") as _f:
         json.dump(dict(
             action_repeat=int(action_repeat), frame_stack=int(frame_stack),
@@ -1538,6 +1584,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             # provenance
             role_index=bool(role_index), blue_heuristic=blue_heuristic,
             n_yellow=int(n_yellow),
+            match_mode=bool(match_mode),
+            match_seconds=float(match_seconds) if match_mode else None,
             blue_kick_speed=float(blue_kick_speed),
             defense_frame_prob=float(defense_frame_prob),
             defense_difficulty=float(defense_difficulty),
@@ -1680,6 +1728,14 @@ if __name__ == "__main__":
                         help="Robots on the learning side (2 = 2v2, 3 = 3v2 "
                              "against the two-robot heuristic). Changes the "
                              "obs layout, so no warm start across sizes.")
+    parser.add_argument("--match_mode", action="store_true",
+                        help="Goals do not end the episode: the team that "
+                             "conceded kicks off and play goes on for "
+                             "--match_seconds. Needs --restarts on and "
+                             "--foul_restart on.")
+    parser.add_argument("--match_seconds", type=float, default=60.0,
+                        help="Window length in match mode (60 s = 600 "
+                             "decisions at action repeat 4).")
     parser.add_argument("--critic_warmup_steps", type=int, default=0,
                         help="Freeze actor and alpha for this many env steps "
                              "at the start of a (chained) run so the critic "
@@ -1742,6 +1798,7 @@ if __name__ == "__main__":
         opponent_pool=([p for p in args.opponent_pool.split(",") if p]
                        if args.opponent_pool else None),
         pool_frac=args.pool_frac, n_yellow=args.n_yellow,
+        match_mode=args.match_mode, match_seconds=args.match_seconds,
         pass_bonus=args.pass_bonus,
         goal_reward_solo=args.goal_reward_solo,
         target_action_std=args.target_action_std,

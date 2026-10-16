@@ -68,7 +68,8 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
                 defense_frame_prob=0.0, foul_restart="off",
                 defense_difficulty=1.0, action_repeat=1, blue_kick_speed=6.0,
                 pass_bonus=None, n_yellow=2, match_mode=False,
-                match_seconds=60.0):
+                match_seconds=60.0, no_progress_s=0.0,
+                approach_target="closer"):
     def _init():
         env = SSL2v2SelfPlayEnv(
             reward_type=reward_type, frozen_path=frozen_path,
@@ -125,6 +126,10 @@ def make_env_fn(reward_type, seed, frozen_path, pass_scenario_prob=0.0,
             # conceded kicks off, windows of match_seconds (KICKOFF_* in
             # the env).
             match_mode=match_mode, match_seconds=match_seconds,
+            # Match mode: force start after no_progress_s without progress
+            # of the ball; approach term for the nearest yellow allowed to
+            # touch the ball (NO_PROGRESS_* and _ball_chaser in the env).
+            no_progress_s=no_progress_s, approach_target=approach_target,
         )
         env.reset(seed=seed)
         return env
@@ -368,7 +373,8 @@ class StatsCallback(BaseCallback):
         # Match mode (info carries match_goals_for): per window and kind of
         # opponent, summed over the last 100 windows.
         self.match = {kind: {m: deque(maxlen=100) for m in
-                             ("gf", "ga", "win", "strict", "attacks", "gasp", "seconds")}
+                             ("gf", "ga", "win", "strict", "attacks", "gasp", "seconds",
+                              "noprog")}
                       for kind in ("heuristic", "pool")}
 
     def _on_step(self) -> bool:
@@ -416,6 +422,8 @@ class StatsCallback(BaseCallback):
                 mk["attacks"].append(float(infos[i]["match_attacks"]))
                 mk["gasp"].append(float(infos[i].get("match_goals_after_strict_pass", 0.0)))
                 mk["seconds"].append(float(infos[i].get("match_seconds", 0.0)))
+                if "match_no_progress" in infos[i]:
+                    mk["noprog"].append(float(infos[i]["match_no_progress"]))
             # Pool envs sit at difficulty 1.0 on the "curriculum" frame by
             # construction; they must not move the curriculum statistics
             # (difficulty_end is what the next segment inherits).
@@ -586,6 +594,11 @@ class StatsCallback(BaseCallback):
                                    float(np.sum(mk["strict"])) / max(1.0, float(np.sum(mk["attacks"]))))
                 self.logger.record(f"{tag}/goal_after_pass_share",
                                    float(np.sum(mk["gasp"])) / gf if gf else 0.0)
+                if mk["noprog"]:
+                    # Force starts of the no-progress rule: the stalls it
+                    # had to break up.
+                    self.logger.record(f"{tag}/no_progress_per_min",
+                                       float(np.sum(mk["noprog"])) / minutes)
         for scen, buf in self.drill_success.items():
             if buf:
                 self.logger.record(f"scenario_{scen}/success_rate", float(np.mean(buf)))
@@ -898,7 +911,8 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                   defense_frame_prob=0.0, foul_restart="off",
                   defense_difficulty=1.0, action_repeat=1, blue_kick_speed=6.0,
                   opponents=None, pass_bonus=None, n_yellow=2,
-                  match_mode=False, match_seconds=60.0):
+                  match_mode=False, match_seconds=60.0, no_progress_s=0.0,
+                  approach_target="closer"):
     """`opponents`: one entry per env, None = the run's normal opponent, a
     checkpoint path = that frozen policy as blue (opponent pool). A pool env
     plays the open game against its opponent: start positions fully random
@@ -915,7 +929,8 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
                 difficulty_window, role_index, defense_frame_prob,
                 foul_restart, defense_difficulty, action_repeat,
                 blue_kick_speed, pass_bonus=pass_bonus, n_yellow=n_yellow,
-                match_mode=match_mode, match_seconds=match_seconds)
+                match_mode=match_mode, match_seconds=match_seconds,
+                no_progress_s=no_progress_s, approach_target=approach_target)
         return make_env_fn(
             reward_type, seed + i, opp, pass_scenario_prob,
             curriculum_start_level, None, goal_reward_solo,
@@ -924,7 +939,8 @@ def build_vec_env(n_envs, reward_type, seed, frozen_path, use_subproc, algo,
             difficulty_window, role_index, 0.0,
             foul_restart, defense_difficulty, action_repeat,
             blue_kick_speed, pass_bonus=pass_bonus,
-            match_mode=match_mode, match_seconds=match_seconds)
+            match_mode=match_mode, match_seconds=match_seconds,
+            no_progress_s=no_progress_s, approach_target=approach_target)
     fns = [_fn(i) for i in range(n_envs)]
     if algo == "masac":
         # Joint variants keep the 2-agent pairing intact so the replay buffer
@@ -954,7 +970,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
           defense_difficulty=1.0, critic_warmup_steps=0, frame_stack=1,
           action_repeat=1, blue_kick_speed=6.0,
           opponent_pool=None, pool_frac=0.5, pass_bonus=None, n_yellow=2,
-          match_mode=False, match_seconds=60.0):
+          match_mode=False, match_seconds=60.0, no_progress_s=0.0,
+          approach_target="closer"):
     assert algo in ("masac", "sac"), algo
     assert int(n_yellow) == 2 or algo == "sac", "a bigger yellow team is wired for independent SAC only"
     assert int(action_repeat) >= 1, action_repeat
@@ -1083,10 +1100,17 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
         action_repeat=int(action_repeat),
         blue_kick_speed=blue_kick_speed,
         match_mode=bool(match_mode), match_seconds=float(match_seconds),
+        no_progress_s=float(no_progress_s), approach_target=approach_target,
     )
     if match_mode:
         print(f"Match mode: goals do not end the episode, kickoff after each "
               f"goal, windows of {float(match_seconds):.0f} s")
+    if float(no_progress_s) > 0:
+        print(f"No-progress rule: force start after {float(no_progress_s):g} s "
+              f"without progress of the ball")
+    if approach_target != "closer":
+        print(f"Approach term: nearest yellow allowed to touch the ball "
+              f"(approach_target={approach_target})")
     if int(action_repeat) > 1:
         print(f"Action repeat: {action_repeat} physics steps per decision "
               f"({40 // int(action_repeat)} Hz); step counts below are decisions")
@@ -1382,6 +1406,16 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
                 saved_match = bool(saved_flags.get("match_mode") or False)
                 if saved_match != bool(match_mode):
                     diff["match_mode"] = (saved_match, bool(match_mode))
+                # The no-progress rule and the approach target change the
+                # stored transitions (force starts, who is paid for the
+                # approach); sidecars before 2026-10-16 have neither key
+                # (off, "closer").
+                saved_np = float(saved_flags.get("no_progress_s") or 0.0)
+                if saved_np != float(no_progress_s):
+                    diff["no_progress_s"] = (saved_np, float(no_progress_s))
+                saved_at = saved_flags.get("approach_target") or "closer"
+                if saved_at != approach_target:
+                    diff["approach_target"] = (saved_at, approach_target)
                 if diff:
                     print(f"Skipping buffer load: flags differ from the run "
                           f"that wrote it {diff} (saved, current)")
@@ -1574,7 +1608,8 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
                              "DIFF_WIN", "INIT_PATH", "TOTAL_STEPS", "TIME_MIN",
                              "BLUE", "ROLE", "DEF_PROB", "FOUL", "DEF_DIFF",
                              "CRIT_WARM", "STACK", "REPEAT", "BLUE_KICK", "BUF",
-                             "N_YELLOW", "MATCH", "MATCH_S", "SLURM_JOB_ID")}
+                             "N_YELLOW", "MATCH", "MATCH_S", "NOPROG",
+                             "APPROACH", "SLURM_JOB_ID")}
     with open(f"{final}_replay_buffer.json", "w") as _f:
         json.dump(dict(
             action_repeat=int(action_repeat), frame_stack=int(frame_stack),
@@ -1586,6 +1621,7 @@ def train(reward_type, seed, n_envs, frozen_path, init_path=None,
             n_yellow=int(n_yellow),
             match_mode=bool(match_mode),
             match_seconds=float(match_seconds) if match_mode else None,
+            no_progress_s=float(no_progress_s), approach_target=approach_target,
             blue_kick_speed=float(blue_kick_speed),
             defense_frame_prob=float(defense_frame_prob),
             defense_difficulty=float(defense_difficulty),
@@ -1736,6 +1772,15 @@ if __name__ == "__main__":
     parser.add_argument("--match_seconds", type=float, default=60.0,
                         help="Window length in match mode (60 s = 600 "
                              "decisions at action repeat 4).")
+    parser.add_argument("--no_progress_s", type=float, default=0.0,
+                        help="Match mode: if the ball stays within 0.2 m for "
+                             "this many seconds, force start (every robot "
+                             "0.5 m off the ball, nobody held). 0 = off.")
+    parser.add_argument("--approach_target", choices=["closer", "allowed"],
+                        default="closer",
+                        help="Who the approach term pays: the nearer yellow "
+                             "(closer) or the nearest one the dribbling rule "
+                             "lets touch the ball (allowed).")
     parser.add_argument("--critic_warmup_steps", type=int, default=0,
                         help="Freeze actor and alpha for this many env steps "
                              "at the start of a (chained) run so the critic "
@@ -1799,6 +1844,7 @@ if __name__ == "__main__":
                        if args.opponent_pool else None),
         pool_frac=args.pool_frac, n_yellow=args.n_yellow,
         match_mode=args.match_mode, match_seconds=args.match_seconds,
+        no_progress_s=args.no_progress_s, approach_target=args.approach_target,
         pass_bonus=args.pass_bonus,
         goal_reward_solo=args.goal_reward_solo,
         target_action_std=args.target_action_std,

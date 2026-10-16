@@ -17,7 +17,8 @@ def run_experiment(
     critic_warmup_steps=None, frame_stack=None, action_repeat=None,
     blue_kick_speed=None, run_name=None, drop_init_buffer=False,
     opponent_pool=None, pool_frac=None, pass_bonus=None, n_yellow=None,
-    match_mode=False, match_seconds=None,
+    match_mode=False, match_seconds=None, no_progress_s=None,
+    approach_target=None,
 ):
     # difficulty="inherit": continue at the difficulty the init checkpoint's
     # segment ENDED at. Resolved here, inside the job, because in a chain
@@ -105,6 +106,10 @@ def run_experiment(
         cmd += " --match_mode"
         if match_seconds is not None:
             cmd += f" --match_seconds {match_seconds}"
+        if no_progress_s:
+            cmd += f" --no_progress_s {no_progress_s}"
+    if approach_target:
+        cmd += f" --approach_target {approach_target}"
     if opponent_pool:
         cmd += f" --opponent_pool {opponent_pool}"
         if pool_frac is not None:
@@ -293,6 +298,8 @@ def main():
                 # A chain started with MATCH=1 stays in match mode; a
                 # sidecar without the key (every run before) leaves it off.
                 "MATCH": ("match_mode",), "MATCH_S": ("match_seconds",),
+                # Sidecars before 2026-10-16 have neither key: off, "closer".
+                "NOPROG": ("no_progress_s",), "APPROACH": ("approach_target",),
             }
             for var, keys in mapping.items():
                 if os.environ.get(var) not in (None, ""):
@@ -379,6 +386,11 @@ def main():
     # windows of MATCH_S seconds (default 60). Needs RESTARTS=on, FOUL=on.
     match_mode = os.environ.get("MATCH") == "1"
     match_s = os.environ.get("MATCH_S"); match_s = float(match_s) if match_s else None
+    # NOPROG=10 (match mode): force start after 10 s without progress of
+    # the ball. APPROACH=allowed: the approach term pays the nearest yellow
+    # the dribbling rule lets touch the ball. See NO_PROGRESS_* in the env.
+    noprog = os.environ.get("NOPROG"); noprog = float(noprog) if noprog else None
+    approach = os.environ.get("APPROACH") or None
     # Default "auto": the 09-26 segment ran with BUF unset ("off") and so
     # started with an empty buffer + 10k random actions + critic warm-up on
     # top of a warm policy. "auto" is a no-op without INIT_PATH and refuses
@@ -402,6 +414,7 @@ def main():
         os.environ.get("PASS_BONUS") or None,
         n_yellow,
         match_mode=match_mode, match_seconds=match_s,
+        no_progress_s=noprog, approach_target=approach,
     )
     print(f"Submitted Gen-15 SAC L{level}: job {job.job_id} on {partition} "
           f"for {slurm_time} seed={seed} run_name={run_name or 'auto'} "
@@ -415,6 +428,7 @@ def main():
           f"critic_warmup={crit_warm}, frame_stack={stack}, "
           f"action_repeat={repeat}, blue_kick={blue_kick}, load_buffer={load_buffer}, "
           f"n_yellow={n_yellow or 2}, match={'%gs' % (match_s or 60.0) if match_mode else 'off'}, "
+          f"no_progress={'%gs' % noprog if noprog else 'off'}, approach={approach or 'closer'}, "
           f"steps={total_steps}, time_min={max_minutes}]")
     return job.job_id
 

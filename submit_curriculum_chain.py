@@ -57,7 +57,7 @@ MANAGED = (
     "LEVEL PASS_GATE SOLO DRIBBLE SHAPING RESTARTS DIFF DIFF_THR DIFF_STEP "
     "DIFF_WIN INIT_PATH TOTAL_STEPS TIME_MIN BLUE ROLE DEF_PROB FOUL DEF_DIFF "
     "CRIT_WARM STACK REPEAT BLUE_KICK BUF TIME PARTITION SEED RUN_NAME AFTER N_YELLOW "
-    "INHERIT DROP_INIT_BUF POOL POOL_FRAC PASS_BONUS MATCH MATCH_S"
+    "INHERIT DROP_INIT_BUF POOL POOL_FRAC PASS_BONUS MATCH MATCH_S NOPROG APPROACH"
 ).split()
 
 # I/O layout and opponent: identical on every segment, so no boundary ever
@@ -131,11 +131,20 @@ if SP_SEGS > 0:
 # WITHOUT its replay buffer: those goals are terminal and carry the time
 # bonus. The critic re-fits first (CRIT_WARM), as at every boundary.
 #   SP_SEGS=2 MP_SEGS=4 GO=1 LOOP=1 SEEDS="101 102 103 104 105" python submit_curriculum_chain.py
+# Since 2026-10-16 the stage plays with the no-progress rule (NOPROG, 10 s:
+# force start when the ball does not move) and pays the approach term to
+# the nearest yellow allowed to touch the ball (APPROACH=allowed); the
+# first MP run (tag c15) had neither, NOPROG=0 APPROACH=closer reproduces it.
+# A second MP run beside the first one, from the same SP-2 checkpoints:
+#   TAG=c15mp BASE_TAG=c15 BRANCH=MP SP_SEGS=2 MP_SEGS=4 POOL=... GO=1 LOOP=1 \
+#   SEEDS="101 102 103 104 105" python submit_curriculum_chain.py
 MP_SEGS = int(os.environ.get("MP_SEGS", "0"))
 if MP_SEGS > 0:
     STAGES.append({**STAGES[-1], "name": "MP", "segs": MP_SEGS,
                    "DIFF": "1.0", "MATCH": "1",
                    "MATCH_S": os.environ.get("MATCH_S", "60"),
+                   "NOPROG": os.environ.get("NOPROG", "10"),
+                   "APPROACH": os.environ.get("APPROACH", "allowed"),
                    "keep_buffer": False, "pool": True})
 POOL = None   # set in main(): comma-separated checkpoint paths
 
@@ -375,7 +384,9 @@ def main():
             f"{os.environ.get('POOL_FRAC', '0.5')} of the envs")
     if MP_SEGS > 0:
         log(f"  match-play stage: {MP_SEGS} segments, windows of "
-            f"{os.environ.get('MATCH_S', '60')} s, {log_pool}, "
+            f"{os.environ.get('MATCH_S', '60')} s, no-progress force start after "
+            f"{os.environ.get('NOPROG', '10')} s, approach term to "
+            f"{os.environ.get('APPROACH', 'allowed')}, {log_pool}, "
             f"{os.environ.get('POOL_FRAC', '0.5')} of the envs")
     if not go:
         for n, env, _ in next(iter(chains.values())):

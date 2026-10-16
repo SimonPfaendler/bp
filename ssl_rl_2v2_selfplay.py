@@ -289,6 +289,20 @@ RESTART_FREEZE_STEPS = 40
 KICKOFF_CLEAR_DIST = 0.6        # centre circle (0.5 m) plus the robot radius
 KICKOFF_MATE_DIST = 0.4         # kicking team's other robots, clear of the taker
 KICKOFF_TAKER_CONE_DEG = 60.0
+# No-progress rule (match mode, no_progress_s > 0): as the SSL referee does,
+# a game in which the ball does not move is stopped and resumed with a
+# force start. Without it two learned teams wait each other out: a dribbler
+# duel (both teams hold the ball) or a free ball nobody fetches pays exactly
+# 0, no single decision changes that, and the critic is flat there (MP-4
+# s103 against MP-4 s104 stalled 86-92 % of the time, 2026-10-16). Once the
+# ball has stayed within NO_PROGRESS_DIST of one spot for no_progress_s
+# seconds, every robot within NO_PROGRESS_CLEAR_DIST of it (the SSL stop
+# distance) moves to the nearest free point of that circle, and play goes
+# on at once: nobody is held, either team may play the ball. A ball on a
+# line is pulled RESTART_ROBOT_MARGIN inside first. The attack and its pass
+# state carry on; nobody is charged.
+NO_PROGRESS_DIST = 0.2
+NO_PROGRESS_CLEAR_DIST = 0.5
 # foul_restart="on" (with restarts="on"): the strict dribbling foul is what
 # the SSL rules say it is, a free kick for the opponent at the spot, taken
 # through _do_restart like a ball restart, instead of the episodic stand-in
@@ -554,6 +568,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         n_yellow=N_YELLOW,
         match_mode=False,
         match_seconds=60.0,
+        no_progress_s=0.0,
+        approach_target="closer",
     ):
         # Size of the learning team. 2 is the 2v2 of the whole project and
         # stays bit-identical (same RNG draws, same layout); 3 gives every
@@ -757,6 +773,17 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             assert curriculum_start_level in (None, 5), (
                 "match mode is the open game (curriculum level 5)")
             self.max_steps = int(round(self.match_seconds / 0.025))
+        # No-progress rule (NO_PROGRESS_* above) and the robot the approach
+        # term pays (_ball_chaser). Defaults: off and "closer", as every run
+        # before 2026-10-16.
+        self.no_progress_s = float(no_progress_s)
+        assert self.no_progress_s >= 0.0, no_progress_s
+        assert self.no_progress_s == 0.0 or self.match_mode, (
+            "the no-progress rule is a match-mode rule: no_progress_s needs match_mode")
+        self._np_steps = int(round(self.no_progress_s / 0.025))
+        self._np_anchor = None       # (x, y, step): where the ball last made progress
+        assert approach_target in ("closer", "allowed"), approach_target
+        self.approach_target = approach_target
 
         self.last_dist_ball_goal = None
         self.last_dist_to_ball = None
@@ -912,6 +939,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.ep_start_time = time.time()
 
         self._reset_match_counters()
+        self._np_anchor = None
         # Match mode: options={"start": "kickoff_y" | "kickoff_b"} opens the
         # episode with that team's kickoff (a full match); without it the
         # run's usual random frame.
@@ -1276,6 +1304,13 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # Team flags
         team_has_ball = 1.0 if (self_has_ball or mate_has_ball) else 0.0
         i_am_closer = 1.0 if all(self_dist_ball < d for d in mate_dist_ball) else 0.0
+        if (is_yellow and self.approach_target == "allowed"
+                and any(b is not None for b in self.dribble_ban_y)):
+            # The flag follows the approach term (_ball_chaser): with the
+            # nearer yellow banned it marks the mate, which cannot see the
+            # ban otherwise (the MATE block has no ban flag).
+            yd = [math.hypot(r.x - ball.x, r.y - ball.y) for r in self._yellows()]
+            i_am_closer = 1.0 if self._ball_chaser(yd) == idx else 0.0
 
         # MATE (9 per team-mate, closest first); slots 18-26 for the first.
         mate_dims = []
@@ -1514,7 +1549,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         # checkpoint trained at. The counter starts at 0 on reset, so with
         # k == self.action_repeat blue decides on exactly the physics steps
         # on which yellow's new action arrives. A restart does not force a
-        # fresh decision: yellow's held action is not refreshed either.
+        # fresh decision: yellow's held action is not refreshed either. (The
+        # kickoff of match mode does, _do_kickoff.)
         if self._blue_hold <= 0 or self._blue_cached is None:
             self._blue_cached = self._frozen_policy_action()
             self._blue_hold = k
@@ -1824,6 +1860,14 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 self.match_result = -1
             return rewards, done, truncated
 
+        if self._np_steps and self._no_progress(ball):
+            # No-progress rule (NO_PROGRESS_* above): force start after
+            # this step, nobody pays.
+            self.match_no_progress += 1
+            self._restart_pending = True
+            self._restart_spec = ("force_start", None, 0.0, 0.0)
+            return rewards, done, truncated
+
         if self.reward_type == "dense":
             dists = [math.hypot(r.x - ball.x, r.y - ball.y) for r in yellows]
             any_has = any(
@@ -1839,8 +1883,13 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             # moving away is what a kick looks like from the kicker's side.
             no_exits = self.restarts == "on"
             lo = 0.0 if (drill or team_shaping or no_exits) else -0.05
-            # The closer yellow; a tie goes to the lower index.
-            closer = min(range(n), key=lambda i: (dists[i], i))
+            # The closer yellow; a tie goes to the lower index. With
+            # approach_target="allowed" the closer of those the dribbling
+            # rule lets touch the ball (_ball_chaser).
+            if self.approach_target == "allowed":
+                closer = self._ball_chaser(dists)
+            else:
+                closer = min(range(n), key=lambda i: (dists[i], i))
             for i in range(n):
                 if team_shaping and i != closer:
                     continue
@@ -2091,6 +2140,10 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             self._restart_spec = None
             self._do_kickoff(kicker)
             return
+        if self._restart_spec is not None and self._restart_spec[0] == "force_start":
+            self._restart_spec = None
+            self._do_force_start()
+            return
         max_x = self.field.length / 2.0
         max_y = self.field.width / 2.0
         cur = self.frame
@@ -2205,6 +2258,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
             (self.dribble_start_pos_b, None),
         ):
             lst[0] = lst[1] = val
+        self._np_anchor = None   # the no-progress clock starts over
 
     # ---------- match mode ----------
 
@@ -2219,6 +2273,7 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.match_blue_passes = 0
         self.match_blue_passes_strict = 0
         self.match_blue_goals_after_strict_pass = 0
+        self.match_no_progress = 0   # force starts of the no-progress rule
 
     def _match_goal(self, rewards, yellow_scored):
         """Match mode: book a goal and schedule the kickoff. Same payoff as
@@ -2329,7 +2384,96 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         self.must_release_b = [False] * N_BLUE
         self._outside = {key: False for key in self._robot_keys()}
         self._blue_hold = 0          # a frozen learned blue decides afresh
+        self._np_anchor = None
         self._start_new_attack()
+
+    def _no_progress(self, ball):
+        """No-progress rule: True once the ball has stayed within
+        NO_PROGRESS_DIST of one spot for no_progress_s seconds. Every real
+        move of the ball sets the spot and the clock afresh."""
+        a = self._np_anchor
+        if a is None or math.hypot(ball.x - a[0], ball.y - a[1]) >= NO_PROGRESS_DIST:
+            self._np_anchor = (ball.x, ball.y, self.current_step)
+            return False
+        return self.current_step - a[2] >= self._np_steps
+
+    def _do_force_start(self):
+        """No-progress rule (NO_PROGRESS_* above): stop, clear the ball and
+        go on. The ball stays where it is (RESTART_ROBOT_MARGIN inside),
+        every robot within NO_PROGRESS_CLEAR_DIST of it moves to the nearest
+        free point of that circle, the nearest robot first so that the two
+        of a dribbler duel end up on opposite sides; the others stay. Nobody
+        is held. Everything a teleport invalidates starts over as in
+        _do_kickoff; the attack and its pass state go on."""
+        max_x = self.field.length / 2.0
+        max_y = self.field.width / 2.0
+        lim_x = max_x - RESTART_ROBOT_MARGIN
+        lim_y = max_y - RESTART_ROBOT_MARGIN
+        cur = self.frame
+        bx = float(np.clip(cur.ball.x, -lim_x, lim_x))
+        by = float(np.clip(cur.ball.y, -lim_y, lim_y))
+        robots = {("y", i): cur.robots_yellow[i] for i in range(self.n_yellow)}
+        robots.update({("b", i): cur.robots_blue[i] for i in range(N_BLUE)})
+        new, movers = {}, []
+        for key, r in robots.items():
+            x, y = float(np.clip(r.x, -lim_x, lim_x)), float(np.clip(r.y, -lim_y, lim_y))
+            d = math.hypot(x - bx, y - by)
+            if d < NO_PROGRESS_CLEAR_DIST:
+                movers.append((d, key, x, y))
+            else:
+                new[key] = (x, y, float(r.theta))
+        placed = [(x, y) for x, y, _ in new.values()]
+        for _d, key, x, y in sorted(movers):
+            x, y = self._clear_spot(x, y, bx, by, max_x, max_y, placed,
+                                    radius=NO_PROGRESS_CLEAR_DIST)
+            new[key] = (x, y, float(robots[key].theta))
+            placed.append((x, y))
+        pos = Frame()
+        pos.ball = Ball(x=bx, y=by, v_x=0.0, v_y=0.0)
+        # Insert in index order: the simulator reads the dicts in order.
+        for key, team_out in (("y", pos.robots_yellow), ("b", pos.robots_blue)):
+            for i in range(self.n_yellow if key == "y" else N_BLUE):
+                x, y, theta = new[(key, i)]
+                team_out[i] = Robot(x=x, y=y, theta=theta)
+        self.rsim.reset(pos)
+        self.frame = self.rsim.get_frame()
+        self.last_frame = self.frame
+        self._freeze = None
+        self._np_anchor = None
+        self.last_dist_ball_goal = None
+        self.last_dist_to_ball = None
+        self.last_ball_pos = None
+        self.last_dist_to_goal_y = None
+        self._release = None
+        self._strict_pending = None
+        self.last_yellow_carrier = None
+        self.blue_touched_since_yellow = False
+        if self._blue_pass is not None:
+            self._blue_pass.on_restart()
+        if self._pass_shadow_y is not None:
+            self._pass_shadow_y.on_restart()
+        self._dribble_foul = False
+        self._dribble_foul_by = None
+        self.is_dribbling_y = [False] * self.n_yellow
+        self.dribble_start_pos_y = [None] * self.n_yellow
+        self.must_release_y = [False] * self.n_yellow
+        self.dribble_ban_y = [None] * self.n_yellow
+        self.is_dribbling_b = [False] * N_BLUE
+        self.dribble_start_pos_b = [None] * N_BLUE
+        self.must_release_b = [False] * N_BLUE
+        self._outside = {key: False for key in self._robot_keys()}
+        # _blue_hold is left alone: a restart does not force a fresh blue
+        # decision (see _compute_blue_action), blue stays in step with yellow.
+
+    def _ball_chaser(self, dists):
+        """approach_target="allowed": the yellow the approach term pays and
+        i_am_closer marks, the nearest one the strict dribbling rule lets
+        touch the ball (all banned: the nearest). With "closer" a banned
+        robot next to the ball was paid for a ball it may not touch and its
+        mate got nothing: nobody fetched it (39 % of the stalled time of
+        MP-4 s103 against L5-6 s101, 2026-10-16)."""
+        allowed = [i for i in range(len(dists)) if self.dribble_ban_y[i] is None]
+        return min(allowed or range(len(dists)), key=lambda i: (dists[i], i))
 
     def _match_info(self, info):
         """Match mode: statistics of the whole window. The legacy keys keep
@@ -2350,6 +2494,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         info["match_goals_after_strict_pass"] = float(self.match_goals_after_strict_pass)
         info["match_attacks"] = float(gf + ga + 1)
         info["match_seconds"] = self.current_step * 0.025
+        if self._np_steps:
+            info["match_no_progress"] = float(self.match_no_progress)
         if self._blue_pass is not None:
             info["blue_passes"] = self.match_blue_passes + self._blue_pass.passes
             info["blue_passes_strict"] = (
@@ -2358,9 +2504,11 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
                 self.match_blue_goals_after_strict_pass / ga if ga else 0.0)
 
     @staticmethod
-    def _clear_spot(x, y, bx, by, max_x, max_y, occupied=()):
-        """Point RESTART_CLEAR_DIST from the ball, inside the robot margin
-        box and not on top of an already placed robot, closest to (x, y).
+    def _clear_spot(x, y, bx, by, max_x, max_y, occupied=(), radius=RESTART_CLEAR_DIST):
+        """Point `radius` from the ball (RESTART_CLEAR_DIST; the force start
+        of the no-progress rule passes NO_PROGRESS_CLEAR_DIST), inside the
+        robot margin box and not on top of an already placed robot, closest
+        to (x, y).
         The ball is at least RESTART_ROBOT_MARGIN inside, so the inward
         half of the circle always has candidates; the occupancy filter is
         dropped if it would leave none."""
@@ -2369,8 +2517,8 @@ class SSL2v2SelfPlayEnv(SSLBaseEnv):
         cands = []
         for k in range(36):
             a = math.radians(10.0 * k)
-            cx = bx + RESTART_CLEAR_DIST * math.cos(a)
-            cy = by + RESTART_CLEAR_DIST * math.sin(a)
+            cx = bx + radius * math.cos(a)
+            cy = by + radius * math.sin(a)
             if abs(cx) <= lim_x and abs(cy) <= lim_y:
                 cands.append((cx, cy))
         free = [c for c in cands
